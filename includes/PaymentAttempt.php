@@ -22,7 +22,7 @@ class PaymentAttempt
     {
         $attempt['status'] = self::normalize_status(isset($attempt['status']) ? (string) $attempt['status'] : 'created');
 
-        self::store_attempt_meta($order, $attempt);
+        self::store_attempt_meta($order, $attempt, true);
 
         $history = self::get_meta($order, self::META_ATTEMPT_HISTORY);
         if (!is_array($history)) {
@@ -66,11 +66,15 @@ class PaymentAttempt
     {
         $attempt = self::current($order);
         foreach ($fields as $key => $value) {
+            if (self::is_identifier_field($key) && self::is_empty_identifier($value) && !self::is_empty_identifier(isset($attempt[$key]) ? $attempt[$key] : null)) {
+                continue;
+            }
+
             $attempt[$key] = $value;
         }
         $attempt['status'] = self::normalize_status($status);
 
-        self::store_attempt_meta($order, $attempt);
+        self::store_attempt_meta($order, $attempt, false);
         self::update_meta($order, self::META_CURRENT_ATTEMPT, $attempt);
         self::save($order);
 
@@ -118,7 +122,7 @@ class PaymentAttempt
      * @param object $order WooCommerce order-like object.
      * @param array<string, mixed> $attempt
      */
-    private static function store_attempt_meta($order, array $attempt): void
+    private static function store_attempt_meta($order, array $attempt, bool $replaceCurrentSnapshot): void
     {
         $metaMap = array(
             'trace_id' => self::META_CURRENT_TRACE_ID,
@@ -131,8 +135,27 @@ class PaymentAttempt
         foreach ($metaMap as $field => $metaKey) {
             if (array_key_exists($field, $attempt)) {
                 self::update_meta($order, $metaKey, $attempt[$field]);
+            } elseif ($replaceCurrentSnapshot) {
+                self::delete_meta($order, $metaKey);
             }
         }
+    }
+
+    private static function is_identifier_field(string $field): bool
+    {
+        return in_array($field, array('trace_id', 'transaction_id', 'charge_id', 'terminal_id'), true);
+    }
+
+    /**
+     * @param mixed $value
+     */
+    private static function is_empty_identifier($value): bool
+    {
+        if ($value === null || $value === false) {
+            return true;
+        }
+
+        return is_string($value) && trim($value) === '';
     }
 
     /**
@@ -156,6 +179,16 @@ class PaymentAttempt
     {
         if (is_object($order) && method_exists($order, 'update_meta_data')) {
             $order->update_meta_data($key, $value);
+        }
+    }
+
+    /**
+     * @param object $order WooCommerce order-like object.
+     */
+    private static function delete_meta($order, string $key): void
+    {
+        if (is_object($order) && method_exists($order, 'delete_meta_data')) {
+            $order->delete_meta_data($key);
         }
     }
 

@@ -50,6 +50,46 @@ if (!function_exists('delete_transient')) {
     }
 }
 
+
+if (!function_exists('get_option')) {
+    function get_option($option, $default = false)
+    {
+        if (array_key_exists($option, $GLOBALS['patwc_payment_attempt_options'])) {
+            return $GLOBALS['patwc_payment_attempt_options'][$option];
+        }
+
+        return array_key_exists($option, $GLOBALS['patwc_options']) ? $GLOBALS['patwc_options'][$option] : $default;
+    }
+}
+
+if (!function_exists('add_option')) {
+    function add_option($option, $value = '', $deprecated = '', $autoload = 'yes')
+    {
+        $GLOBALS['patwc_payment_attempt_add_option_calls'][] = array(
+            'option' => $option,
+            'value' => $value,
+            'autoload' => $autoload,
+        );
+
+        if (array_key_exists($option, $GLOBALS['patwc_payment_attempt_options'])) {
+            return false;
+        }
+
+        $GLOBALS['patwc_payment_attempt_options'][$option] = $value;
+
+        return true;
+    }
+}
+
+if (!function_exists('delete_option')) {
+    function delete_option($option)
+    {
+        unset($GLOBALS['patwc_payment_attempt_options'][$option]);
+
+        return true;
+    }
+}
+
 class PatwcPaymentAttemptRegressionOrder
 {
     /** @var int */
@@ -113,9 +153,23 @@ function patwc_payment_attempt_assert_false($actual, string $message): void
     }
 }
 
+
+function patwc_payment_attempt_assert_array_not_has_key(string $key, array $array, string $message): void
+{
+    if (array_key_exists($key, $array)) {
+        throw new RuntimeException($message . ' Did not expect key ' . $key . ' in ' . var_export($array, true) . '.');
+    }
+}
+
 function patwc_payment_attempt_reset_transients(): void
 {
     $GLOBALS['patwc_payment_attempt_transients'] = array();
+}
+
+function patwc_payment_attempt_reset_options(): void
+{
+    $GLOBALS['patwc_payment_attempt_options'] = array();
+    $GLOBALS['patwc_payment_attempt_add_option_calls'] = array();
 }
 
 $order = new PatwcPaymentAttemptRegressionOrder(5001);
@@ -159,6 +213,40 @@ patwc_payment_attempt_assert_same('txn-002', $updatedWithFields['transaction_id'
 patwc_payment_attempt_assert_same('charge-002', $order->meta[PaymentAttempt::META_CURRENT_CHARGE_ID], 'update_status should update charge id meta when provided.');
 patwc_payment_attempt_assert_same('term-002', $order->meta[PaymentAttempt::META_CURRENT_TERMINAL_ID], 'update_status should update terminal id meta when provided.');
 
+
+$replacementOrder = new PatwcPaymentAttemptRegressionOrder(5003);
+PaymentAttempt::record_new($replacementOrder, array(
+    'trace_id' => 'first-trace',
+    'transaction_id' => 'first-txn',
+    'status' => 'created',
+    'charge_id' => 'first-charge',
+    'terminal_id' => 'first-terminal',
+));
+$replacementAttempt = PaymentAttempt::record_new($replacementOrder, array(
+    'trace_id' => 'second-trace',
+    'transaction_id' => 'second-txn',
+    'status' => 'pending',
+    'terminal_id' => 'second-terminal',
+));
+patwc_payment_attempt_assert_array_not_has_key(PaymentAttempt::META_CURRENT_CHARGE_ID, $replacementOrder->meta, 'record_new should clear stale charge id meta when new attempt omits charge_id.');
+patwc_payment_attempt_assert_array_not_has_key('charge_id', $replacementAttempt, 'record_new should not inherit omitted charge_id into the current attempt.');
+patwc_payment_attempt_assert_array_not_has_key('charge_id', PaymentAttempt::current($replacementOrder), 'current attempt should not expose a stale charge_id after replacement.');
+
+$emptyIdentifierUpdate = PaymentAttempt::update_status($order, 'processing', array(
+    'trace_id' => '',
+    'transaction_id' => null,
+    'charge_id' => false,
+    'terminal_id' => '',
+));
+patwc_payment_attempt_assert_same('trace-002', $emptyIdentifierUpdate['trace_id'], 'update_status should refuse to erase trace id with an empty field.');
+patwc_payment_attempt_assert_same('txn-002', $emptyIdentifierUpdate['transaction_id'], 'update_status should refuse to erase transaction id with a null field.');
+patwc_payment_attempt_assert_same('charge-002', $emptyIdentifierUpdate['charge_id'], 'update_status should refuse to erase charge id with a false field.');
+patwc_payment_attempt_assert_same('term-002', $emptyIdentifierUpdate['terminal_id'], 'update_status should refuse to erase terminal id with an empty field.');
+patwc_payment_attempt_assert_same('trace-002', $order->meta[PaymentAttempt::META_CURRENT_TRACE_ID], 'update_status should preserve trace id meta when empty field is provided.');
+patwc_payment_attempt_assert_same('txn-002', $order->meta[PaymentAttempt::META_CURRENT_TRANSACTION_ID], 'update_status should preserve transaction id meta when null field is provided.');
+patwc_payment_attempt_assert_same('charge-002', $order->meta[PaymentAttempt::META_CURRENT_CHARGE_ID], 'update_status should preserve charge id meta when false field is provided.');
+patwc_payment_attempt_assert_same('term-002', $order->meta[PaymentAttempt::META_CURRENT_TERMINAL_ID], 'update_status should preserve terminal id meta when empty field is provided.');
+
 $legacyOrder = new PatwcPaymentAttemptRegressionOrder(5002);
 $legacyOrder->update_meta_data(PaymentAttempt::META_CURRENT_TRACE_ID, 'legacy-trace');
 $legacyOrder->update_meta_data(PaymentAttempt::META_CURRENT_TRANSACTION_ID, 'legacy-txn');
@@ -195,6 +283,7 @@ patwc_payment_attempt_assert_same('failure', PaymentAttempt::normalize_status('f
 patwc_payment_attempt_assert_same('dup transaction', PaymentAttempt::normalize_status('dup transaction'), 'dup transaction should remain a final unpaid status.');
 
 patwc_payment_attempt_reset_transients();
+patwc_payment_attempt_reset_options();
 $firstLockRan = false;
 $firstLockResult = PaymentLock::with_lock(6001, 'sale', function () use (&$firstLockRan): array {
     $firstLockRan = true;
@@ -205,6 +294,7 @@ patwc_payment_attempt_assert_true($firstLockRan, 'First lock should run callback
 patwc_payment_attempt_assert_same(array('status' => 'ok'), $firstLockResult, 'First lock should return callback result.');
 
 patwc_payment_attempt_reset_transients();
+patwc_payment_attempt_reset_options();
 $nestedCallbackRan = false;
 $nestedConflict = PaymentLock::with_lock(6002, 'sale', function () use (&$nestedCallbackRan): array {
     return PaymentLock::with_lock(6002, 'sale', function () use (&$nestedCallbackRan): array {
@@ -219,8 +309,11 @@ patwc_payment_attempt_assert_same(array(
     'continue_polling' => true,
 ), $nestedConflict, 'Active lock should return conflict.');
 patwc_payment_attempt_assert_false($nestedCallbackRan, 'Active lock should not run nested callback.');
+patwc_payment_attempt_assert_same(2, count($GLOBALS['patwc_payment_attempt_add_option_calls']), 'Nested lock should make one atomic add_option acquisition attempt per with_lock call.');
+patwc_payment_attempt_assert_same('no', $GLOBALS['patwc_payment_attempt_add_option_calls'][0]['autoload'], 'Lock options should not autoload.');
 
 patwc_payment_attempt_reset_transients();
+patwc_payment_attempt_reset_options();
 $exceptionWasThrown = false;
 try {
     PaymentLock::with_lock(6003, 'void sale', function (): array {

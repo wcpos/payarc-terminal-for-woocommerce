@@ -13,7 +13,7 @@ class PaymentLock
 {
     private const LOCK_TTL_SECONDS = 30;
 
-    /** @var array<string, bool> */
+    /** @var array<string, array<string, int>> */
     private static $fallbackLocks = array();
 
     /**
@@ -23,15 +23,13 @@ class PaymentLock
     {
         $key = self::lock_key($order_id, $operation);
 
-        if (self::has_lock($key)) {
+        if (!self::acquire_lock($key)) {
             return array(
                 'status' => 'conflict',
                 'message' => 'Another PayArc operation is already in progress for this order.',
                 'continue_polling' => true,
             );
         }
-
-        self::set_lock($key);
 
         try {
             $result = $callback();
@@ -57,30 +55,44 @@ class PaymentLock
         return 'patwc_lock_' . $order_id . '_' . $sanitizedOperation;
     }
 
-    private static function has_lock(string $key): bool
+    private static function acquire_lock(string $key): bool
     {
-        if (function_exists('get_transient')) {
-            return get_transient($key) !== false;
+        $payload = array('expires_at' => time() + self::LOCK_TTL_SECONDS);
+
+        if (function_exists('add_option')) {
+            if (add_option($key, $payload, '', 'no')) {
+                return true;
+            }
+
+            if (function_exists('get_option') && function_exists('delete_option')) {
+                $existing = get_option($key, false);
+                if (is_array($existing) && isset($existing['expires_at']) && (int) $existing['expires_at'] < time()) {
+                    delete_option($key);
+
+                    return add_option($key, $payload, '', 'no');
+                }
+            }
+
+            return false;
         }
 
-        return array_key_exists($key, self::$fallbackLocks) && self::$fallbackLocks[$key] === true;
-    }
-
-    private static function set_lock(string $key): void
-    {
-        if (function_exists('set_transient')) {
-            set_transient($key, 1, self::LOCK_TTL_SECONDS);
-
-            return;
+        if (array_key_exists($key, self::$fallbackLocks)) {
+            if ((int) self::$fallbackLocks[$key]['expires_at'] < time()) {
+                unset(self::$fallbackLocks[$key]);
+            } else {
+                return false;
+            }
         }
 
-        self::$fallbackLocks[$key] = true;
+        self::$fallbackLocks[$key] = $payload;
+
+        return true;
     }
 
     private static function release_lock(string $key): void
     {
-        if (function_exists('delete_transient')) {
-            delete_transient($key);
+        if (function_exists('delete_option')) {
+            delete_option($key);
 
             return;
         }
