@@ -6,6 +6,8 @@ use InvalidArgumentException;
 
 class PayArcIds
 {
+    private const MIN_HASH_SUFFIX_LENGTH = 8;
+
     public static function transaction_id(int $order_id, string $attempt_uuid): string
     {
         if ($order_id < 0) {
@@ -13,11 +15,12 @@ class PayArcIds
         }
 
         $orderPart = strtoupper(base_convert((string) $order_id, 10, 36));
-        $prefix = 'P' . $orderPart;
         $hash = strtoupper(sha1((string) $order_id . '|' . $attempt_uuid));
-        $suffixLength = max(0, 16 - strlen($prefix));
+        $orderLength = max(0, 16 - 1 - self::MIN_HASH_SUFFIX_LENGTH);
+        $prefix = 'P' . substr($orderPart, 0, $orderLength);
+        $suffixLength = 16 - strlen($prefix);
 
-        return substr($prefix . substr($hash, 0, $suffixLength), 0, 16);
+        return $prefix . substr($hash, 0, $suffixLength);
     }
 
     public static function idempotency_key(): string

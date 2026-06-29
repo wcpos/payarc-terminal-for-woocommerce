@@ -44,7 +44,7 @@ class Money
                 throw new InvalidArgumentException('Currency does not support fractional amounts: ' . $currency);
             }
 
-            return (int) $whole;
+            return self::decimal_string_to_int($whole);
         }
 
         if (strlen($fraction) > $precision) {
@@ -53,7 +53,7 @@ class Money
 
         $fraction = str_pad($fraction, $precision, '0');
 
-        return (int) ($whole . $fraction);
+        return self::decimal_string_to_int($whole . $fraction);
     }
 
     /**
@@ -68,11 +68,7 @@ class Money
 
         $currency = strtoupper(trim($currency));
         $subtotal = self::to_minor_units($amount, $currency);
-        $total = $subtotal + $tip + $tax;
-
-        if ($total < 0) {
-            throw new InvalidArgumentException('Total must not be negative.');
-        }
+        $total = self::checked_add(self::checked_add($subtotal, $tip), $tax);
 
         return array(
             'total' => $total,
@@ -81,6 +77,33 @@ class Money
             'tip' => $tip,
             'tax' => $tax,
         );
+    }
+
+
+    private static function decimal_string_to_int(string $value): int
+    {
+        $normalized = ltrim($value, '0');
+
+        if ($normalized === '') {
+            $normalized = '0';
+        }
+
+        $max = (string) PHP_INT_MAX;
+
+        if (strlen($normalized) > strlen($max) || (strlen($normalized) === strlen($max) && strcmp($normalized, $max) > 0)) {
+            throw new InvalidArgumentException('Amount exceeds PHP integer range.');
+        }
+
+        return (int) $normalized;
+    }
+
+    private static function checked_add(int $left, int $right): int
+    {
+        if ($right > PHP_INT_MAX - $left) {
+            throw new InvalidArgumentException('Amount total exceeds PHP integer range.');
+        }
+
+        return $left + $right;
     }
 
     /**
