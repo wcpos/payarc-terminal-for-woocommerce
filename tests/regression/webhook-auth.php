@@ -7,6 +7,7 @@
 declare(strict_types=1);
 
 use WCPOS\WooCommercePOS\PayArcTerminal\PaymentAttempt;
+use WCPOS\WooCommercePOS\PayArcTerminal\PaymentLock;
 use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
 use WCPOS\WooCommercePOS\PayArcTerminal\WebhookHandler;
 
@@ -14,6 +15,7 @@ $root = dirname(__DIR__, 2);
 foreach (array(
     $root . '/includes/Settings.php',
     $root . '/includes/PaymentAttempt.php',
+    $root . '/includes/PaymentLock.php',
     $root . '/includes/WebhookHandler.php',
 ) as $file) {
     if (!is_readable($file)) {
@@ -85,12 +87,19 @@ class PatwcWebhookAuthFakeClient
         'status' => 'SUCCESS',
     );
 
+    /** @var callable|null */
+    public $get_transaction_callback = null;
+
     /**
      * @return array<string, mixed>
      */
     public function get_transaction(string $trace_id): array
     {
         $this->get_calls[] = $trace_id;
+
+        if ($this->get_transaction_callback !== null) {
+            call_user_func($this->get_transaction_callback, $trace_id);
+        }
 
         return $this->transaction_response;
     }
@@ -186,3 +195,35 @@ patwc_webhook_assert_same(202, $noTrace['status_code'], 'Valid SUCCESS callback 
 patwc_webhook_assert_same(array(), $noTraceClient->get_calls, 'Callback without trace id should not fetch transaction.');
 patwc_webhook_assert_same(array(), $noTraceReconciler->calls, 'Callback without trace id should not reconcile raw callback body.');
 patwc_webhook_assert_same(array(), $noTraceOrder->payment_complete_calls, 'Callback without trace id should not complete payment from raw body.');
+
+
+$lockedOrder = new PatwcWebhookAuthOrder(2003);
+PaymentAttempt::record_new($lockedOrder, array('status' => 'processing', 'trace_id' => 'trace-lock', 'transaction_id' => 'txn-lock'));
+$lockedClient = new PatwcWebhookAuthFakeClient();
+$lockedClient->transaction_response = array('traceId' => 'trace-lock', 'transactionId' => 'txn-lock', 'status' => 'SUCCESS');
+$lockedReconciler = new PatwcWebhookAuthFakeReconciler();
+$lockedHandler = patwc_webhook_handler($lockedClient, $lockedReconciler, $lockedOrder);
+$nestedLockResponse = null;
+$nestedLockInvoked = false;
+$lockedClient->get_transaction_callback = function () use (&$nestedLockResponse, &$nestedLockInvoked, $lockedHandler): void {
+    if ($nestedLockInvoked) {
+        return;
+    }
+
+    $nestedLockInvoked = true;
+    $nestedLockResponse = $lockedHandler->handle_request(json_encode(array(
+        'traceId' => 'trace-lock',
+        'status' => 'SUCCESS',
+        'metadata' => array('order_id' => '2003'),
+    )), array('HTTP_AUTHORIZATION' => 'Bearer expected-token'));
+};
+$outerLockResponse = $lockedHandler->handle_request(json_encode(array(
+    'traceId' => 'trace-lock',
+    'status' => 'SUCCESS',
+    'metadata' => array('order_id' => '2003'),
+)), array('HTTP_AUTHORIZATION' => 'Bearer expected-token'));
+patwc_webhook_assert_same(200, $outerLockResponse['status_code'], 'Outer locked callback should complete normally.');
+patwc_webhook_assert_same(202, $nestedLockResponse['status_code'], 'Nested locked callback should return accepted while reconciliation is in progress.');
+patwc_webhook_assert_same('in_progress', $nestedLockResponse['body']['status'], 'Nested locked callback should report in_progress.');
+patwc_webhook_assert_same(array('trace-lock'), $lockedClient->get_calls, 'Nested locked callback should not fetch a second transaction.');
+patwc_webhook_assert_same(1, count($lockedReconciler->calls), 'Nested locked callback should not reconcile a second time.');

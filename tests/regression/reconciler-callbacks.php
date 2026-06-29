@@ -134,6 +134,13 @@ function patwc_reconciler_assert_contains(string $needle, string $haystack, stri
     }
 }
 
+function patwc_reconciler_assert_array_not_has_key(string $key, array $array, string $message): void
+{
+    if (array_key_exists($key, $array)) {
+        throw new RuntimeException($message . ' Did not expect key ' . $key . ' in ' . var_export($array, true) . '.');
+    }
+}
+
 function patwc_reconciler_payload(array $overrides = array()): array
 {
     return array_replace_recursive(array(
@@ -233,6 +240,11 @@ patwc_reconciler_assert_same('verification_failed', $amountMismatch['status'], '
 patwc_reconciler_assert_same('failure', PaymentAttempt::current($amountMismatchOrder)['status'], 'Amount mismatch should store failure-like attempt status.');
 patwc_reconciler_assert_contains('amount', $amountMismatchOrder->meta['_patwc_verification_failure'], 'Amount mismatch should store verification failure meta.');
 patwc_reconciler_assert_false($amountMismatchOrder->is_paid(), 'Amount mismatch should leave order unpaid.');
+patwc_reconciler_assert_array_not_has_key('_patwc_charge_id', $amountMismatchOrder->meta, 'Amount mismatch should not store charge detail meta.');
+patwc_reconciler_assert_array_not_has_key('_patwc_card_brand', $amountMismatchOrder->meta, 'Amount mismatch should not store card brand detail meta.');
+patwc_reconciler_assert_array_not_has_key('_patwc_card_entry_mode', $amountMismatchOrder->meta, 'Amount mismatch should not store card entry detail meta.');
+patwc_reconciler_assert_array_not_has_key('_patwc_card_last4', $amountMismatchOrder->meta, 'Amount mismatch should not store card last4 detail meta.');
+patwc_reconciler_assert_array_not_has_key('charge_id', PaymentAttempt::current($amountMismatchOrder), 'Amount mismatch should not store current attempt charge id.');
 
 $currencyMismatchOrder = new PatwcReconcilerCallbacksOrder(1006, '10.23', 'USD');
 PaymentAttempt::record_new($currencyMismatchOrder, array('status' => 'processing', 'trace_id' => 'trace-1006', 'transaction_id' => 'txn-1006'));
@@ -246,6 +258,27 @@ $currencyMismatch = $reconciler->reconcile($currencyMismatchOrder, patwc_reconci
 patwc_reconciler_assert_same('verification_failed', $currencyMismatch['status'], 'Currency mismatch should return verification_failed.');
 patwc_reconciler_assert_contains('currency', $currencyMismatchOrder->meta['_patwc_verification_failure'], 'Currency mismatch should store verification failure meta.');
 patwc_reconciler_assert_false($currencyMismatchOrder->is_paid(), 'Currency mismatch should leave order unpaid.');
+patwc_reconciler_assert_array_not_has_key('_patwc_charge_id', $currencyMismatchOrder->meta, 'Currency mismatch should not store charge detail meta.');
+patwc_reconciler_assert_array_not_has_key('_patwc_card_brand', $currencyMismatchOrder->meta, 'Currency mismatch should not store card brand detail meta.');
+patwc_reconciler_assert_array_not_has_key('_patwc_card_entry_mode', $currencyMismatchOrder->meta, 'Currency mismatch should not store card entry detail meta.');
+patwc_reconciler_assert_array_not_has_key('_patwc_card_last4', $currencyMismatchOrder->meta, 'Currency mismatch should not store card last4 detail meta.');
+patwc_reconciler_assert_array_not_has_key('charge_id', PaymentAttempt::current($currencyMismatchOrder), 'Currency mismatch should not store current attempt charge id.');
+
+$decimalMinorUnitOrder = new PatwcReconcilerCallbacksOrder(1011);
+PaymentAttempt::record_new($decimalMinorUnitOrder, array('status' => 'processing', 'trace_id' => 'trace-1011', 'transaction_id' => 'txn-1011'));
+$decimalMinorUnit = $reconciler->reconcile($decimalMinorUnitOrder, patwc_reconciler_payload(array(
+    'traceId' => 'trace-1011',
+    'transactionId' => 'txn-1011',
+    'chargeId' => 'charge-1011',
+    'amount' => array('approved' => '1023.99', 'total' => 1023, 'currency' => 'USD'),
+    'metadata' => array('order_id' => '1011'),
+)), 'webhook');
+patwc_reconciler_assert_same('verification_failed', $decimalMinorUnit['status'], 'Malformed fractional approved amount should fail verification.');
+patwc_reconciler_assert_false($decimalMinorUnitOrder->is_paid(), 'Malformed fractional approved amount should leave order unpaid.');
+patwc_reconciler_assert_same(array(), $decimalMinorUnitOrder->payment_complete_calls, 'Malformed fractional approved amount should not complete payment.');
+patwc_reconciler_assert_array_not_has_key('_patwc_charge_id', $decimalMinorUnitOrder->meta, 'Malformed fractional approved amount should not store charge detail meta.');
+patwc_reconciler_assert_array_not_has_key('_patwc_card_last4', $decimalMinorUnitOrder->meta, 'Malformed fractional approved amount should not store card last4 detail meta.');
+patwc_reconciler_assert_array_not_has_key('charge_id', PaymentAttempt::current($decimalMinorUnitOrder), 'Malformed fractional approved amount should not store current attempt charge id.');
 
 $duplicateOrder = new PatwcReconcilerCallbacksOrder(1007);
 PaymentAttempt::record_new($duplicateOrder, array('status' => 'processing', 'trace_id' => 'trace-1007', 'transaction_id' => 'txn-1007'));

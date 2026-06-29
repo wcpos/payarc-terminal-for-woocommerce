@@ -92,6 +92,27 @@ class WebhookHandler
             return $this->response(202, array('status' => 'accepted_without_trace'));
         }
 
+        $lockedResponse = PaymentLock::with_lock($this->order_id($order), 'webhook_reconcile', function () use ($order, $traceId): array {
+            return $this->fetch_and_reconcile($order, $traceId);
+        });
+
+        if (isset($lockedResponse['status_code']) && isset($lockedResponse['body']) && is_array($lockedResponse['body'])) {
+            return $lockedResponse;
+        }
+
+        if (isset($lockedResponse['status']) && $lockedResponse['status'] === 'conflict') {
+            return $this->response(202, array('status' => 'in_progress'));
+        }
+
+        return $this->response(500, array('error' => 'reconciliation_failed'));
+    }
+
+    /**
+     * @param object $order
+     * @return array<string, mixed>
+     */
+    private function fetch_and_reconcile($order, string $traceId): array
+    {
         try {
             $transaction = $this->client->get_transaction($traceId);
         } catch (Throwable $exception) {
@@ -108,6 +129,18 @@ class WebhookHandler
         }
 
         return $this->response(200, array('status' => 'ok', 'result' => $result));
+    }
+
+    /**
+     * @param object $order
+     */
+    private function order_id($order): int
+    {
+        if (!is_object($order) || !method_exists($order, 'get_id')) {
+            throw new RuntimeException('Order id is unavailable.');
+        }
+
+        return (int) $order->get_id();
     }
 
     /**

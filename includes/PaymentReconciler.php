@@ -65,12 +65,10 @@ class PaymentReconciler
             return is_scalar($value) && trim((string) $value) !== '';
         });
 
-        $this->store_detail_meta($order, $payload, $chargeId);
-
         if ($status === 'success') {
             $amountVerification = $this->verify_success_amount($order, $payload);
             if (!$amountVerification['valid']) {
-                PaymentAttempt::update_status($order, 'failure', $fields);
+                PaymentAttempt::update_status($order, 'failure', $this->safe_identifier_fields($fields));
                 $this->store_verification_failure($order, $amountVerification['message']);
                 $this->add_note($order, 'PayArc reconciliation verification failed: ' . $amountVerification['message']);
                 $this->save($order);
@@ -78,6 +76,8 @@ class PaymentReconciler
                 return array('status' => 'verification_failed', 'continue_polling' => false, 'message' => $amountVerification['message']);
             }
         }
+
+        $this->store_detail_meta($order, $payload, $chargeId);
 
         $attempt = PaymentAttempt::update_status($order, $status, $fields);
         $isFinal = $status === 'success' || PaymentAttempt::is_final_unpaid($status);
@@ -200,17 +200,46 @@ class PaymentReconciler
     {
         if (isset($payload['amount']) && is_array($payload['amount'])) {
             foreach (array('approved', 'total') as $key) {
-                if (array_key_exists($key, $payload['amount']) && is_numeric($payload['amount'][$key])) {
-                    return (int) $payload['amount'][$key];
+                if (array_key_exists($key, $payload['amount'])) {
+                    return $this->parse_minor_unit_value($payload['amount'][$key]);
                 }
             }
+
+            return null;
         }
 
-        if (isset($payload['amount']) && is_numeric($payload['amount'])) {
-            return (int) $payload['amount'];
+        if (array_key_exists('amount', $payload)) {
+            return $this->parse_minor_unit_value($payload['amount']);
         }
 
         return null;
+    }
+
+    /**
+     * @param mixed $value
+     */
+    private function parse_minor_unit_value($value): ?int
+    {
+        if (is_int($value)) {
+            return $value >= 0 ? $value : null;
+        }
+
+        if (is_string($value) && preg_match('/^\d+$/', $value) === 1) {
+            return (int) $value;
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string, mixed> $fields
+     * @return array<string, mixed>
+     */
+    private function safe_identifier_fields(array $fields): array
+    {
+        unset($fields['charge_id']);
+
+        return $fields;
     }
 
     /**
