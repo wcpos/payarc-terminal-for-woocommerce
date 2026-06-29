@@ -25,10 +25,14 @@ $GLOBALS['captured'] = array();
 Logger::log('Bearer live_secret_token', array(
     'headers' => array(
         'Authorization' => 'Bearer live_authorization_token',
+        'X-Api-Key' => 'header-api-key-secret',
     ),
     'api_bearer_token' => 'api-secret',
     'callback_bearer_token' => 'callback-secret',
     'token' => 'payarc-token',
+    'accessToken' => 'access-token-secret',
+    'bearerToken' => 'bearer-token-secret',
+    'apiKey' => 'api-key-secret',
     'nested' => array(
         'payarc_token' => 'payarc-nested-secret',
     ),
@@ -40,7 +44,7 @@ if (!is_string($encoded)) {
     throw new RuntimeException('Unable to encode captured log output.');
 }
 
-foreach (array('live_secret_token', 'live_authorization_token', 'api-secret', 'callback-secret', 'payarc-token', 'payarc-nested-secret') as $secret) {
+foreach (array('live_secret_token', 'live_authorization_token', 'api-secret', 'callback-secret', 'payarc-token', 'access-token-secret', 'bearer-token-secret', 'api-key-secret', 'payarc-nested-secret', 'header-api-key-secret') as $secret) {
     if (strpos($encoded, $secret) !== false) {
         throw new RuntimeException('Secret was not redacted: ' . $secret);
     }

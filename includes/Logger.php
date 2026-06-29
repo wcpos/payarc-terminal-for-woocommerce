@@ -67,7 +67,24 @@ class Logger
 
     private static function isSecretKey(string $key): bool
     {
-        $normalized = strtolower(str_replace(array('-', ' '), '_', $key));
+        $wordSeparated = preg_replace('/([a-z0-9])([A-Z])/', '$1_$2', $key);
+        if (!is_string($wordSeparated)) {
+            $wordSeparated = $key;
+        }
+
+        $normalized = strtolower($wordSeparated);
+        $normalized = preg_replace('/[^a-z0-9]+/', '_', $normalized);
+        if (!is_string($normalized)) {
+            $normalized = strtolower($wordSeparated);
+        }
+
+        $normalized = preg_replace('/_+/', '_', $normalized);
+        if (!is_string($normalized)) {
+            $normalized = strtolower($wordSeparated);
+        }
+
+        $normalized = trim($normalized, '_');
+        $compact = str_replace('_', '', $normalized);
 
         if ($normalized === 'authorization') {
             return true;
@@ -85,7 +102,17 @@ class Logger
             return true;
         }
 
-        return $normalized === 'token' || substr($normalized, -6) === '_token';
+        if (strpos($normalized, 'api_key') !== false || strpos($compact, 'apikey') !== false) {
+            return true;
+        }
+
+        foreach (array('authorization', 'token', 'bearer', 'secret', 'password', 'credential') as $indicator) {
+            if (strpos($normalized, $indicator) !== false) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static function redactString(string $value): string
