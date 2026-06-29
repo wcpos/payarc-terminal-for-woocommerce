@@ -102,6 +102,29 @@ if (!is_string($encodedRequest) || strpos($encodedRequest, 'callback-secret-toke
     throw new RuntimeException('Sale request must not include callback bearer token.');
 }
 
+
+$GLOBALS['patwc_client_requests'] = array();
+$timeoutPayload = array(
+    'traceId' => 'trace_timeout_123',
+    'status' => 'TIMEOUT',
+    'transactionId' => 'P000000ABCDEF12',
+    'error' => array(
+        'code' => 'TERMINAL_TIMEOUT',
+        'message' => 'Terminal timed out waiting for card presentation.',
+        'friendlyMessage' => 'The terminal timed out.',
+    ),
+);
+$GLOBALS['patwc_client_response'] = array(
+    'response' => array('code' => 200),
+    'body' => json_encode($timeoutPayload),
+);
+
+$timeoutResult = $client->get_transaction('trace_timeout_123');
+patwc_client_assert_same($timeoutPayload, $timeoutResult, 'Transaction outcome payloads with top-level error should be returned for reconciliation.');
+patwc_client_assert_same(1, count($GLOBALS['patwc_client_requests']), 'Get transaction should make one HTTP request.');
+patwc_client_assert_same('https://testpayarcconnectapi.payarc.net/v3/transactions/trace_timeout_123', $GLOBALS['patwc_client_requests'][0]['url'], 'Get transaction URL mismatch.');
+patwc_client_assert_same('GET', $GLOBALS['patwc_client_requests'][0]['args']['method'], 'Get transaction method mismatch.');
+
 $GLOBALS['patwc_client_requests'] = array();
 $GLOBALS['patwc_client_response'] = array(
     'response' => array('code' => 400),

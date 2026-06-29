@@ -166,9 +166,10 @@ class PayArcClient
     private function is_payarc_failure(array $decoded): bool
     {
         $response = isset($decoded['response']) && is_array($decoded['response']) ? $decoded['response'] : array();
-        $status = isset($response['status']) && is_scalar($response['status']) ? strtoupper((string) $response['status']) : '';
+        $responseStatus = isset($response['status']) && is_scalar($response['status']) ? strtoupper((string) $response['status']) : '';
+        $topLevelStatus = isset($decoded['status']) && is_scalar($decoded['status']) ? strtoupper((string) $decoded['status']) : '';
 
-        return $status === 'FAILURE' || isset($response['error']) || isset($decoded['error']);
+        return $responseStatus === 'FAILURE' || $topLevelStatus === 'FAILURE';
     }
 
     /**
