@@ -59,6 +59,16 @@ if (!function_exists('wp_salt')) {
     }
 }
 
+if (!function_exists('wp_verify_nonce')) {
+    function wp_verify_nonce($nonce, $action = -1)
+    {
+        return !empty($GLOBALS['patwc_ajax_valid_nonces'][(string) $action])
+            && $GLOBALS['patwc_ajax_valid_nonces'][(string) $action] === (string) $nonce
+            ? 1
+            : false;
+    }
+}
+
 
 class PatwcAjaxOrder
 {
@@ -152,6 +162,10 @@ function patwc_ajax_reset_env(): void
 {
     $GLOBALS['patwc_ajax_actions'] = array();
     $GLOBALS['patwc_ajax_caps'] = array();
+    $GLOBALS['patwc_ajax_valid_nonces'] = array(
+        'patwc_payment' => 'valid-payment-nonce',
+        'patwc_validate_settings' => 'valid-settings-nonce',
+    );
 }
 
 /**
@@ -193,6 +207,14 @@ patwc_ajax_assert_same(403, $unauthorizedValidate['status_code'], 'Validate sett
 patwc_ajax_assert_true(!isset($unauthorizedValidate['body']['diagnostics']), 'Unauthorized validate settings should not include diagnostics.');
 
 $GLOBALS['patwc_ajax_caps'] = array('manage_woocommerce' => true);
+$missingNonceStart = $handler->handle_start(array('order_id' => '1001'));
+patwc_ajax_assert_same(403, $missingNonceStart['status_code'], 'Manager lifecycle without nonce should be rejected.');
+patwc_ajax_assert_same(array(), $service->start_calls, 'Missing lifecycle nonce should not call payment service.');
+
+$invalidNonceStart = $handler->handle_start(array('order_id' => '1001', '_ajax_nonce' => 'invalid-payment-nonce'));
+patwc_ajax_assert_same(403, $invalidNonceStart['status_code'], 'Manager lifecycle with invalid nonce should be rejected.');
+patwc_ajax_assert_same(array(), $service->start_calls, 'Invalid lifecycle nonce should not call payment service.');
+
 $service->start_response = array(
     'status' => 'created',
     'trace_id' => 'trace-created',
@@ -206,7 +228,7 @@ $service->start_response = array(
     'processor' => array('code' => '00'),
     'unexpected_internal' => 'do-not-emit',
 );
-$start = $handler->handle_start(array('order_id' => '1001', 'terminal_id' => 'term-1'));
+$start = $handler->handle_start(array('order_id' => '1001', 'terminal_id' => 'term-1', '_ajax_nonce' => 'valid-payment-nonce'));
 patwc_ajax_assert_same(200, $start['status_code'], 'Manager should start payment.');
 patwc_ajax_assert_same(array(array('order_id' => 1001, 'terminal_id' => 'term-1')), $service->start_calls, 'Start should call payment service with terminal id.');
 patwc_ajax_assert_same('trace-created', $start['body']['trace_id'], 'Created response with a real trace should include non-empty trace id.');
@@ -216,7 +238,7 @@ patwc_ajax_assert_same(true, $start['body']['continue_polling'], 'Created respon
 patwc_ajax_assert_missing_keys($start['body'], array('attempt_uuid', 'transaction_id', 'terminal_id', 'sale_response', 'attempt', 'provider_response', 'card', 'processor', 'unexpected_internal'), 'Start response should omit internal service fields.');
 
 $service->poll_response = array('status' => 'success', 'transaction_id' => 'txn-secret', 'processor' => array('code' => '00'), 'unexpected_internal' => 'do-not-emit');
-$poll = $handler->handle_poll(array('order_id' => '1001'));
+$poll = $handler->handle_poll(array('order_id' => '1001', 'nonce' => 'valid-payment-nonce'));
 patwc_ajax_assert_same(200, $poll['status_code'], 'Manager should poll payment.');
 patwc_ajax_assert_same(array(1001), $service->poll_calls, 'Poll should call payment service.');
 patwc_ajax_assert_same(true, $poll['body']['submit_form'], 'Success response should submit form.');
@@ -224,7 +246,7 @@ patwc_ajax_assert_same(false, $poll['body']['continue_polling'], 'Success respon
 patwc_ajax_assert_missing_keys($poll['body'], array('transaction_id', 'processor', 'unexpected_internal'), 'Poll response should omit internal service fields.');
 
 $service->cancel_response = array('status' => 'cancel_requested', 'terminal_id' => 'terminal-secret', 'attempt' => array('nested' => 'attempt payload'), 'unexpected_internal' => 'do-not-emit');
-$cancel = $handler->handle_cancel(array('order_id' => '1001'));
+$cancel = $handler->handle_cancel(array('order_id' => '1001', 'security' => 'valid-payment-nonce'));
 patwc_ajax_assert_same(200, $cancel['status_code'], 'Manager should cancel payment.');
 patwc_ajax_assert_same(array(1001), $service->cancel_calls, 'Cancel should call payment service.');
 patwc_ajax_assert_same(true, $cancel['body']['continue_polling'], 'Cancel requested should continue polling.');
@@ -234,7 +256,7 @@ patwc_ajax_reset_env();
 $service = new PatwcAjaxFakePaymentService();
 $handler = patwc_ajax_handler($service, $orders);
 $GLOBALS['patwc_ajax_caps'] = array('edit_shop_order:1001' => true);
-$editAccess = $handler->handle_poll(array('order_id' => '1001'));
+$editAccess = $handler->handle_poll(array('order_id' => '1001', '_ajax_nonce' => 'valid-payment-nonce'));
 patwc_ajax_assert_same(200, $editAccess['status_code'], 'User who can edit the shop order should access lifecycle actions.');
 patwc_ajax_assert_same(array(1001), $service->poll_calls, 'Edit access should call poll service.');
 
@@ -242,9 +264,13 @@ patwc_ajax_reset_env();
 $service = new PatwcAjaxFakePaymentService();
 $handler = patwc_ajax_handler($service, $orders);
 $token = AjaxHandler::order_token_for($order);
-$tokenStart = $handler->handle_start(array('order_id' => '1001', 'order_token' => $token));
-$tokenPoll = $handler->handle_poll(array('order_id' => '1001', 'order_token' => $token));
-$tokenCancel = $handler->handle_cancel(array('order_id' => '1001', 'order_token' => $token));
+$tokenWithoutNonce = $handler->handle_start(array('order_id' => '1001', 'order_token' => $token));
+patwc_ajax_assert_same(403, $tokenWithoutNonce['status_code'], 'Order token lifecycle without nonce should be rejected.');
+patwc_ajax_assert_same(array(), $service->start_calls, 'Order token without nonce should not call payment service.');
+
+$tokenStart = $handler->handle_start(array('order_id' => '1001', 'order_token' => $token, '_ajax_nonce' => 'valid-payment-nonce'));
+$tokenPoll = $handler->handle_poll(array('order_id' => '1001', 'order_token' => $token, 'nonce' => 'valid-payment-nonce'));
+$tokenCancel = $handler->handle_cancel(array('order_id' => '1001', 'order_token' => $token, 'security' => 'valid-payment-nonce'));
 patwc_ajax_assert_same(200, $tokenStart['status_code'], 'Valid order token should start matching order.');
 patwc_ajax_assert_same(200, $tokenPoll['status_code'], 'Valid order token should poll matching order.');
 patwc_ajax_assert_same(200, $tokenCancel['status_code'], 'Valid order token should cancel matching order.');
@@ -253,16 +279,16 @@ patwc_ajax_assert_same(array(1001), $service->poll_calls, 'Token poll should cal
 patwc_ajax_assert_same(array(1001), $service->cancel_calls, 'Token cancel should call service.');
 
 $wrongOrderToken = AjaxHandler::order_token_for($otherOrder);
-$wrongOrder = $handler->handle_start(array('order_id' => '1001', 'order_token' => $wrongOrderToken));
+$wrongOrder = $handler->handle_start(array('order_id' => '1001', 'order_token' => $wrongOrderToken, '_ajax_nonce' => 'valid-payment-nonce'));
 patwc_ajax_assert_same(403, $wrongOrder['status_code'], 'Token for a different order should be rejected.');
 
-$invalidToken = $handler->handle_start(array('order_id' => '1001', 'order_token' => '1001:not-a-valid-signature'));
+$invalidToken = $handler->handle_start(array('order_id' => '1001', 'order_token' => '1001:not-a-valid-signature', '_ajax_nonce' => 'valid-payment-nonce'));
 patwc_ajax_assert_same(403, $invalidToken['status_code'], 'Invalid token should be rejected.');
 
-$missingOrderId = $handler->handle_start(array('order_token' => $token));
+$missingOrderId = $handler->handle_start(array('order_token' => $token, '_ajax_nonce' => 'valid-payment-nonce'));
 patwc_ajax_assert_same(400, $missingOrderId['status_code'], 'Missing order id should be rejected.');
 
-$notFound = $handler->handle_start(array('order_id' => '9999', 'order_token' => '9999:anything'));
+$notFound = $handler->handle_start(array('order_id' => '9999', 'order_token' => '9999:anything', '_ajax_nonce' => 'valid-payment-nonce'));
 patwc_ajax_assert_same(404, $notFound['status_code'], 'Nonexistent order should be rejected.');
 
 patwc_ajax_reset_env();
@@ -270,7 +296,7 @@ $service = new PatwcAjaxFakePaymentService();
 $handler = patwc_ajax_handler($service, $orders);
 $GLOBALS['patwc_ajax_caps'] = array('manage_woocommerce' => true);
 $service->start_response = array('status' => 'created');
-$createdWithoutTrace = $handler->handle_start(array('order_id' => '1001'));
+$createdWithoutTrace = $handler->handle_start(array('order_id' => '1001', '_ajax_nonce' => 'valid-payment-nonce'));
 patwc_ajax_assert_same(200, $createdWithoutTrace['status_code'], 'Created without synchronous trace should remain a successful pending response.');
 patwc_ajax_assert_same('pending_callback', $createdWithoutTrace['body']['status'], 'Created without trace should be normalized to pending callback.');
 patwc_ajax_assert_same('Payment sent to terminal.', $createdWithoutTrace['body']['message'], 'Pending callback should preserve safe user message.');
@@ -278,20 +304,24 @@ patwc_ajax_assert_same(true, $createdWithoutTrace['body']['continue_polling'], '
 patwc_ajax_assert_true(!isset($createdWithoutTrace['body']['trace_id']) || trim((string) $createdWithoutTrace['body']['trace_id']) === '', 'Pending callback should not invent a trace id.');
 
 $service->start_response = array('status' => 'decline');
-$decline = $handler->handle_start(array('order_id' => '1001'));
+$decline = $handler->handle_start(array('order_id' => '1001', '_ajax_nonce' => 'valid-payment-nonce'));
 patwc_ajax_assert_same(true, $decline['body']['retry_allowed'], 'Decline response should allow retry.');
 patwc_ajax_assert_same(false, $decline['body']['continue_polling'], 'Decline response should stop polling.');
 
 $service->poll_response = array('status' => 'existing_attempt');
-$existing = $handler->handle_poll(array('order_id' => '1001'));
+$existing = $handler->handle_poll(array('order_id' => '1001', '_ajax_nonce' => 'valid-payment-nonce'));
 patwc_ajax_assert_same(true, $existing['body']['continue_polling'], 'Existing attempt should continue polling.');
 
 $service->poll_response = array('status' => 'pending_callback');
-$pending = $handler->handle_poll(array('order_id' => '1001'));
+$pending = $handler->handle_poll(array('order_id' => '1001', '_ajax_nonce' => 'valid-payment-nonce'));
 patwc_ajax_assert_same(true, $pending['body']['continue_polling'], 'Pending callback should continue polling.');
 
 $startCallsBeforeValidate = $service->start_calls;
-$validate = $handler->handle_validate_settings(array());
+$validateMissingNonce = $handler->handle_validate_settings(array());
+patwc_ajax_assert_same(403, $validateMissingNonce['status_code'], 'Validate settings should require nonce for managers.');
+patwc_ajax_assert_true(!isset($validateMissingNonce['body']['diagnostics']), 'Validate settings without nonce should not include diagnostics.');
+
+$validate = $handler->handle_validate_settings(array('_ajax_nonce' => 'valid-settings-nonce'));
 patwc_ajax_assert_same(200, $validate['status_code'], 'Validate settings should return success status.');
 patwc_ajax_assert_same('ok', $validate['body']['status'], 'Validate settings should return local ok status.');
 patwc_ajax_assert_same(Settings::GATEWAY_ID, $validate['body']['diagnostics']['gateway_id'], 'Validate settings should include local diagnostics.');
@@ -305,7 +335,7 @@ try {
         }
     };
     $throwingHandler = patwc_ajax_handler($throwingService, $orders);
-    $exceptionResponse = $throwingHandler->handle_start(array('order_id' => '1001'));
+    $exceptionResponse = $throwingHandler->handle_start(array('order_id' => '1001', '_ajax_nonce' => 'valid-payment-nonce'));
     patwc_ajax_assert_same(500, $exceptionResponse['status_code'], 'Exceptions should return 500.');
     patwc_ajax_assert_same('Unable to process payment request.', $exceptionResponse['body']['message'], 'Exceptions should not leak raw messages.');
 } finally {

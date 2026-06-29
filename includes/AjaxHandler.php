@@ -77,7 +77,12 @@ class AjaxHandler
     public function handle_validate_settings(?array $request = null)
     {
         $emit = $request === null;
+        $request = $this->request($request);
         if (!function_exists('current_user_can') || !current_user_can('manage_woocommerce')) {
+            return $this->maybe_emit($this->error_response(403, 'Access denied.'), $emit);
+        }
+
+        if (!$this->has_valid_nonce($request, 'patwc_validate_settings')) {
             return $this->maybe_emit($this->error_response(403, 'Access denied.'), $emit);
         }
 
@@ -146,6 +151,11 @@ class AjaxHandler
     {
         $emit = $request === null;
         $request = $this->request($request);
+
+        if (!$this->has_valid_nonce($request, 'patwc_payment')) {
+            return $this->maybe_emit($this->error_response(403, 'Access denied.'), $emit);
+        }
+
         $orderId = $this->order_id_from_request($request);
 
         if ($orderId <= 0) {
@@ -192,6 +202,32 @@ class AjaxHandler
         }
 
         return $_REQUEST;
+    }
+
+    /**
+     * @param array<string, mixed> $request
+     */
+    private function has_valid_nonce(array $request, string $action): bool
+    {
+        if (!function_exists('wp_verify_nonce')) {
+            return false;
+        }
+
+        $nonce = '';
+        foreach (array('_ajax_nonce', 'nonce', 'security') as $key) {
+            if (isset($request[$key]) && is_scalar($request[$key])) {
+                $nonce = trim((string) $request[$key]);
+                if ($nonce !== '') {
+                    break;
+                }
+            }
+        }
+
+        if ($nonce === '') {
+            return false;
+        }
+
+        return wp_verify_nonce($nonce, $action) !== false;
     }
 
     /**
