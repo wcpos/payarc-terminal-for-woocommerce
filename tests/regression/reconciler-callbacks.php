@@ -280,6 +280,58 @@ patwc_reconciler_assert_array_not_has_key('_patwc_charge_id', $decimalMinorUnitO
 patwc_reconciler_assert_array_not_has_key('_patwc_card_last4', $decimalMinorUnitOrder->meta, 'Malformed fractional approved amount should not store card last4 detail meta.');
 patwc_reconciler_assert_array_not_has_key('charge_id', PaymentAttempt::current($decimalMinorUnitOrder), 'Malformed fractional approved amount should not store current attempt charge id.');
 
+$oversizedMinorUnitOrder = new PatwcReconcilerCallbacksOrder(1012, '92233720368547758.07', 'USD');
+PaymentAttempt::record_new($oversizedMinorUnitOrder, array('status' => 'processing', 'trace_id' => 'trace-1012', 'transaction_id' => 'txn-1012'));
+$oversizedMinorUnit = $reconciler->reconcile($oversizedMinorUnitOrder, patwc_reconciler_payload(array(
+    'traceId' => 'trace-1012',
+    'transactionId' => 'txn-1012',
+    'chargeId' => 'charge-1012',
+    'amount' => array('approved' => '9223372036854775808', 'total' => 9223372036854775807, 'currency' => 'USD'),
+    'metadata' => array('order_id' => '1012'),
+)), 'webhook');
+patwc_reconciler_assert_same('verification_failed', $oversizedMinorUnit['status'], 'Oversized approved amount string should fail verification.');
+patwc_reconciler_assert_false($oversizedMinorUnitOrder->is_paid(), 'Oversized approved amount string should leave order unpaid.');
+patwc_reconciler_assert_same(array(), $oversizedMinorUnitOrder->payment_complete_calls, 'Oversized approved amount string should not complete payment.');
+patwc_reconciler_assert_array_not_has_key('_patwc_charge_id', $oversizedMinorUnitOrder->meta, 'Oversized approved amount string should not store charge detail meta.');
+patwc_reconciler_assert_array_not_has_key('_patwc_card_last4', $oversizedMinorUnitOrder->meta, 'Oversized approved amount string should not store card last4 detail meta.');
+patwc_reconciler_assert_array_not_has_key('charge_id', PaymentAttempt::current($oversizedMinorUnitOrder), 'Oversized approved amount string should not store current attempt charge id.');
+
+$floatMinorUnitOrder = new PatwcReconcilerCallbacksOrder(1013);
+PaymentAttempt::record_new($floatMinorUnitOrder, array('status' => 'processing', 'trace_id' => 'trace-1013', 'transaction_id' => 'txn-1013'));
+$floatMinorUnit = $reconciler->reconcile($floatMinorUnitOrder, patwc_reconciler_payload(array(
+    'traceId' => 'trace-1013',
+    'transactionId' => 'txn-1013',
+    'chargeId' => 'charge-1013',
+    'amount' => array('approved' => 1023.0, 'total' => 1023, 'currency' => 'USD'),
+    'metadata' => array('order_id' => '1013'),
+)), 'webhook');
+patwc_reconciler_assert_same('verification_failed', $floatMinorUnit['status'], 'Float approved amount should fail verification.');
+patwc_reconciler_assert_same(array(), $floatMinorUnitOrder->payment_complete_calls, 'Float approved amount should not complete payment.');
+
+$scientificMinorUnitOrder = new PatwcReconcilerCallbacksOrder(1014);
+PaymentAttempt::record_new($scientificMinorUnitOrder, array('status' => 'processing', 'trace_id' => 'trace-1014', 'transaction_id' => 'txn-1014'));
+$scientificMinorUnit = $reconciler->reconcile($scientificMinorUnitOrder, patwc_reconciler_payload(array(
+    'traceId' => 'trace-1014',
+    'transactionId' => 'txn-1014',
+    'chargeId' => 'charge-1014',
+    'amount' => array('approved' => '1.023e3', 'total' => 1023, 'currency' => 'USD'),
+    'metadata' => array('order_id' => '1014'),
+)), 'webhook');
+patwc_reconciler_assert_same('verification_failed', $scientificMinorUnit['status'], 'Scientific notation approved amount should fail verification.');
+patwc_reconciler_assert_same(array(), $scientificMinorUnitOrder->payment_complete_calls, 'Scientific notation approved amount should not complete payment.');
+
+$negativeMinorUnitOrder = new PatwcReconcilerCallbacksOrder(1015);
+PaymentAttempt::record_new($negativeMinorUnitOrder, array('status' => 'processing', 'trace_id' => 'trace-1015', 'transaction_id' => 'txn-1015'));
+$negativeMinorUnit = $reconciler->reconcile($negativeMinorUnitOrder, patwc_reconciler_payload(array(
+    'traceId' => 'trace-1015',
+    'transactionId' => 'txn-1015',
+    'chargeId' => 'charge-1015',
+    'amount' => array('approved' => '-1023', 'total' => 1023, 'currency' => 'USD'),
+    'metadata' => array('order_id' => '1015'),
+)), 'webhook');
+patwc_reconciler_assert_same('verification_failed', $negativeMinorUnit['status'], 'Negative approved amount should fail verification.');
+patwc_reconciler_assert_same(array(), $negativeMinorUnitOrder->payment_complete_calls, 'Negative approved amount should not complete payment.');
+
 $duplicateOrder = new PatwcReconcilerCallbacksOrder(1007);
 PaymentAttempt::record_new($duplicateOrder, array('status' => 'processing', 'trace_id' => 'trace-1007', 'transaction_id' => 'txn-1007'));
 $duplicatePayload = patwc_reconciler_payload(array(

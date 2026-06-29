@@ -225,7 +225,17 @@ class PaymentReconciler
         }
 
         if (is_string($value) && preg_match('/^\d+$/', $value) === 1) {
-            return (int) $value;
+            $normalized = ltrim($value, '0');
+            if ($normalized === '') {
+                $normalized = '0';
+            }
+
+            $max = (string) PHP_INT_MAX;
+            if (strlen($normalized) > strlen($max) || (strlen($normalized) === strlen($max) && strcmp($normalized, $max) > 0)) {
+                return null;
+            }
+
+            return (int) $normalized;
         }
 
         return null;
