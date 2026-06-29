@@ -53,11 +53,11 @@ class PayArcPaymentService
             return array('status' => 'already_paid', 'continue_polling' => false);
         }
 
-        return PaymentLock::with_lock($this->order_id($order), 'start', function () use ($order, $terminal_id): array {
+        return PaymentLock::with_lock($this->order_id($order), 'terminal', function () use ($order, $terminal_id): array {
             $current = PaymentAttempt::current($order);
             $currentStatus = isset($current['status']) ? (string) $current['status'] : '';
 
-            if ($this->has_existing_attempt($current) && PaymentAttempt::is_non_final($currentStatus)) {
+            if ($this->has_existing_attempt($current) && $this->is_in_flight_status($currentStatus)) {
                 return array('status' => 'existing_attempt', 'attempt' => $current, 'continue_polling' => true);
             }
 
@@ -118,22 +118,41 @@ class PayArcPaymentService
             return $attempt;
         }
 
-        if (!PaymentAttempt::is_non_final($status)) {
+        if (!$this->is_in_flight_status($status)) {
             $attempt['continue_polling'] = false;
 
             return $attempt;
         }
 
-        if ($this->is_poll_throttled($order)) {
-            $attempt['continue_polling'] = true;
+        return PaymentLock::with_lock($this->order_id($order), 'poll', function () use ($order): array {
+            $attempt = PaymentAttempt::current($order);
+            $status = isset($attempt['status']) ? (string) $attempt['status'] : 'created';
+            $traceId = isset($attempt['trace_id']) && is_scalar($attempt['trace_id']) ? trim((string) $attempt['trace_id']) : '';
 
-            return $attempt;
-        }
+            if ($traceId === '') {
+                $attempt['status'] = 'pending_callback';
+                $attempt['continue_polling'] = true;
 
-        $this->store_last_poll_at($order, $this->now());
-        $payload = $this->client->get_transaction($traceId);
+                return $attempt;
+            }
 
-        return $this->reconcile($order, $payload, 'poll');
+            if (!$this->is_in_flight_status($status)) {
+                $attempt['continue_polling'] = false;
+
+                return $attempt;
+            }
+
+            if ($this->is_poll_throttled($order)) {
+                $attempt['continue_polling'] = true;
+
+                return $attempt;
+            }
+
+            $this->store_last_poll_at($order, $this->now());
+            $payload = $this->client->get_transaction($traceId);
+
+            return $this->reconcile($order, $payload, 'poll');
+        });
     }
 
     /**
@@ -142,7 +161,7 @@ class PayArcPaymentService
      */
     public function cancel_order_payment($order): array
     {
-        return PaymentLock::with_lock($this->order_id($order), 'cancel', function () use ($order): array {
+        return PaymentLock::with_lock($this->order_id($order), 'terminal', function () use ($order): array {
             $attempt = PaymentAttempt::current($order);
             $status = isset($attempt['status']) ? (string) $attempt['status'] : 'created';
             $traceId = isset($attempt['trace_id']) && is_scalar($attempt['trace_id']) ? trim((string) $attempt['trace_id']) : '';
@@ -155,7 +174,7 @@ class PayArcPaymentService
                 );
             }
 
-            if (!PaymentAttempt::is_non_final($status)) {
+            if (!$this->is_in_flight_status($status)) {
                 $attempt['continue_polling'] = false;
 
                 return $attempt;
@@ -178,7 +197,10 @@ class PayArcPaymentService
                 throw $exception;
             }
 
-            return PaymentAttempt::update_status($order, 'cancel_requested');
+            $updated = PaymentAttempt::update_status($order, 'cancel_requested', array('continue_polling' => true));
+            $updated['continue_polling'] = true;
+
+            return $updated;
         });
     }
 
@@ -194,6 +216,12 @@ class PayArcPaymentService
         }
 
         return false;
+    }
+
+
+    private function is_in_flight_status(string $status): bool
+    {
+        return PaymentAttempt::is_non_final($status) || PaymentAttempt::normalize_status($status) === 'cancel_requested';
     }
 
     /**
@@ -296,9 +324,9 @@ class PayArcPaymentService
     {
         $reconciler = $this->reconciler;
 
-        if ($reconciler === null && class_exists(__NAMESPACE__ . '\\PaymentReconciler')) {
-            $class = __NAMESPACE__ . '\\PaymentReconciler';
-            $reconciler = new $class($this->settings);
+        $fallbackClass = '\\WCPOS\\WooCommercePOS\\PayArcTerminal\\PaymentReconciler';
+        if ($reconciler === null && class_exists($fallbackClass)) {
+            $reconciler = new $fallbackClass($this->settings);
         }
 
         if ($reconciler === null || !method_exists($reconciler, 'reconcile')) {
@@ -317,6 +345,13 @@ class PayArcPaymentService
     private function is_already_processed_error(Throwable $exception): bool
     {
         $message = strtolower($exception->getMessage());
+        $upperMessage = strtoupper($exception->getMessage());
+
+        foreach (array('TRANSACTION_CANNOT_BE_CANCELLED', 'TRANSACTION_CANNOT_BE_CANCELED', 'CANNOT_BE_CANCELLED', 'CANNOT_BE_CANCELED', 'ALREADY_PROCESSED') as $code) {
+            if (strpos($upperMessage, $code) !== false) {
+                return true;
+            }
+        }
 
         return strpos($message, 'already processed') !== false
             || strpos($message, 'already been processed') !== false

@@ -164,6 +164,12 @@ class PatwcPaymentServiceFakeClient
     /** @var array<string, mixed>|Throwable */
     public $cancel_response = array('status' => 'ACCEPTED');
 
+    /** @var callable|null */
+    public $sale_callback = null;
+
+    /** @var callable|null */
+    public $get_transaction_callback = null;
+
     /**
      * @param array<string, mixed> $payload
      * @return array<string, mixed>
@@ -171,6 +177,10 @@ class PatwcPaymentServiceFakeClient
     public function sale(array $payload, string $idempotency_key): array
     {
         $this->sale_calls[] = array('payload' => $payload, 'idempotency_key' => $idempotency_key);
+
+        if ($this->sale_callback !== null) {
+            call_user_func($this->sale_callback, $payload, $idempotency_key);
+        }
 
         return $this->sale_response;
     }
@@ -181,6 +191,10 @@ class PatwcPaymentServiceFakeClient
     public function get_transaction(string $trace_id): array
     {
         $this->get_calls[] = array('trace_id' => $trace_id);
+
+        if ($this->get_transaction_callback !== null) {
+            call_user_func($this->get_transaction_callback, $trace_id);
+        }
 
         return $this->transaction_response;
     }
@@ -367,6 +381,74 @@ patwc_payment_service_assert_same(array(array(
     'idempotency_key' => '550e8400-e29b-41d4-a716-446655440099',
 )), $cancelClient->cancel_calls, 'Cancel call mismatch.');
 patwc_payment_service_assert_same('cancel_requested', PaymentAttempt::current($cancelOrder)['status'], 'Cancel should update current attempt status.');
+
+patwc_payment_service_assert_true(isset($cancelResult['continue_polling']) && $cancelResult['continue_polling'] === true, 'Accepted cancel should tell UI to continue polling.');
+
+patwc_payment_service_reset_uuids(array('550e8400-e29b-41d4-a716-446655440101', '550e8400-e29b-41d4-a716-446655440102'));
+$restartAfterCancelClient = new PatwcPaymentServiceFakeClient();
+$restartAfterCancelService = patwc_payment_service_make_service(patwc_payment_service_settings(), $restartAfterCancelClient);
+$restartAfterCancelOrder = new PatwcPaymentServiceOrder(131);
+$cancelRequestedAttempt = PaymentAttempt::record_new($restartAfterCancelOrder, array('status' => 'cancel_requested', 'trace_id' => 'trace-cancel-pending', 'transaction_id' => 'txn-cancel-pending', 'terminal_id' => '1234567890'));
+$restartAfterCancelResult = $restartAfterCancelService->start_payment_for_order($restartAfterCancelOrder);
+patwc_payment_service_assert_same('existing_attempt', $restartAfterCancelResult['status'], 'Start after cancel_requested should reuse in-flight attempt.');
+patwc_payment_service_assert_same($cancelRequestedAttempt, $restartAfterCancelResult['attempt'], 'Start after cancel_requested should return the current attempt.');
+patwc_payment_service_assert_same(0, count($restartAfterCancelClient->sale_calls), 'Start after cancel_requested should not call sale.');
+
+$pollCancelRequestedClient = new PatwcPaymentServiceFakeClient();
+$pollCancelRequestedClient->transaction_response = array('traceId' => 'trace-cancel-pending', 'status' => 'CANCELLED');
+$pollCancelRequestedReconciler = new PatwcPaymentServiceFakeReconciler();
+$pollCancelRequestedService = patwc_payment_service_make_service(patwc_payment_service_settings(), $pollCancelRequestedClient, $pollCancelRequestedReconciler);
+$pollCancelRequestedOrder = new PatwcPaymentServiceOrder(132);
+PaymentAttempt::record_new($pollCancelRequestedOrder, array('status' => 'cancel_requested', 'trace_id' => 'trace-cancel-pending', 'transaction_id' => 'txn-cancel-pending', 'terminal_id' => '1234567890'));
+$pollCancelRequestedResult = $pollCancelRequestedService->poll_order($pollCancelRequestedOrder);
+patwc_payment_service_assert_same($pollCancelRequestedReconciler->result, $pollCancelRequestedResult, 'Poll after cancel_requested should reconcile lookup payload.');
+patwc_payment_service_assert_same(array(array('trace_id' => 'trace-cancel-pending')), $pollCancelRequestedClient->get_calls, 'Poll after cancel_requested should fetch transaction.');
+patwc_payment_service_assert_same(array(array('order_id' => 132, 'payload' => $pollCancelRequestedClient->transaction_response, 'source' => 'poll')), $pollCancelRequestedReconciler->calls, 'Poll after cancel_requested should pass lookup payload to reconciler.');
+
+patwc_payment_service_reset_uuids(array('550e8400-e29b-41d4-a716-446655440103', '550e8400-e29b-41d4-a716-446655440104', '550e8400-e29b-41d4-a716-446655440105'));
+$overlapClient = new PatwcPaymentServiceFakeClient();
+$overlapOrder = new PatwcPaymentServiceOrder(133);
+$overlapService = patwc_payment_service_make_service(patwc_payment_service_settings(), $overlapClient);
+$nestedCancelResult = null;
+$overlapClient->sale_callback = function () use (&$nestedCancelResult, $overlapService, $overlapOrder): void {
+    PaymentAttempt::record_new($overlapOrder, array('status' => 'processing', 'trace_id' => 'trace-overlap', 'transaction_id' => 'txn-overlap', 'terminal_id' => '1234567890'));
+    $nestedCancelResult = $overlapService->cancel_order_payment($overlapOrder);
+};
+$overlapService->start_payment_for_order($overlapOrder);
+patwc_payment_service_assert_same('conflict', $nestedCancelResult['status'], 'Cancel overlapping a start command should conflict on the shared terminal lock.');
+patwc_payment_service_assert_same(0, count($overlapClient->cancel_calls), 'Cancel overlapping a start command should not call PayArc cancel.');
+
+$source = file_get_contents($root . '/includes/Services/PayArcPaymentService.php');
+if (!is_string($source) || strpos($source, 'WCPOS\\\\WooCommercePOS\\\\PayArcTerminal\\\\PaymentReconciler') === false) {
+    throw new RuntimeException('Default reconciler fallback should reference the root PayArcTerminal PaymentReconciler namespace.');
+}
+
+$pollOverlapClient = new PatwcPaymentServiceFakeClient();
+$pollOverlapReconciler = new PatwcPaymentServiceFakeReconciler();
+$pollOverlapService = patwc_payment_service_make_service(patwc_payment_service_settings(), $pollOverlapClient, $pollOverlapReconciler, function (): int { return 2000; });
+$pollOverlapOrder = new PatwcPaymentServiceOrder(134);
+PaymentAttempt::record_new($pollOverlapOrder, array('status' => 'processing', 'trace_id' => 'trace-poll-overlap', 'transaction_id' => 'txn-poll-overlap', 'terminal_id' => '1234567890'));
+$nestedPollResult = null;
+$pollOverlapClient->get_transaction_callback = function () use (&$nestedPollResult, $pollOverlapService, $pollOverlapOrder): void {
+    $nestedPollResult = $pollOverlapService->poll_order($pollOverlapOrder);
+};
+$pollOverlapService->poll_order($pollOverlapOrder);
+patwc_payment_service_assert_same('conflict', $nestedPollResult['status'], 'Poll overlapping another poll should conflict on the poll lock.');
+patwc_payment_service_assert_true($nestedPollResult['continue_polling'], 'Overlapping poll conflict should tell UI to keep polling.');
+patwc_payment_service_assert_same(1, count($pollOverlapClient->get_calls), 'Overlapping poll should not call get_transaction twice.');
+
+patwc_payment_service_reset_uuids(array('550e8400-e29b-41d4-a716-446655440106'));
+$codeCancelClient = new PatwcPaymentServiceFakeClient();
+$codeCancelClient->cancel_response = new RuntimeException('PayArc request failed; code: TRANSACTION_CANNOT_BE_CANCELLED; friendlyMessage: Transaction cannot be cancelled now.');
+$codeCancelClient->transaction_response = array('traceId' => 'trace-code-cancel', 'status' => 'APPROVED');
+$codeCancelReconciler = new PatwcPaymentServiceFakeReconciler();
+$codeCancelService = patwc_payment_service_make_service(patwc_payment_service_settings(), $codeCancelClient, $codeCancelReconciler);
+$codeCancelOrder = new PatwcPaymentServiceOrder(135);
+PaymentAttempt::record_new($codeCancelOrder, array('status' => 'processing', 'trace_id' => 'trace-code-cancel', 'transaction_id' => 'txn-code-cancel', 'terminal_id' => '1234567890'));
+$codeCancelResult = $codeCancelService->cancel_order_payment($codeCancelOrder);
+patwc_payment_service_assert_same($codeCancelReconciler->result, $codeCancelResult, 'Structured cannot-cancel code should fetch and reconcile.');
+patwc_payment_service_assert_same(array(array('trace_id' => 'trace-code-cancel')), $codeCancelClient->get_calls, 'Structured cannot-cancel code should fetch transaction.');
+patwc_payment_service_assert_same(array(array('order_id' => 135, 'payload' => $codeCancelClient->transaction_response, 'source' => 'cancel_lookup')), $codeCancelReconciler->calls, 'Structured cannot-cancel code should reconcile fetched transaction.');
 
 patwc_payment_service_reset_uuids(array('550e8400-e29b-41d4-a716-446655440100'));
 $processedClient = new PatwcPaymentServiceFakeClient();
