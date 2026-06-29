@@ -19,6 +19,16 @@ if (!function_exists('admin_url')) {
     }
 }
 
+if (!function_exists('add_action')) {
+    function add_action($hook, $callback)
+    {
+        $GLOBALS['patwc_actions'][] = array(
+            'hook' => $hook,
+            'callback' => $callback,
+        );
+    }
+}
+
 $settingsFile = dirname(__DIR__, 2) . '/includes/Settings.php';
 $gatewayFile = dirname(__DIR__, 2) . '/includes/Gateway.php';
 
@@ -122,3 +132,32 @@ patwc_assert_same(array(
     'tender_type' => 'CREDIT',
     'print_receipt' => '0',
 )), 'Production mode should be rejected until verified.');
+
+$GLOBALS['patwc_actions'] = array();
+$gateway = new Gateway();
+$expectedHook = 'woocommerce_update_options_payment_gateways_' . Settings::GATEWAY_ID;
+$registeredSettingsSaveHook = false;
+
+foreach ($GLOBALS['patwc_actions'] as $action) {
+    if ($action['hook'] !== $expectedHook || !is_array($action['callback'])) {
+        continue;
+    }
+
+    if ($action['callback'][0] === $gateway && $action['callback'][1] === 'process_admin_options') {
+        $registeredSettingsSaveHook = true;
+    }
+}
+
+patwc_assert_same(true, $registeredSettingsSaveHook, 'Gateway should register process_admin_options on the WooCommerce settings-save hook.');
+
+$_POST = array(
+    'woocommerce_' . Settings::GATEWAY_ID . '_enabled' => 'yes',
+    'woocommerce_' . Settings::GATEWAY_ID . '_mode' => 'production',
+    'woocommerce_' . Settings::GATEWAY_ID . '_tenant_id' => '123456789012',
+    'woocommerce_' . Settings::GATEWAY_ID . '_default_terminal_id' => '1234567890',
+    'woocommerce_' . Settings::GATEWAY_ID . '_tender_type' => 'CREDIT',
+    'woocommerce_' . Settings::GATEWAY_ID . '_print_receipt' => '0',
+);
+
+patwc_assert_same(false, $gateway->process_admin_options(), 'Gateway admin save should reject posted production mode.');
+$_POST = array();

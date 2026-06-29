@@ -12,6 +12,10 @@ trait GatewayImplementation
         $this->has_fields = false;
         $this->supports = array('products');
 
+        if (function_exists('add_action')) {
+            add_action('woocommerce_update_options_payment_gateways_' . $this->id, array($this, 'process_admin_options'));
+        }
+
         $this->init_form_fields();
 
         if (method_exists($this, 'init_settings')) {
