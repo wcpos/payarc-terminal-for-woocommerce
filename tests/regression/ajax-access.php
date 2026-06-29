@@ -183,6 +183,8 @@ $GLOBALS['patwc_ajax_caps'] = array('manage_woocommerce' => true);
 $start = $handler->handle_start(array('order_id' => '1001', 'terminal_id' => 'term-1'));
 patwc_ajax_assert_same(200, $start['status_code'], 'Manager should start payment.');
 patwc_ajax_assert_same(array(array('order_id' => 1001, 'terminal_id' => 'term-1')), $service->start_calls, 'Start should call payment service with terminal id.');
+patwc_ajax_assert_same('trace-created', $start['body']['trace_id'], 'Created response with a real trace should include non-empty trace id.');
+patwc_ajax_assert_true(isset($start['body']['trace_id']) && is_string($start['body']['trace_id']) && trim($start['body']['trace_id']) !== '', 'Created response should not have an empty trace id.');
 patwc_ajax_assert_same('Payment sent to terminal.', $start['body']['message'], 'Created response should include default user message.');
 patwc_ajax_assert_same(true, $start['body']['continue_polling'], 'Created response should continue polling.');
 
@@ -236,6 +238,14 @@ patwc_ajax_reset_env();
 $service = new PatwcAjaxFakePaymentService();
 $handler = patwc_ajax_handler($service, $orders);
 $GLOBALS['patwc_ajax_caps'] = array('manage_woocommerce' => true);
+$service->start_response = array('status' => 'created');
+$createdWithoutTrace = $handler->handle_start(array('order_id' => '1001'));
+patwc_ajax_assert_same(200, $createdWithoutTrace['status_code'], 'Created without synchronous trace should remain a successful pending response.');
+patwc_ajax_assert_same('pending_callback', $createdWithoutTrace['body']['status'], 'Created without trace should be normalized to pending callback.');
+patwc_ajax_assert_same('Payment sent to terminal.', $createdWithoutTrace['body']['message'], 'Pending callback should preserve safe user message.');
+patwc_ajax_assert_same(true, $createdWithoutTrace['body']['continue_polling'], 'Pending callback should continue polling.');
+patwc_ajax_assert_true(!isset($createdWithoutTrace['body']['trace_id']) || trim((string) $createdWithoutTrace['body']['trace_id']) === '', 'Pending callback should not invent a trace id.');
+
 $service->start_response = array('status' => 'decline');
 $decline = $handler->handle_start(array('order_id' => '1001'));
 patwc_ajax_assert_same(true, $decline['body']['retry_allowed'], 'Decline response should allow retry.');
@@ -249,11 +259,12 @@ $service->poll_response = array('status' => 'pending_callback');
 $pending = $handler->handle_poll(array('order_id' => '1001'));
 patwc_ajax_assert_same(true, $pending['body']['continue_polling'], 'Pending callback should continue polling.');
 
+$startCallsBeforeValidate = $service->start_calls;
 $validate = $handler->handle_validate_settings(array());
 patwc_ajax_assert_same(200, $validate['status_code'], 'Validate settings should return success status.');
 patwc_ajax_assert_same('ok', $validate['body']['status'], 'Validate settings should return local ok status.');
 patwc_ajax_assert_same(Settings::GATEWAY_ID, $validate['body']['diagnostics']['gateway_id'], 'Validate settings should include local diagnostics.');
-patwc_ajax_assert_same(array(array('order_id' => 1001, 'terminal_id' => '')), $service->start_calls, 'Validate settings should not call PayArc payment service.');
+patwc_ajax_assert_same($startCallsBeforeValidate, $service->start_calls, 'Validate settings should not call PayArc payment service.');
 
 try {
     $throwingService = new class extends PatwcAjaxFakePaymentService {

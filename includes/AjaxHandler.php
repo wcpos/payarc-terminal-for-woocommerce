@@ -241,6 +241,12 @@ class AjaxHandler
         $status = isset($body['status']) && is_scalar($body['status']) ? (string) $body['status'] : '';
 
         if ($status === 'created') {
+            $traceId = isset($body['trace_id']) && is_scalar($body['trace_id']) ? trim((string) $body['trace_id']) : '';
+            if ($traceId === '') {
+                $body['status'] = 'pending_callback';
+                $status = 'pending_callback';
+            }
+
             if (!array_key_exists('message', $body)) {
                 $body['message'] = 'Payment sent to terminal.';
             }
