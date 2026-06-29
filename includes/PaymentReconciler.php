@@ -49,7 +49,7 @@ class PaymentReconciler
             return array('status' => 'conflict', 'continue_polling' => false, 'message' => $identity['message']);
         }
 
-        if ($this->is_paid($order) && !$this->matches_current_identifier($order, $traceId, $transactionId)) {
+        if ($this->is_paid($order) && $this->paid_order_conflicts($order, $traceId, $transactionId)) {
             return array(
                 'status' => 'conflict',
                 'continue_polling' => false,
@@ -262,6 +262,24 @@ class PaymentReconciler
             $processed[] = $callbackKey;
             $this->update_meta($order, PaymentAttempt::META_PROCESSED_CALLBACKS, $processed);
         }
+    }
+
+    private function paid_order_conflicts($order, string $traceId, string $transactionId): bool
+    {
+        return $this->paid_transaction_id_conflicts($order, $transactionId)
+            || !$this->matches_current_identifier($order, $traceId, $transactionId);
+    }
+
+    private function paid_transaction_id_conflicts($order, string $transactionId): bool
+    {
+        if ($transactionId === '') {
+            return false;
+        }
+
+        $current = PaymentAttempt::current($order);
+        $currentTransaction = isset($current['transaction_id']) && is_scalar($current['transaction_id']) ? trim((string) $current['transaction_id']) : '';
+
+        return $currentTransaction !== '' && !hash_equals($currentTransaction, $transactionId);
     }
 
     private function matches_current_identifier($order, string $traceId, string $transactionId): bool

@@ -274,3 +274,25 @@ patwc_reconciler_assert_same('conflict', $paidConflict['status'], 'Paid order wi
 patwc_reconciler_assert_same('charge-paid-original', $paidConflictOrder->meta['_patwc_charge_id'], 'Paid conflict should not overwrite existing charge detail.');
 patwc_reconciler_assert_same('trace-paid-original', PaymentAttempt::current($paidConflictOrder)['trace_id'], 'Paid conflict should not overwrite current trace id.');
 patwc_reconciler_assert_same(array(), $paidConflictOrder->payment_complete_calls, 'Paid conflict should not complete another payment.');
+
+
+$paidSameTraceDifferentTransactionOrder = new PatwcReconcilerCallbacksOrder(1009, '10.23', 'USD', true);
+PaymentAttempt::record_new($paidSameTraceDifferentTransactionOrder, array(
+    'status' => 'success',
+    'trace_id' => 'same-trace',
+    'transaction_id' => 'txn-original',
+    'charge_id' => 'charge-original',
+));
+$paidSameTraceDifferentTransactionOrder->update_meta_data('_patwc_charge_id', 'charge-original');
+$paidSameTraceDifferentTransaction = $reconciler->reconcile($paidSameTraceDifferentTransactionOrder, patwc_reconciler_payload(array(
+    'traceId' => 'same-trace',
+    'transactionId' => 'txn-different',
+    'chargeId' => 'charge-different',
+    'metadata' => array('order_id' => '1009'),
+)), 'webhook');
+$paidSameTraceCurrentAttempt = PaymentAttempt::current($paidSameTraceDifferentTransactionOrder);
+patwc_reconciler_assert_same('conflict', $paidSameTraceDifferentTransaction['status'], 'Paid order with matching trace but different transaction id should conflict.');
+patwc_reconciler_assert_same('txn-original', $paidSameTraceCurrentAttempt['transaction_id'], 'Paid same-trace conflict should not overwrite current transaction id.');
+patwc_reconciler_assert_same('charge-original', $paidSameTraceCurrentAttempt['charge_id'], 'Paid same-trace conflict should not overwrite current charge id.');
+patwc_reconciler_assert_same('charge-original', $paidSameTraceDifferentTransactionOrder->meta['_patwc_charge_id'], 'Paid same-trace conflict should not overwrite charge detail meta.');
+patwc_reconciler_assert_same(array(), $paidSameTraceDifferentTransactionOrder->payment_complete_calls, 'Paid same-trace conflict should not complete another payment.');
