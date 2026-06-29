@@ -1,0 +1,212 @@
+{
+  "_meta": {
+    "contract": "PayArc Connect V3 docs-derived mock contract",
+    "not_live_sandbox_evidence": true,
+    "created_date": "2026-06-29",
+    "amount_units_assumption": "minor units/cents; 109 represents $1.09",
+    "docs": {
+      "sale": "https://docs.payarc.net/reference/createsaletransaction",
+      "callback": "https://docs.payarc.net/reference/transaction-callback-v3",
+      "get_transaction": "https://docs.payarc.net/reference/get_v3-transactions-traceid",
+      "cancel": "https://docs.payarc.net/reference/post_v3-transactions-traceid-cancel"
+    },
+    "unverified_assumptions": [
+      "Direct bearer authentication works with the PayArc Connect token used by merchants.",
+      "The sale initiation response synchronously returns traceId before terminal processing completes.",
+      "Amount values observed in live responses match the docs' minor-unit/cents description.",
+      "Real terminal status values and failure shapes match the docs and examples."
+    ]
+  },
+  "sale_request": {
+    "tenantId": "000000000001",
+    "terminalId": "0000000002",
+    "transactionId": "MOCKSALE0000109",
+    "tenderType": "CREDIT",
+    "amount": {
+      "total": 109,
+      "subtotal": 100,
+      "currency": "USD",
+      "tip": 5,
+      "tax": 4
+    },
+    "printReceipt": 0,
+    "callbackURL": "https://example.test/payarc/callback",
+    "metadata": {
+      "order_id": "order_1001",
+      "terminal_id": "terminal_mock_0000000002",
+      "mode": "mock"
+    }
+  },
+  "sale_response_success_initiated": {
+    "_docs_derived_assumption": "PayArc sale docs define a 200 SuccessResponse containing traceId; this fixture assumes the synchronous initiation response returns it before the callback.",
+    "traceId": "11111111-1111-4111-8111-111111111109",
+    "response": {
+      "status": "SUCCESS"
+    }
+  },
+  "sale_response_failure": {
+    "traceId": "22222222-2222-4222-8222-222222222109",
+    "response": {
+      "status": "FAILURE",
+      "error": {
+        "code": "INVALID_REQUEST",
+        "message": "terminalId is required or invalid",
+        "friendlyMessage": "The terminal identifier is invalid for this mock request."
+      }
+    }
+  },
+  "get_transaction_success": {
+    "transactionId": "MOCKSALE0000109",
+    "transType": "SALE",
+    "status": "SUCCESS",
+    "chargeId": "ch_mock_0000000109",
+    "authCode": "000000",
+    "amount": {
+      "total": 109,
+      "subtotal": 100,
+      "approved": 109,
+      "currency": "USD",
+      "tip": 5,
+      "tax": 4
+    },
+    "card": {
+      "brand": "VISA",
+      "entryMode": "CHIP",
+      "last4": "1111"
+    },
+    "processor": {
+      "type": "TRADITIONAL",
+      "responseCode": "000000",
+      "responseText": "OK"
+    },
+    "timestamp": "2026-06-29T20:00:00Z",
+    "traceId": "11111111-1111-4111-8111-111111111109",
+    "metadata": {
+      "order_id": "order_1001",
+      "terminal_id": "terminal_mock_0000000002",
+      "mode": "mock"
+    }
+  },
+  "callback_success": {
+    "transactionId": "MOCKSALE0000109",
+    "transType": "SALE",
+    "status": "SUCCESS",
+    "chargeId": "ch_mock_0000000109",
+    "authCode": "000000",
+    "amount": {
+      "total": 109,
+      "subtotal": 100,
+      "approved": 109,
+      "currency": "USD",
+      "tip": 5,
+      "tax": 4
+    },
+    "card": {
+      "brand": "VISA",
+      "entryMode": "CHIP",
+      "last4": "1111"
+    },
+    "processor": {
+      "type": "TRADITIONAL",
+      "responseCode": "000000",
+      "responseText": "OK"
+    },
+    "timestamp": "2026-06-29T20:00:00Z",
+    "traceId": "11111111-1111-4111-8111-111111111109",
+    "metadata": {
+      "order_id": "order_1001",
+      "terminal_id": "terminal_mock_0000000002",
+      "mode": "mock"
+    }
+  },
+  "callback_decline": {
+    "transactionId": "MOCKSALE0000109",
+    "transType": "SALE",
+    "status": "DECLINE",
+    "chargeId": "ch_mock_decline_0109",
+    "authCode": null,
+    "amount": {
+      "total": 109,
+      "subtotal": 100,
+      "approved": 0,
+      "currency": "USD",
+      "tip": 5,
+      "tax": 4
+    },
+    "card": {
+      "brand": "VISA",
+      "entryMode": "MANUAL",
+      "last4": "1111"
+    },
+    "processor": {
+      "type": "TRADITIONAL",
+      "responseCode": "000100",
+      "responseText": "DECLINE"
+    },
+    "timestamp": "2026-06-29T20:01:00Z",
+    "traceId": "33333333-3333-4333-8333-333333333109",
+    "metadata": {
+      "order_id": "order_1001",
+      "terminal_id": "terminal_mock_0000000002",
+      "mode": "mock"
+    }
+  },
+  "callback_timeout": {
+    "transactionId": "MOCKSALE0000109",
+    "transType": "SALE",
+    "status": "TIMEOUT",
+    "chargeId": null,
+    "authCode": null,
+    "amount": {
+      "total": 109,
+      "subtotal": 100,
+      "approved": 0,
+      "currency": "USD",
+      "tip": 5,
+      "tax": 4
+    },
+    "card": {
+      "brand": "UNKNOWN",
+      "entryMode": "UNKNOWN",
+      "last4": "0000"
+    },
+    "processor": {
+      "type": "TRADITIONAL",
+      "responseCode": "TIMEOUT",
+      "responseText": "TIMEOUT"
+    },
+    "timestamp": "2026-06-29T20:02:00Z",
+    "traceId": "44444444-4444-4444-8444-444444444109",
+    "metadata": {
+      "order_id": "order_1001",
+      "terminal_id": "terminal_mock_0000000002",
+      "mode": "mock"
+    },
+    "error": {
+      "code": "TERMINAL_TIMEOUT",
+      "message": "Terminal did not complete before the mock timeout window.",
+      "friendlyMessage": "The terminal timed out before the transaction completed."
+    }
+  },
+  "cancel_request": {
+    "tenantId": "000000000001",
+    "terminalId": "0000000002"
+  },
+  "cancel_response_success": {
+    "traceId": "11111111-1111-4111-8111-111111111109",
+    "response": {
+      "status": "SUCCESS"
+    }
+  },
+  "cancel_response_failure_already_processed": {
+    "traceId": "11111111-1111-4111-8111-111111111109",
+    "response": {
+      "status": "FAILURE",
+      "error": {
+        "code": "TRANSACTION_CANNOT_BE_CANCELLED",
+        "message": "Transaction has already begun processing and cannot be cancelled.",
+        "friendlyMessage": "This mock transaction is already being processed by the terminal."
+      }
+    }
+  }
+}
