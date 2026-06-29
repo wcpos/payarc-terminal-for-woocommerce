@@ -36,6 +36,14 @@ class PaymentReconciler
         $chargeId = $this->extract_scalar($payload, 'chargeId');
         $callbackKey = $this->callback_key($traceId, $transactionId, $status);
 
+        if ($this->is_paid($order) && $this->paid_order_conflicts($order, $traceId, $transactionId)) {
+            return array(
+                'status' => 'conflict',
+                'continue_polling' => false,
+                'message' => 'Order is already paid by a different PayArc transaction.',
+            );
+        }
+
         if ($callbackKey !== '' && $this->callback_already_processed($order, $callbackKey)) {
             return array('status' => 'idempotent', 'continue_polling' => false, 'attempt' => PaymentAttempt::current($order));
         }
@@ -47,14 +55,6 @@ class PaymentReconciler
             $this->save($order);
 
             return array('status' => 'conflict', 'continue_polling' => false, 'message' => $identity['message']);
-        }
-
-        if ($this->is_paid($order) && $this->paid_order_conflicts($order, $traceId, $transactionId)) {
-            return array(
-                'status' => 'conflict',
-                'continue_polling' => false,
-                'message' => 'Order is already paid by a different PayArc transaction.',
-            );
         }
 
         $fields = array_filter(array(
