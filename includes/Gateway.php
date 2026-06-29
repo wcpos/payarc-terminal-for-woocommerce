@@ -9,7 +9,7 @@ trait GatewayImplementation
         $this->id = Settings::GATEWAY_ID;
         $this->method_title = 'PayArc Terminal';
         $this->method_description = 'PayArc PAX terminal payments for WooCommerce POS.';
-        $this->has_fields = false;
+        $this->has_fields = true;
         $this->supports = array('products');
 
         if (function_exists('add_action')) {
@@ -174,6 +174,66 @@ trait GatewayImplementation
     /**
      * @return array<string, string>
      */
+    public function process_payment($order_id): array
+    {
+        $order = function_exists('wc_get_order') ? wc_get_order($order_id) : null;
+
+        if (!is_object($order)) {
+            if (function_exists('wc_add_notice')) {
+                wc_add_notice('Unable to find the order for this payment.', 'error');
+            }
+
+            return array('result' => 'failure');
+        }
+
+        if (method_exists($order, 'is_paid') && $order->is_paid()) {
+            return array(
+                'result' => 'success',
+                'redirect' => $this->order_return_url($order),
+            );
+        }
+
+        if (method_exists($order, 'get_checkout_payment_url')) {
+            return array(
+                'result' => 'success',
+                'redirect' => (string) $order->get_checkout_payment_url(true),
+            );
+        }
+
+        if (function_exists('wc_add_notice')) {
+            wc_add_notice('Unable to prepare the payment page for this order.', 'error');
+        }
+
+        return array('result' => 'failure');
+    }
+
+    public function payment_fields(): void
+    {
+        $order = $this->current_payment_order();
+        $orderId = $order !== null ? $this->order_id($order) : 0;
+
+        if ($order !== null) {
+            $this->enqueue_payment_assets($order);
+        }
+
+        echo '<div id="patwc-payment-panel" class="patwc-payment-panel" data-patwc-order-id="' . $this->escape_attr((string) $orderId) . '">';
+        echo '<div class="patwc-payment-panel__header">';
+        echo '<strong>' . $this->escape_html($this->title !== '' ? $this->title : 'PayArc Terminal') . '</strong>';
+        echo '<span class="patwc-payment-panel__order">' . $this->escape_html('Order #' . (string) $orderId) . '</span>';
+        echo '</div>';
+        echo '<p class="patwc-payment-panel__description">' . $this->escape_html('Start the in-person terminal payment, then wait for the terminal result before completing the order.') . '</p>';
+        echo '<div id="patwc-payment-status" class="patwc-payment-status" role="status" aria-live="polite">' . $this->escape_html('Ready to start payment.') . '</div>';
+        echo '<div class="patwc-payment-actions">';
+        echo '<button type="button" id="patwc-start-payment" class="button alt patwc-start-payment"' . ($order === null ? ' disabled="disabled"' : '') . '>' . $this->escape_html('Start Payment') . '</button>';
+        echo '<button type="button" id="patwc-cancel-payment" class="button patwc-cancel-payment" hidden="hidden">' . $this->escape_html('Cancel Payment') . '</button>';
+        echo '</div>';
+        echo '<div id="patwc-payment-log" class="patwc-payment-log" aria-live="polite" aria-label="' . $this->escape_attr('Payment log') . '"></div>';
+        echo '</div>';
+    }
+
+    /**
+     * @return array<string, string>
+     */
     private function posted_settings(): array
     {
         $data = method_exists($this, 'get_post_data') ? $this->get_post_data() : $_POST;
@@ -299,6 +359,127 @@ trait GatewayImplementation
         }
 
         return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+    }
+
+    private function escape_url(string $value): string
+    {
+        if (function_exists('esc_url')) {
+            return esc_url($value);
+        }
+
+        return filter_var($value, FILTER_SANITIZE_URL);
+    }
+
+    /**
+     * @param object $order
+     */
+    private function enqueue_payment_assets($order): void
+    {
+        $version = defined('PATWC_VERSION') ? PATWC_VERSION : '0.1.0';
+        $pluginUrl = defined('PATWC_PLUGIN_URL') ? rtrim(PATWC_PLUGIN_URL, '/') . '/' : '';
+
+        if (function_exists('wp_enqueue_style')) {
+            wp_enqueue_style('patwc-payment', $pluginUrl . 'assets/css/payment.css', array(), $version);
+        }
+
+        if (function_exists('wp_enqueue_script')) {
+            wp_enqueue_script('patwc-payment', $pluginUrl . 'assets/js/payment.js', array('jquery'), $version, true);
+        }
+
+        if (function_exists('wp_localize_script')) {
+            wp_localize_script('patwc-payment', 'patwcPaymentData', array(
+                'ajaxUrl' => function_exists('admin_url') ? $this->escape_url(admin_url('admin-ajax.php')) : 'admin-ajax.php',
+                'nonce' => function_exists('wp_create_nonce') ? wp_create_nonce('patwc_payment') : '',
+                'orderId' => $this->order_id($order),
+                'orderToken' => class_exists(__NAMESPACE__ . '\\AjaxHandler') ? AjaxHandler::order_token_for($order) : '',
+                'pollInterval' => 1500,
+                'timeoutMs' => 300000,
+                'strings' => array(
+                    'ready' => 'Ready to start payment.',
+                    'starting' => 'Starting terminal payment...',
+                    'waiting' => 'Waiting for the terminal result...',
+                    'approved' => 'Payment approved. Completing the order...',
+                    'retry' => 'Payment was not approved. Please check the terminal and try again.',
+                    'canceling' => 'Cancel requested. Waiting for final terminal status...',
+                    'timeout' => 'Payment timed out while waiting for the terminal. Check the terminal before retrying.',
+                    'error' => 'Unable to contact the payment service. Please try again.',
+                ),
+            ));
+        }
+    }
+
+    /**
+     * @return object|null
+     */
+    private function current_payment_order()
+    {
+        $orderId = 0;
+
+        if (function_exists('get_query_var')) {
+            $queryOrderId = get_query_var('order-pay', 0);
+            $orderId = $this->positive_int($queryOrderId);
+        }
+
+        if ($orderId <= 0 && isset($_GET['order-pay'])) {
+            $orderId = $this->positive_int($_GET['order-pay']);
+        }
+
+        if ($orderId <= 0 && isset($_GET['order_id'])) {
+            $orderId = $this->positive_int($_GET['order_id']);
+        }
+
+        if ($orderId <= 0 || !function_exists('wc_get_order')) {
+            return null;
+        }
+
+        $order = wc_get_order($orderId);
+
+        return is_object($order) ? $order : null;
+    }
+
+    /**
+     * @param mixed $value
+     */
+    private function positive_int($value): int
+    {
+        if (!is_scalar($value)) {
+            return 0;
+        }
+
+        $value = trim((string) $value);
+        if ($value === '' || !ctype_digit($value)) {
+            return 0;
+        }
+
+        return (int) $value;
+    }
+
+    /**
+     * @param object $order
+     */
+    private function order_id($order): int
+    {
+        if (method_exists($order, 'get_id')) {
+            return (int) $order->get_id();
+        }
+
+        return 0;
+    }
+
+    /**
+     * @param object $order
+     */
+    private function order_return_url($order): string
+    {
+        if (method_exists($this, 'get_return_url')) {
+            return (string) $this->get_return_url($order);
+        }
+
+        if (method_exists($order, 'get_checkout_order_received_url')) {
+            return (string) $order->get_checkout_order_received_url();
+        }
+
+        return '';
     }
 
     /**
