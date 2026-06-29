@@ -76,6 +76,11 @@ class AjaxHandler
      */
     public function handle_validate_settings(?array $request = null)
     {
+        $emit = $request === null;
+        if (!function_exists('current_user_can') || !current_user_can('manage_woocommerce')) {
+            return $this->maybe_emit($this->error_response(403, 'Access denied.'), $emit);
+        }
+
         $response = array(
             'status_code' => 200,
             'body' => array(
@@ -84,7 +89,7 @@ class AjaxHandler
             ),
         );
 
-        return $this->maybe_emit($response, $request === null);
+        return $this->maybe_emit($response, $emit);
     }
 
     /**
@@ -280,7 +285,30 @@ class AjaxHandler
             $body['continue_polling'] = true;
         }
 
-        return $body;
+        return $this->public_response_body($body);
+    }
+
+    /**
+     * @param array<string, mixed> $body
+     * @return array<string, mixed>
+     */
+    private function public_response_body(array $body): array
+    {
+        $public = array();
+
+        foreach (array('status', 'trace_id', 'message') as $key) {
+            if (isset($body[$key]) && is_scalar($body[$key]) && trim((string) $body[$key]) !== '') {
+                $public[$key] = (string) $body[$key];
+            }
+        }
+
+        foreach (array('continue_polling', 'submit_form', 'retry_allowed') as $key) {
+            if (array_key_exists($key, $body)) {
+                $public[$key] = (bool) $body[$key];
+            }
+        }
+
+        return $public;
     }
 
     /**

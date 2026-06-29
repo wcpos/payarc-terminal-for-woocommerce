@@ -139,6 +139,15 @@ function patwc_ajax_assert_true($actual, string $message): void
     patwc_ajax_assert_same(true, (bool) $actual, $message);
 }
 
+function patwc_ajax_assert_missing_keys(array $body, array $keys, string $message): void
+{
+    foreach ($keys as $key) {
+        if (array_key_exists($key, $body)) {
+            throw new RuntimeException($message . ' Unexpected key present: ' . $key . '. Body: ' . var_export($body, true));
+        }
+    }
+}
+
 function patwc_ajax_reset_env(): void
 {
     $GLOBALS['patwc_ajax_actions'] = array();
@@ -179,7 +188,24 @@ patwc_ajax_assert_same(array(
     'wp_ajax_patwc_validate_settings',
 ), $registeredHooks, 'init should register privileged and nopriv lifecycle routes plus privileged validate route.');
 
+$unauthorizedValidate = $handler->handle_validate_settings(array());
+patwc_ajax_assert_same(403, $unauthorizedValidate['status_code'], 'Validate settings should require WooCommerce manager capability.');
+patwc_ajax_assert_true(!isset($unauthorizedValidate['body']['diagnostics']), 'Unauthorized validate settings should not include diagnostics.');
+
 $GLOBALS['patwc_ajax_caps'] = array('manage_woocommerce' => true);
+$service->start_response = array(
+    'status' => 'created',
+    'trace_id' => 'trace-created',
+    'attempt_uuid' => 'attempt-secret',
+    'transaction_id' => 'txn-secret',
+    'terminal_id' => 'terminal-secret',
+    'sale_response' => array('raw' => 'provider payload'),
+    'attempt' => array('nested' => 'attempt payload'),
+    'provider_response' => array('raw' => 'provider response'),
+    'card' => array('last4' => '4242'),
+    'processor' => array('code' => '00'),
+    'unexpected_internal' => 'do-not-emit',
+);
 $start = $handler->handle_start(array('order_id' => '1001', 'terminal_id' => 'term-1'));
 patwc_ajax_assert_same(200, $start['status_code'], 'Manager should start payment.');
 patwc_ajax_assert_same(array(array('order_id' => 1001, 'terminal_id' => 'term-1')), $service->start_calls, 'Start should call payment service with terminal id.');
@@ -187,17 +213,22 @@ patwc_ajax_assert_same('trace-created', $start['body']['trace_id'], 'Created res
 patwc_ajax_assert_true(isset($start['body']['trace_id']) && is_string($start['body']['trace_id']) && trim($start['body']['trace_id']) !== '', 'Created response should not have an empty trace id.');
 patwc_ajax_assert_same('Payment sent to terminal.', $start['body']['message'], 'Created response should include default user message.');
 patwc_ajax_assert_same(true, $start['body']['continue_polling'], 'Created response should continue polling.');
+patwc_ajax_assert_missing_keys($start['body'], array('attempt_uuid', 'transaction_id', 'terminal_id', 'sale_response', 'attempt', 'provider_response', 'card', 'processor', 'unexpected_internal'), 'Start response should omit internal service fields.');
 
+$service->poll_response = array('status' => 'success', 'transaction_id' => 'txn-secret', 'processor' => array('code' => '00'), 'unexpected_internal' => 'do-not-emit');
 $poll = $handler->handle_poll(array('order_id' => '1001'));
 patwc_ajax_assert_same(200, $poll['status_code'], 'Manager should poll payment.');
 patwc_ajax_assert_same(array(1001), $service->poll_calls, 'Poll should call payment service.');
 patwc_ajax_assert_same(true, $poll['body']['submit_form'], 'Success response should submit form.');
 patwc_ajax_assert_same(false, $poll['body']['continue_polling'], 'Success response should stop polling.');
+patwc_ajax_assert_missing_keys($poll['body'], array('transaction_id', 'processor', 'unexpected_internal'), 'Poll response should omit internal service fields.');
 
+$service->cancel_response = array('status' => 'cancel_requested', 'terminal_id' => 'terminal-secret', 'attempt' => array('nested' => 'attempt payload'), 'unexpected_internal' => 'do-not-emit');
 $cancel = $handler->handle_cancel(array('order_id' => '1001'));
 patwc_ajax_assert_same(200, $cancel['status_code'], 'Manager should cancel payment.');
 patwc_ajax_assert_same(array(1001), $service->cancel_calls, 'Cancel should call payment service.');
 patwc_ajax_assert_same(true, $cancel['body']['continue_polling'], 'Cancel requested should continue polling.');
+patwc_ajax_assert_missing_keys($cancel['body'], array('terminal_id', 'attempt', 'unexpected_internal'), 'Cancel response should omit internal service fields.');
 
 patwc_ajax_reset_env();
 $service = new PatwcAjaxFakePaymentService();
