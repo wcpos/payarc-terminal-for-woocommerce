@@ -63,13 +63,13 @@ trait GatewayImplementation
             ),
             'api_bearer_token' => array(
                 'title' => 'API bearer token',
-                'type' => 'password',
+                'type' => 'patwc_secret',
                 'description' => 'PayArc Connect bearer or access token proven by Task 0. Used server-side only.',
                 'default' => '',
             ),
             'callback_bearer_token' => array(
                 'title' => 'Callback bearer token',
-                'type' => 'password',
+                'type' => 'patwc_secret',
                 'description' => 'PayArc-provisioned secret expected in the callback Authorization header.',
                 'default' => '',
             ),
@@ -214,6 +214,94 @@ trait GatewayImplementation
     }
 
     /**
+     * Generate a secret setting field without rendering the saved value into admin HTML.
+     *
+     * @param array<string, mixed> $data
+     */
+    public function generate_patwc_secret_html(string $key, array $data): string
+    {
+        $fieldKey = method_exists($this, 'get_field_key') ? $this->get_field_key($key) : 'woocommerce_' . Settings::GATEWAY_ID . '_' . $key;
+        $title = $this->field_text($data, 'title', $key);
+        $description = $this->field_text($data, 'description', '');
+        $configured = $this->gateway_option($key, '') !== '';
+        $placeholder = $configured ? 'Configured - enter a new value to replace' : 'Not configured';
+        $status = $configured ? 'Configured' : 'Empty';
+
+        $html = '<tr valign="top">';
+        $html .= '<th scope="row" class="titledesc"><label for="' . $this->escape_attr($fieldKey) . '">' . $this->escape_html($title) . '</label></th>';
+        $html .= '<td class="forminp"><input class="input-text regular-input" type="password" autocomplete="new-password" id="' . $this->escape_attr($fieldKey) . '" name="' . $this->escape_attr($fieldKey) . '" value="" placeholder="' . $this->escape_attr($placeholder) . '" />';
+        $html .= '<p class="description">' . $this->escape_html($status . '. Leave blank to keep the existing value. ' . $description) . '</p>';
+        $html .= '</td></tr>';
+
+        return $html;
+    }
+
+    public function validate_patwc_secret_field(string $key, $value): string
+    {
+        $existing = $this->gateway_option($key, '');
+
+        if (!is_scalar($value)) {
+            return $existing;
+        }
+
+        $submitted = (string) $value;
+
+        if (trim($submitted) === '') {
+            return $existing;
+        }
+
+        if (preg_match('/[[:cntrl:]]/', $submitted) === 1) {
+            $this->add_admin_error($this->secret_field_label($key) . ' cannot contain control characters or newlines.');
+            return $existing;
+        }
+
+        return trim($submitted);
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     */
+    private function field_text(array $data, string $key, string $default): string
+    {
+        if (!array_key_exists($key, $data) || !is_scalar($data[$key])) {
+            return $default;
+        }
+
+        return (string) $data[$key];
+    }
+
+    private function secret_field_label(string $key): string
+    {
+        if ($key === 'api_bearer_token') {
+            return 'API bearer token';
+        }
+
+        if ($key === 'callback_bearer_token') {
+            return 'Callback bearer token';
+        }
+
+        return 'Secret field';
+    }
+
+    private function escape_attr(string $value): string
+    {
+        if (function_exists('esc_attr')) {
+            return esc_attr($value);
+        }
+
+        return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+    }
+
+    private function escape_html(string $value): string
+    {
+        if (function_exists('esc_html')) {
+            return esc_html($value);
+        }
+
+        return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+    }
+
+    /**
      * @param array<string, mixed> $settings
      */
     private static function setting_string(array $settings, string $key, string $default = ''): string
@@ -254,37 +342,5 @@ if (class_exists('WC_Payment_Gateway')) {
         {
             return parent::process_admin_options();
         }
-    }
-} else {
-    class Gateway
-    {
-        /** @var string */
-        public $id = '';
-
-        /** @var string */
-        public $method_title = '';
-
-        /** @var string */
-        public $method_description = '';
-
-        /** @var bool */
-        public $has_fields = false;
-
-        /** @var string[] */
-        public $supports = array();
-
-        /** @var string */
-        public $title = '';
-
-        /** @var string */
-        public $description = '';
-
-        /** @var string */
-        public $enabled = 'no';
-
-        /** @var array<string, mixed> */
-        public $form_fields = array();
-
-        use GatewayImplementation;
     }
 }

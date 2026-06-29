@@ -29,6 +29,78 @@ if (!function_exists('add_action')) {
     }
 }
 
+if (!class_exists('WC_Admin_Settings')) {
+    class WC_Admin_Settings
+    {
+        public static function add_error($error): void
+        {
+            $GLOBALS['patwc_admin_errors'][] = $error;
+        }
+    }
+}
+
+if (!class_exists('WC_Payment_Gateway')) {
+    class WC_Payment_Gateway
+    {
+        /** @var string */
+        public $id = '';
+
+        /** @var string */
+        public $method_title = '';
+
+        /** @var string */
+        public $method_description = '';
+
+        /** @var bool */
+        public $has_fields = false;
+
+        /** @var string[] */
+        public $supports = array();
+
+        /** @var string */
+        public $title = '';
+
+        /** @var string */
+        public $description = '';
+
+        /** @var string */
+        public $enabled = 'no';
+
+        /** @var array<string, mixed> */
+        public $form_fields = array();
+
+        /** @var array<string, mixed> */
+        public $settings = array();
+
+        public function init_settings(): void
+        {
+            $option = 'woocommerce_' . $this->id . '_settings';
+            $settings = function_exists('get_option') ? get_option($option, array()) : array();
+            $this->settings = is_array($settings) ? $settings : array();
+        }
+
+        public function get_option($key, $default = null)
+        {
+            return array_key_exists($key, $this->settings) ? $this->settings[$key] : $default;
+        }
+
+        public function get_field_key($key): string
+        {
+            return 'woocommerce_' . $this->id . '_' . $key;
+        }
+
+        public function get_post_data(): array
+        {
+            return $_POST;
+        }
+
+        public function process_admin_options()
+        {
+            return true;
+        }
+    }
+}
+
 $settingsFile = dirname(__DIR__, 2) . '/includes/Settings.php';
 $gatewayFile = dirname(__DIR__, 2) . '/includes/Gateway.php';
 
@@ -161,3 +233,31 @@ $_POST = array(
 
 patwc_assert_same(false, $gateway->process_admin_options(), 'Gateway admin save should reject posted production mode.');
 $_POST = array();
+
+patwc_assert_same(true, is_subclass_of(Gateway::class, 'WC_Payment_Gateway'), 'Gateway must extend the WooCommerce payment gateway base class.');
+$gatewaySource = file_get_contents($gatewayFile);
+if (!is_string($gatewaySource)) {
+    throw new RuntimeException('Unable to read Gateway source.');
+}
+patwc_assert_same(false, strpos($gatewaySource, "} else {\n    class Gateway"), 'Gateway source must not define a non-WooCommerce fallback class.');
+
+$apiSecretHtml = $gateway->generate_patwc_secret_html('api_bearer_token', $gateway->form_fields['api_bearer_token']);
+$callbackSecretHtml = $gateway->generate_patwc_secret_html('callback_bearer_token', $gateway->form_fields['callback_bearer_token']);
+$secretRenderData = json_encode($gateway->form_fields) . $apiSecretHtml . $callbackSecretHtml;
+if (!is_string($secretRenderData)) {
+    throw new RuntimeException('Unable to encode gateway form fields.');
+}
+
+if (strpos($secretRenderData, 'api-secret-token') !== false || strpos($secretRenderData, 'callback-secret-token') !== false) {
+    throw new RuntimeException('Secret field rendering leaked a saved token.');
+}
+
+patwc_assert_same('patwc_secret', $gateway->form_fields['api_bearer_token']['type'], 'API token field should use the custom secret type.');
+patwc_assert_same('patwc_secret', $gateway->form_fields['callback_bearer_token']['type'], 'Callback token field should use the custom secret type.');
+patwc_assert_same('api-secret-token', $gateway->validate_patwc_secret_field('api_bearer_token', ''), 'Blank API token save should preserve the existing secret.');
+patwc_assert_same('replacement-api-token', $gateway->validate_patwc_secret_field('api_bearer_token', 'replacement-api-token'), 'Non-empty API token save should replace the existing secret.');
+
+$GLOBALS['patwc_admin_errors'] = array();
+patwc_assert_same('callback-secret-token', $gateway->validate_patwc_secret_field('callback_bearer_token', "bad
+secret"), 'Invalid callback token save should preserve the existing secret.');
+patwc_assert_same(array('Callback bearer token cannot contain control characters or newlines.'), $GLOBALS['patwc_admin_errors'], 'Invalid callback token save should report a clear error.');

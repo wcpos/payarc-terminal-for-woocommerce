@@ -77,8 +77,10 @@ if (function_exists('add_action')) {
 
 if (function_exists('add_filter')) {
     add_filter('woocommerce_payment_gateways', static function ($gateways) {
-        if (class_exists('WCPOS\\WooCommercePOS\\PayArcTerminal\\Gateway')) {
-            $gateways[] = 'WCPOS\\WooCommercePOS\\PayArcTerminal\\Gateway';
+        $gatewayClass = 'WCPOS\\WooCommercePOS\\PayArcTerminal\\Gateway';
+
+        if (class_exists('WC_Payment_Gateway') && class_exists($gatewayClass) && is_subclass_of($gatewayClass, 'WC_Payment_Gateway')) {
+            $gateways[] = $gatewayClass;
         }
 
         return $gateways;
