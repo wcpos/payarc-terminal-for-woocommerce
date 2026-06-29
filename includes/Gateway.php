@@ -55,7 +55,6 @@ trait GatewayImplementation
                 'default' => 'test',
                 'options' => array(
                     'test' => 'Test',
-                    'production' => 'Production (disabled/unverified)',
                 ),
             ),
             'api_bearer_token' => array(
@@ -123,10 +122,15 @@ trait GatewayImplementation
     {
         $errors = array();
         $enabled = self::setting_string($settings, 'enabled') === 'yes';
+        $mode = self::setting_string($settings, 'mode', 'test');
         $tenantId = self::setting_string($settings, 'tenant_id');
         $terminalId = self::setting_string($settings, 'default_terminal_id');
         $tenderType = strtoupper(self::setting_string($settings, 'tender_type', 'CREDIT'));
         $printReceipt = self::setting_string($settings, 'print_receipt', '0');
+
+        if ($mode === 'production') {
+            $errors[] = 'Production mode cannot be saved until the production URL/token source is verified.';
+        }
 
         if ($enabled && preg_match('/^[0-9]{12}$/', $tenantId) !== 1) {
             $errors[] = 'Tenant ID must be exactly 12 digits when the gateway is enabled.';

@@ -111,3 +111,14 @@ patwc_assert_same(array(), Gateway::validate_settings(array(
     'tender_type' => 'CREDIT',
     'print_receipt' => '0',
 )), 'Valid gateway settings should not return errors.');
+
+patwc_assert_same(array(
+    'Production mode cannot be saved until the production URL/token source is verified.',
+), Gateway::validate_settings(array(
+    'enabled' => 'yes',
+    'mode' => 'production',
+    'tenant_id' => '123456789012',
+    'default_terminal_id' => '1234567890',
+    'tender_type' => 'CREDIT',
+    'print_receipt' => '0',
+)), 'Production mode should be rejected until verified.');
