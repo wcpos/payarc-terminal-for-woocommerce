@@ -115,6 +115,12 @@ trait GatewayImplementation
                     'readonly' => 'readonly',
                 ),
             ),
+            'diagnostics' => array(
+                'title' => 'PayArc diagnostics',
+                'type' => 'patwc_diagnostics',
+                'description' => 'Local-only diagnostics. This does not call PayArc and never displays bearer tokens.',
+                'default' => '',
+            ),
         );
     }
 
@@ -153,6 +159,89 @@ trait GatewayImplementation
         }
 
         return $errors;
+    }
+
+    /**
+     * Performs local-only settings diagnostics for the admin validation control.
+     *
+     * The return payload intentionally contains only generic check names/messages and never echoes
+     * submitted secrets or raw tenant/terminal values.
+     *
+     * @param array<string, mixed> $settings
+     * @return array{status:string, errors:string[], checks:array<int, array{key:string, status:string, message:string}>}
+     */
+    public static function local_settings_diagnostics(array $settings): array
+    {
+        $checks = array();
+
+        self::append_local_check(
+            $checks,
+            'api_bearer_token',
+            self::setting_configured($settings, 'api_bearer_token_configured', 'api_bearer_token'),
+            'API bearer token is configured.',
+            'API bearer token must be configured.'
+        );
+
+        self::append_local_check(
+            $checks,
+            'callback_bearer_token',
+            self::setting_configured($settings, 'callback_bearer_token_configured', 'callback_bearer_token'),
+            'Callback bearer token is configured.',
+            'Callback bearer token must be configured.'
+        );
+
+        self::append_local_check(
+            $checks,
+            'tenant_id',
+            preg_match('/^[0-9]{12}$/', self::setting_string($settings, 'tenant_id')) === 1,
+            'Tenant ID format is valid.',
+            'Tenant ID must be exactly 12 digits.'
+        );
+
+        self::append_local_check(
+            $checks,
+            'default_terminal_id',
+            preg_match('/^[0-9]{10}$/', self::setting_string($settings, 'default_terminal_id')) === 1,
+            'Default terminal ID format is valid.',
+            'Default terminal ID must be exactly 10 digits.'
+        );
+
+        self::append_local_check(
+            $checks,
+            'webhook_url',
+            stripos(self::setting_string($settings, 'webhook_url'), 'https://') === 0,
+            'Callback URL is HTTPS.',
+            'Callback URL must be HTTPS.'
+        );
+
+        self::append_local_check(
+            $checks,
+            'print_receipt',
+            in_array(self::setting_string($settings, 'print_receipt', '0'), array('0', '1', '2', '3'), true),
+            'Print receipt value is valid.',
+            'Print receipt must be one of 0, 1, 2, or 3.'
+        );
+
+        self::append_local_check(
+            $checks,
+            'tender_type',
+            in_array(strtoupper(self::setting_string($settings, 'tender_type', 'CREDIT')), array('CREDIT', 'DEBIT'), true),
+            'Tender type is valid.',
+            'Tender type must be CREDIT or DEBIT.'
+        );
+
+        $errors = array();
+        foreach ($checks as $check) {
+            if ($check['status'] === 'error') {
+                $errors[] = $check['message'];
+            }
+        }
+
+        return array(
+            'status' => count($errors) === 0 ? 'ok' : 'error',
+            'errors' => $errors,
+            'checks' => $checks,
+        );
     }
 
     public function process_admin_options()
@@ -297,6 +386,44 @@ trait GatewayImplementation
         return $html;
     }
 
+    /**
+     * Render the local diagnostics table and Validate Settings control.
+     *
+     * @param array<string, mixed> $data
+     */
+    public function generate_patwc_diagnostics_html(string $key, array $data): string
+    {
+        $fieldKey = method_exists($this, 'get_field_key') ? $this->get_field_key($key) : 'woocommerce_' . Settings::GATEWAY_ID . '_' . $key;
+        $title = $this->field_text($data, 'title', 'PayArc diagnostics');
+        $description = $this->field_text($data, 'description', 'Local-only diagnostics. This does not call PayArc and never displays bearer tokens.');
+        $buttonId = $fieldKey . '_validate';
+        $resultId = $fieldKey . '_result';
+        $ajaxUrl = function_exists('admin_url') ? admin_url('admin-ajax.php') : 'admin-ajax.php';
+        $nonce = function_exists('wp_create_nonce') ? wp_create_nonce('patwc_validate_settings') : '';
+        $savedState = array(
+            'api_bearer_token_configured' => $this->gateway_option('api_bearer_token', '') !== '',
+            'callback_bearer_token_configured' => $this->gateway_option('callback_bearer_token', '') !== '',
+        );
+
+        $html = '<tr valign="top">';
+        $html .= '<th scope="row" class="titledesc">' . $this->escape_html($title) . '</th>';
+        $html .= '<td class="forminp">';
+        $html .= '<p class="description">' . $this->escape_html($description) . '</p>';
+        $html .= '<table class="widefat striped patwc-diagnostics" aria-label="' . $this->escape_attr('PayArc diagnostics') . '"><tbody>';
+
+        foreach ($this->diagnostic_rows() as $label => $value) {
+            $html .= '<tr><th scope="row">' . $this->escape_html($label) . '</th><td>' . $this->escape_html($value) . '</td></tr>';
+        }
+
+        $html .= '</tbody></table>';
+        $html .= '<p><button type="button" class="button patwc-validate-settings" id="' . $this->escape_attr($buttonId) . '" data-action="patwc_validate_settings" data-ajax-url="' . $this->escape_attr($ajaxUrl) . '" data-nonce="' . $this->escape_attr($nonce) . '">' . $this->escape_html('Validate Settings') . '</button></p>';
+        $html .= '<div id="' . $this->escape_attr($resultId) . '" class="patwc-validate-settings-result" role="status" aria-live="polite"></div>';
+        $html .= $this->validate_settings_script($buttonId, $resultId, $savedState);
+        $html .= '</td></tr>';
+
+        return $html;
+    }
+
     public function validate_patwc_secret_field(string $key, $value): string
     {
         $existing = $this->gateway_option($key, '');
@@ -342,6 +469,179 @@ trait GatewayImplementation
         }
 
         return 'Secret field';
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function diagnostic_rows(): array
+    {
+        $settings = new Settings();
+        $lastError = $this->last_payarc_error();
+
+        return array(
+            'Mode' => $settings->mode(),
+            'Connect base URL' => $settings->connect_base_url(),
+            'Tenant ID' => self::mask_identifier($settings->tenant_id()),
+            'Default terminal ID' => self::mask_identifier($settings->default_terminal_id()),
+            'Webhook URL' => $settings->webhook_url(),
+            'Last callback timestamp' => self::diagnostic_text($this->diagnostic_option('patwc_last_callback_timestamp', 'None recorded')),
+            'Last PayArc error code' => $lastError['code'],
+            'Last PayArc error message' => $lastError['message'],
+        );
+    }
+
+    /**
+     * @return array{code:string, message:string}
+     */
+    private function last_payarc_error(): array
+    {
+        $error = $this->diagnostic_option('patwc_last_payarc_error', array());
+
+        if (is_array($error)) {
+            $code = array_key_exists('code', $error) ? self::diagnostic_text($error['code']) : '';
+            $message = array_key_exists('message', $error) ? self::diagnostic_text($error['message']) : '';
+
+            return array(
+                'code' => $code !== '' ? $code : 'None recorded',
+                'message' => $message !== '' ? $message : 'None recorded',
+            );
+        }
+
+        $code = self::diagnostic_text($this->diagnostic_option('patwc_last_payarc_error_code', ''));
+        $message = self::diagnostic_text($this->diagnostic_option('patwc_last_payarc_error_message', $error));
+
+        return array(
+            'code' => $code !== '' ? $code : 'None recorded',
+            'message' => $message !== '' ? $message : 'None recorded',
+        );
+    }
+
+    /**
+     * @param mixed $default
+     * @return mixed
+     */
+    private function diagnostic_option(string $key, $default)
+    {
+        if (function_exists('get_option')) {
+            return get_option($key, $default);
+        }
+
+        return $default;
+    }
+
+    private function validate_settings_script(string $buttonId, string $resultId, array $savedState): string
+    {
+        $fieldPrefix = 'woocommerce_' . Settings::GATEWAY_ID . '_';
+        $payload = array(
+            'buttonId' => $buttonId,
+            'resultId' => $resultId,
+            'fieldPrefix' => $fieldPrefix,
+            'savedState' => $savedState,
+        );
+        $encoded = $this->json_encode($payload);
+
+        return '<script>(function(config){' .
+            'if(!config){return;}' .
+            'var button=document.getElementById(config.buttonId);' .
+            'var result=document.getElementById(config.resultId);' .
+            'if(!button||!result){return;}' .
+            'function fieldValue(key){var el=document.getElementById(config.fieldPrefix+key);return el&&typeof el.value==="string"?el.value.trim():"";}' .
+            'function fieldConfigured(key){return fieldValue(key)!=="";}' .
+            'function add(errors,condition,message){if(!condition){errors.push(message);}}' .
+            'function render(errors){if(errors.length===0){result.textContent="Local validation passed. No PayArc call was made.";return;}var html="<strong>Local validation found issues:</strong><ul>";for(var i=0;i<errors.length;i++){html+="<li>"+errors[i].replace(/[&<>]/g,function(c){return {\"&\":\"&amp;\",\"<\":\"&lt;\",\">\":\"&gt;\"}[c];})+"</li>";}result.innerHTML=html+"</ul>";}' .
+            'function localValidate(diagnostics){diagnostics=diagnostics||{};var errors=[];var apiConfigured=fieldConfigured("api_bearer_token")||!!diagnostics.api_bearer_token_configured||!!config.savedState.api_bearer_token_configured;var callbackConfigured=fieldConfigured("callback_bearer_token")||!!diagnostics.callback_bearer_token_configured||!!config.savedState.callback_bearer_token_configured;add(errors,apiConfigured,"API bearer token must be configured.");add(errors,callbackConfigured,"Callback bearer token must be configured.");add(errors,/^[0-9]{12}$/.test(fieldValue("tenant_id")),"Tenant ID must be exactly 12 digits.");add(errors,/^[0-9]{10}$/.test(fieldValue("default_terminal_id")),"Default terminal ID must be exactly 10 digits.");add(errors,/^https:\\/\\//i.test(fieldValue("webhook_url")),"Callback URL must be HTTPS.");add(errors,[\"0\",\"1\",\"2\",\"3\"].indexOf(fieldValue("print_receipt"))!==-1,"Print receipt must be one of 0, 1, 2, or 3.");add(errors,[\"CREDIT\",\"DEBIT\"].indexOf(fieldValue("tender_type").toUpperCase())!==-1,"Tender type must be CREDIT or DEBIT.");render(errors);}' .
+            'button.addEventListener("click",function(){var action=button.getAttribute("data-action")||"patwc_validate_settings";var nonce=button.getAttribute("data-nonce")||"";var ajaxUrl=button.getAttribute("data-ajax-url")||"admin-ajax.php";result.textContent="Running local validation...";if(!window.fetch||!window.FormData){localValidate({});return;}var data=new FormData();data.append("action",action);data.append("_ajax_nonce",nonce);window.fetch(ajaxUrl,{method:"POST",credentials:"same-origin",body:data}).then(function(response){return response.json();}).then(function(body){localValidate(body&&body.diagnostics?body.diagnostics:{});}).catch(function(){localValidate({});});});' .
+            '})(' . $encoded . ');</script>';
+    }
+
+    /**
+     * @param mixed $value
+     */
+    private function json_encode($value): string
+    {
+        if (function_exists('wp_json_encode')) {
+            $encoded = wp_json_encode($value);
+        } else {
+            $encoded = json_encode($value);
+        }
+
+        return is_string($encoded) ? $encoded : 'null';
+    }
+
+    private static function mask_identifier(string $value): string
+    {
+        $value = trim($value);
+
+        if ($value === '') {
+            return 'Not configured';
+        }
+
+        $lastFour = substr($value, -4);
+        $maskLength = max(0, strlen($value) - 4);
+
+        return str_repeat('•', $maskLength) . $lastFour;
+    }
+
+    /**
+     * @param mixed $value
+     */
+    private static function diagnostic_text($value): string
+    {
+        if (!is_scalar($value)) {
+            return '';
+        }
+
+        $text = trim((string) $value);
+        $text = preg_replace('/[[:cntrl:]]+/', ' ', $text);
+        if (!is_string($text)) {
+            return '';
+        }
+
+        $text = preg_replace('/\\bBearer\\s+[A-Za-z0-9._~+\\/=:-]+/i', 'Bearer [REDACTED]', $text);
+        if (!is_string($text)) {
+            return '';
+        }
+
+        $text = preg_replace('/\\b(api|callback|access|bearer|token|secret)([_ -]?(token|secret|key))?\\b\\s*[:=]?\\s*[A-Za-z0-9._~+\\/=:-]{8,}/i', '$1 [REDACTED]', $text);
+        if (!is_string($text)) {
+            return '';
+        }
+
+        return trim($text);
+    }
+
+    /**
+     * @param array<int, array{key:string, status:string, message:string}> $checks
+     */
+    private static function append_local_check(array &$checks, string $key, bool $passed, string $successMessage, string $errorMessage): void
+    {
+        $checks[] = array(
+            'key' => $key,
+            'status' => $passed ? 'ok' : 'error',
+            'message' => $passed ? $successMessage : $errorMessage,
+        );
+    }
+
+    /**
+     * @param array<string, mixed> $settings
+     */
+    private static function setting_configured(array $settings, string $flagKey, string $secretKey): bool
+    {
+        if (array_key_exists($secretKey, $settings) && is_scalar($settings[$secretKey]) && trim((string) $settings[$secretKey]) !== '') {
+            return true;
+        }
+
+        if (!array_key_exists($flagKey, $settings) || !is_scalar($settings[$flagKey])) {
+            return false;
+        }
+
+        $value = $settings[$flagKey];
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        return in_array(strtolower(trim((string) $value)), array('1', 'yes', 'true', 'configured'), true);
     }
 
     private function escape_attr(string $value): string
