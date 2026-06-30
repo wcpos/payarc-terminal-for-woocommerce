@@ -777,7 +777,7 @@ trait GatewayImplementation
      */
     private function enqueue_payment_assets($order, bool $authorized): void
     {
-        $version = defined('PATWC_VERSION') ? PATWC_VERSION : '0.1.1';
+        $version = defined('PATWC_VERSION') ? PATWC_VERSION : '0.1.2';
         $pluginUrl = defined('PATWC_PLUGIN_URL') ? rtrim(PATWC_PLUGIN_URL, '/') . '/' : '';
 
         if (function_exists('wp_enqueue_style')) {
