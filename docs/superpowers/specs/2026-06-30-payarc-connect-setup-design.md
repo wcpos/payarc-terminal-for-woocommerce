@@ -3,6 +3,8 @@
 Date: 2026-06-30
 Status: Approved design; implementation pending
 
+This spec supersedes the manual-setup assumptions in the earlier implementation plan, specifically Task 2 settings/gateway fields, Task 8 admin/AJAX setup actions, and Task 10 diagnostics/setup documentation in `docs/superpowers/plans/2026-06-29-payarc-pax-terminal.md`.
+
 ## Problem
 
 The current mock-only PayArc Terminal plugin asks the merchant to manually enter several low-level values:
@@ -89,13 +91,21 @@ Fallback fields must be clearly labelled as temporary and not the recommended me
 
 Add connection-oriented getters while preserving existing payment-service callers:
 
-- `connection_status()` → `not_connected`, `connected`, `error`, or `manual`
+- `connection_status()` → computed on read as `not_connected`, `connected`, `error`, or `manual`
 - `api_access_token()` / existing `api_bearer_token()` compatibility
 - `api_refresh_token()` if PayArc supports refresh tokens
-- `tenant_id()` sourced from discovered connection data or manual fallback
-- `default_terminal_id()` sourced from selected registry terminal or manual fallback
+- `tenant_id()` sourced according to `connection_mode`
+- `default_terminal_id()` sourced according to `connection_mode`
 - `terminal_registry()` returning sanitized cached terminal summaries
-- `callback_bearer_token()` generated/stored locally unless PayArc requires/provides one
+- `callback_bearer_token()` sourced from the PayArc-provided/setup token by default, with generated-token support only if the live spike proves PayArc accepts merchant-generated callback secrets
+
+Getter precedence is explicit:
+
+- `connection_mode=auto`: transaction getters read only discovered/connected values. Manual fallback fields are ignored, even if populated.
+- `connection_mode=manual`: transaction getters read only manual fallback fields. Discovered registry values are ignored for payment commands.
+- No getter silently merges auto and manual sources. This prevents unclear “which tenant/terminal did the sale use?” behavior.
+- Switching modes does not delete the other mode's stored values, but it changes which source is active.
+- `is_available()` must gate checkout/POS availability on the active mode being valid, not merely on the WooCommerce `enabled` checkbox.
 
 ### `PayArcConnectionService`
 
@@ -156,7 +166,6 @@ Use WooCommerce gateway settings for stable configuration and separate options/t
 Recommended fields:
 
 - `connection_mode`: `auto`, `manual`
-- `connection_status`: `not_connected`, `connected`, `error`
 - `api_access_token`: secret, never rendered
 - `api_refresh_token`: secret, if applicable
 - `api_token_expires_at`: timestamp, if applicable
@@ -165,8 +174,12 @@ Recommended fields:
 - `terminal_registry`: array of sanitized terminal summaries
 - `default_terminal_id`: selected from registry
 - `terminal_registry_refreshed_at`: timestamp
-- `callback_bearer_token`: generated or PayArc-provided secret, never rendered
+- `callback_bearer_token`: PayArc-provided/setup secret by default, never rendered; generated only if live verification proves PayArc accepts merchant-generated callback secrets
 - `last_connection_error`: redacted code/message
+
+Do not persist `connection_status` as a separate source of truth. Compute it from `connection_mode`, configured token presence, token expiry if known, selected/default terminal state, and `last_connection_error`. Persisting only the inputs avoids drift when tokens expire, credentials are removed, or the admin switches modes.
+
+Tokens at rest are stored in WooCommerce gateway settings/options like sibling payment plugins store API keys. This is acceptable for the plugin architecture, but the UI/docs must acknowledge that refresh tokens are long-lived secrets and should be protected by normal WordPress admin/database access controls.
 
 Terminal summaries should include only non-secret display fields PayArc returns, for example:
 
@@ -180,11 +193,11 @@ Do not store full raw terminal registry payloads unless they are scrubbed first.
 
 ## Callback Secret Strategy
 
-Preferred: plugin generates a high-entropy callback bearer token and displays only whether it is configured. The merchant or PayArc partner setup uses that token when configuring callbacks.
+Current best-evidenced path: PayArc provides or provisions the callback bearer token during account/callback setup, and the merchant/admin enters it during setup. The plugin stores it server-side and displays only whether it is configured.
 
-If PayArc exposes callback registration through API, the Connect PayArc flow can register/update the callback URL and secret automatically. This must be live-verified before implementation claims it works.
+If PayArc exposes callback registration through API, the Connect PayArc flow can register/update the callback URL automatically. If that API also accepts a merchant-provided secret, the plugin may generate a high-entropy callback bearer token and push it to PayArc. Both capabilities must be live-verified before implementation claims they work.
 
-If PayArc requires the merchant to copy a callback token from PayArc, keep a secret input in advanced setup but avoid making it part of the normal happy path.
+If PayArc requires the merchant to copy a callback token from PayArc, the connection setup should include a secret input for that PayArc-provided token. Keep any plugin-generated callback-secret path behind the live-spike result, not as the default implementation path.
 
 ## Validation and Error Handling
 
@@ -194,7 +207,7 @@ If PayArc requires the merchant to copy a callback token from PayArc, keep a sec
 
 - connected/manual status
 - access token configured
-- callback bearer token configured or generated
+- callback bearer token configured from PayArc/setup, or generated only when live verification proves that path is supported
 - tenant ID present and locally valid if known format is verified
 - selected terminal exists in cached registry, or manual fallback terminal is valid
 - callback URL is HTTPS
@@ -260,6 +273,8 @@ These must be answered with real PayArc sandbox/partner credentials before claim
 5. Are Terminal Registry and Connect V3 transaction APIs authenticated with the same token family?
 6. Can callback URL and callback bearer secret be registered/updated via API, or must the merchant configure them manually in PayArc?
 7. What fields in terminal registry are safe and useful for merchants to identify each PAX device?
+8. Does `POST /v3/transactions/sale` return `traceId` synchronously, or only later via callback?
+9. Is the sale/get/callback `amount` shape the object `{total, subtotal, currency, tip, tax}`, and are numeric amounts minor units such as cents?
 
 ## Implementation Recommendation
 
