@@ -137,6 +137,50 @@ class PatwcAjaxFakePaymentService
     }
 }
 
+
+class PatwcAjaxFakeConnectionService
+{
+    /** @var array<int, array<string, mixed>> */
+    public $connect_calls = array();
+
+    /** @var int */
+    public $refresh_calls = 0;
+
+    /** @var int */
+    public $disconnect_calls = 0;
+
+    /** @var array<string, mixed> */
+    public $connect_response = array(
+        'status' => 'connected',
+        'message' => 'Connected to PayArc.',
+        'tenant_id_configured' => true,
+        'default_terminal_id_configured' => true,
+        'terminal_count' => 1,
+        'terminals' => array(array('terminal_id' => '1850528139', 'label' => 'Front Counter ••••••8139')),
+    );
+
+    public function connect(array $overrides = array()): array
+    {
+        $this->connect_calls[] = $overrides;
+
+        return $this->connect_response;
+    }
+
+    public function refresh_terminals(): array
+    {
+        $this->refresh_calls++;
+
+        return $this->connect_response;
+    }
+
+    public function disconnect(): array
+    {
+        $this->disconnect_calls++;
+
+        return array('status' => 'disconnected', 'message' => 'Disconnected from PayArc.');
+    }
+}
+
 function patwc_ajax_assert_same($expected, $actual, string $message): void
 {
     if ($expected !== $actual) {
@@ -197,10 +241,13 @@ patwc_ajax_assert_same(array(
     'wp_ajax_nopriv_patwc_poll_payment',
     'wp_ajax_nopriv_patwc_start_payment',
     'wp_ajax_patwc_cancel_payment',
+    'wp_ajax_patwc_connect_payarc',
+    'wp_ajax_patwc_disconnect_payarc',
     'wp_ajax_patwc_poll_payment',
+    'wp_ajax_patwc_refresh_payarc_terminals',
     'wp_ajax_patwc_start_payment',
     'wp_ajax_patwc_validate_settings',
-), $registeredHooks, 'init should register privileged and nopriv lifecycle routes plus privileged validate route.');
+), $registeredHooks, 'init should register lifecycle, privileged validation, and privileged PayArc connection routes.');
 
 $unauthorizedValidate = $handler->handle_validate_settings(array());
 patwc_ajax_assert_same(403, $unauthorizedValidate['status_code'], 'Validate settings should require WooCommerce manager capability.');
@@ -342,3 +389,43 @@ try {
     // no-op; keeps the exception regression close to the handler contract.
 }
 
+
+
+patwc_ajax_reset_env();
+$service = new PatwcAjaxFakePaymentService();
+$connectionService = new PatwcAjaxFakeConnectionService();
+$handler = new AjaxHandler($service, static function (int $order_id) use ($orders) {
+    return $orders[$order_id] ?? null;
+}, null, $connectionService);
+$GLOBALS['patwc_ajax_caps'] = array('manage_woocommerce' => true);
+$GLOBALS['patwc_ajax_valid_nonces']['patwc_payarc_connection'] = 'valid-connection-nonce';
+$connect = $handler->handle_connect_payarc(array(
+    '_ajax_nonce' => 'valid-connection-nonce',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'client-secret',
+    'connect_secret_key' => 'merchant-api-token',
+));
+patwc_ajax_assert_same(200, $connect['status_code'], 'Manager should connect PayArc settings.');
+patwc_ajax_assert_same('connected', $connect['body']['status'], 'Connect endpoint should return connected status.');
+patwc_ajax_assert_same(1, $connect['body']['terminal_count'], 'Connect endpoint should expose sanitized terminal count.');
+patwc_ajax_assert_same(array(array(
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'client-secret',
+    'connect_secret_key' => 'merchant-api-token',
+)), $connectionService->connect_calls, 'Connect endpoint should pass unsaved credentials to connection service.');
+patwc_ajax_assert_missing_keys($connect['body'], array('connect_secret_key', 'connect_client_secret', 'connect_access_token', 'api_bearer_token'), 'Connect response should omit secrets.');
+
+$refresh = $handler->handle_refresh_payarc_terminals(array('_ajax_nonce' => 'valid-connection-nonce'));
+patwc_ajax_assert_same(200, $refresh['status_code'], 'Manager should refresh PayArc terminals.');
+patwc_ajax_assert_same(1, $connectionService->refresh_calls, 'Refresh endpoint should call connection service.');
+
+$disconnect = $handler->handle_disconnect_payarc(array('_ajax_nonce' => 'valid-connection-nonce'));
+patwc_ajax_assert_same(200, $disconnect['status_code'], 'Manager should disconnect PayArc.');
+patwc_ajax_assert_same(1, $connectionService->disconnect_calls, 'Disconnect endpoint should call connection service.');
+
+$unauthorizedConnect = $handler->handle_connect_payarc(array('_ajax_nonce' => 'valid-connection-nonce'));
+$GLOBALS['patwc_ajax_caps'] = array();
+$unauthorizedConnect = $handler->handle_connect_payarc(array('_ajax_nonce' => 'valid-connection-nonce'));
+patwc_ajax_assert_same(403, $unauthorizedConnect['status_code'], 'Connect endpoint should require manager capability.');

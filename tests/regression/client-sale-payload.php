@@ -53,7 +53,9 @@ $GLOBALS['patwc_client_response'] = array(
 
 $settings = new Settings(array(
     'mode' => 'test',
-    'api_bearer_token' => 'mock-api-token',
+    'api_bearer_token' => 'merchant-api-token',
+    'connect_secret_key' => 'merchant-api-token',
+    'connect_access_token' => 'connect-access-token',
     'callback_bearer_token' => 'callback-secret-token',
 ));
 $client = new PayArcClient($settings);
@@ -83,7 +85,7 @@ patwc_client_assert_same('https://testpayarcconnectapi.payarc.net/v3/transaction
 patwc_client_assert_same('POST', $args['method'], 'Sale method mismatch.');
 patwc_client_assert_same('application/json', $headers['Accept'], 'Accept header mismatch.');
 patwc_client_assert_same('application/json', $headers['Content-Type'], 'Content-Type header mismatch.');
-patwc_client_assert_same('Bearer mock-api-token', $headers['Authorization'], 'Authorization header mismatch.');
+patwc_client_assert_same('Bearer connect-access-token', $headers['Authorization'], 'Connect V3 requests should use the Login AccessToken, not the Merchant Dashboard API token.');
 patwc_client_assert_same($idempotencyKey, $headers['X-Idempotency-Key'], 'Idempotency header mismatch.');
 patwc_client_assert_same(array(
     'tenantId' => '123456789012',
@@ -151,7 +153,7 @@ try {
         }
     }
 
-    foreach (array('mock-api-token', 'callback-secret-token', 'Authorization', json_encode($payload)) as $secretPart) {
+    foreach (array('merchant-api-token', 'connect-access-token', 'callback-secret-token', 'Authorization', json_encode($payload)) as $secretPart) {
         if (is_string($secretPart) && $secretPart !== '' && strpos($message, $secretPart) !== false) {
             throw new RuntimeException('PayArc failure message leaked secret or unsafe request detail.');
         }

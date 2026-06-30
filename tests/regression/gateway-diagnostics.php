@@ -146,10 +146,14 @@ function patwc_gateway_diagnostics_assert_not_contains(string $needle, string $h
 $GLOBALS['patwc_gateway_diagnostics_options'] = array(
     'woocommerce_' . Settings::GATEWAY_ID . '_settings' => array(
         'mode' => 'test',
-        'api_bearer_token' => 'api-secret-token-should-not-render',
+        'connect_email' => 'merchant@example.com',
+        'connect_mid' => '0000123456789012',
+        'connect_secret_key' => 'api-secret-token-should-not-render',
+        'connect_access_token' => 'connect-access-token-should-not-render',
         'callback_bearer_token' => 'callback-secret-token-should-not-render',
         'tenant_id' => '123456789012',
         'default_terminal_id' => '9876543210',
+        'terminal_registry' => array(array('terminal_id' => '9876543210', 'label' => 'Front Counter ••••••3210', 'enabled' => true)),
         'tender_type' => 'CREDIT',
         'print_receipt' => '1',
     ),
@@ -173,7 +177,9 @@ if (!method_exists(Gateway::class, 'local_settings_diagnostics')) {
 $html = $gateway->generate_patwc_diagnostics_html('diagnostics', array('title' => 'Diagnostics'));
 patwc_gateway_diagnostics_assert_contains('PayArc diagnostics', $html, 'Diagnostics table should have an accessible heading.');
 patwc_gateway_diagnostics_assert_contains('Mode', $html, 'Diagnostics table should show mode.');
-patwc_gateway_diagnostics_assert_contains('https://testpayarcconnectapi.payarc.net', $html, 'Diagnostics table should show Connect base URL.');
+patwc_gateway_diagnostics_assert_contains('https://testpayarcconnectapi.curvpos.com', $html, 'Diagnostics table should show Connect Login URL.');
+patwc_gateway_diagnostics_assert_contains('https://testpayarcconnectapi.payarc.net', $html, 'Diagnostics table should show Connect V3 URL.');
+patwc_gateway_diagnostics_assert_contains('https://testapi.payarc.net', $html, 'Diagnostics table should show Merchant API URL.');
 patwc_gateway_diagnostics_assert_contains('••••••••9012', $html, 'Diagnostics table should mask tenant id except last four.');
 patwc_gateway_diagnostics_assert_contains('••••••3210', $html, 'Diagnostics table should mask terminal id except last four.');
 patwc_gateway_diagnostics_assert_contains('admin-ajax.php?action=patwc_payarc_callback', $html, 'Diagnostics table should show webhook URL.');
@@ -183,14 +189,16 @@ patwc_gateway_diagnostics_assert_contains('[REDACTED]', $html, 'Diagnostics tabl
 patwc_gateway_diagnostics_assert_contains('data-action="patwc_validate_settings"', $html, 'Validate Settings control should use the existing AJAX action.');
 patwc_gateway_diagnostics_assert_contains('nonce-for-patwc_validate_settings', $html, 'Validate Settings control should include the validate-settings nonce.');
 patwc_gateway_diagnostics_assert_not_contains('api-secret-token-should-not-render', $html, 'Diagnostics HTML must not leak API token.');
+patwc_gateway_diagnostics_assert_not_contains('connect-access-token-should-not-render', $html, 'Diagnostics HTML must not leak Connect AccessToken.');
 patwc_gateway_diagnostics_assert_not_contains('callback-secret-token-should-not-render', $html, 'Diagnostics HTML must not leak callback token.');
 patwc_gateway_diagnostics_assert_not_contains('123456789012', $html, 'Diagnostics HTML must not render raw tenant id.');
 patwc_gateway_diagnostics_assert_not_contains('9876543210', $html, 'Diagnostics HTML must not render raw terminal id.');
 
 $diagnostics = Gateway::local_settings_diagnostics(array(
-    'api_bearer_token_configured' => false,
+    'connect_secret_key_configured' => false,
+    'connect_access_token_configured' => false,
     'callback_bearer_token_configured' => false,
-    'tenant_id' => 'bad-tenant',
+    'connect_mid' => 'bad-mid',
     'default_terminal_id' => '123',
     'webhook_url' => 'http://merchant.example/wp-admin/admin-ajax.php?action=patwc_payarc_callback',
     'print_receipt' => '9',
@@ -199,30 +207,32 @@ $diagnostics = Gateway::local_settings_diagnostics(array(
 
 patwc_gateway_diagnostics_assert_same('error', $diagnostics['status'], 'Invalid local diagnostics should report error status.');
 patwc_gateway_diagnostics_assert_same(array(
-    'API bearer token must be configured.',
+    'PayArc SecretKey/API bearer token must be configured.',
+    'Press Connect PayArc to fetch a Connect AccessToken.',
     'Callback bearer token must be configured.',
-    'Tenant ID must be exactly 12 digits.',
-    'Default terminal ID must be exactly 10 digits.',
+    'PayArc MID must contain at least 12 digits.',
+    'Connect PayArc and select a discovered terminal.',
     'Callback URL must be HTTPS.',
     'Print receipt must be one of 0, 1, 2, or 3.',
     'Tender type must be CREDIT or DEBIT.',
-), $diagnostics['errors'], 'Local validation errors should cover required token, format, HTTPS, receipt, and tender checks.');
+), $diagnostics['errors'], 'Local validation errors should cover required Connect token, callback, MID, terminal, HTTPS, receipt, and tender checks.');
 
 $encodedDiagnostics = json_encode($diagnostics);
 if (!is_string($encodedDiagnostics)) {
     throw new RuntimeException('Unable to encode diagnostics result.');
 }
 
-foreach (array('api-secret-token-should-not-render', 'callback-secret-token-should-not-render', 'bad-tenant', '123') as $secretOrRawValue) {
+foreach (array('api-secret-token-should-not-render', 'connect-access-token-should-not-render', 'callback-secret-token-should-not-render', 'bad-mid') as $secretOrRawValue) {
     if (strpos($encodedDiagnostics, $secretOrRawValue) !== false) {
         throw new RuntimeException('Local diagnostics should not echo raw secret or identifier values: ' . $secretOrRawValue);
     }
 }
 
 $validDiagnostics = Gateway::local_settings_diagnostics(array(
-    'api_bearer_token_configured' => true,
+    'connect_secret_key_configured' => true,
+    'connect_access_token_configured' => true,
     'callback_bearer_token_configured' => true,
-    'tenant_id' => '123456789012',
+    'connect_mid' => '0000123456789012',
     'default_terminal_id' => '9876543210',
     'webhook_url' => 'https://merchant.example/wp-admin/admin-ajax.php?action=patwc_payarc_callback',
     'print_receipt' => '0',

@@ -30,6 +30,10 @@ trait GatewayImplementation
     public function init_form_fields(): void
     {
         $settings = new Settings();
+        $terminalOptions = $settings->terminal_registry_options();
+        if (count($terminalOptions) === 0) {
+            $terminalOptions = array('' => 'Connect PayArc to discover terminals');
+        }
 
         $this->form_fields = array(
             'enabled' => array(
@@ -55,35 +59,54 @@ trait GatewayImplementation
             'mode' => array(
                 'title' => 'Mode',
                 'type' => 'select',
-                'description' => 'Production remains disabled until the production URL/token source is verified.',
+                'description' => 'Use Test for PayArc Connect Test merchants and terminals. Production endpoints remain disabled until PayArc production Connect URLs are verified.',
                 'default' => 'test',
                 'options' => array(
                     'test' => 'Test',
                 ),
             ),
-            'api_bearer_token' => array(
-                'title' => 'API bearer token',
+            'connect_email' => array(
+                'title' => 'PayArc login email',
+                'type' => 'text',
+                'description' => 'Email used to sign in to the PayArc merchant dashboard.',
+                'default' => '',
+            ),
+            'connect_mid' => array(
+                'title' => 'PayArc MID',
+                'type' => 'text',
+                'description' => 'Merchant ID from the PayArc Merchant Profile. The plugin derives the Connect tenant id from the last 12 digits.',
+                'default' => '',
+            ),
+            'connect_client_secret' => array(
+                'title' => 'PayArc ClientSecret',
                 'type' => 'patwc_secret',
-                'description' => 'PayArc Connect bearer or access token proven by Task 0. Used server-side only.',
+                'description' => 'ClientSecret from the PayArc dashboard API section. Stored server-side only.',
+                'default' => '',
+            ),
+            'connect_secret_key' => array(
+                'title' => 'PayArc SecretKey / API bearer token',
+                'type' => 'patwc_secret',
+                'description' => 'SecretKey/API bearer token from the PayArc dashboard. Used to call PayArc Login and terminal registry; terminal transactions use the Login AccessToken.',
                 'default' => '',
             ),
             'callback_bearer_token' => array(
                 'title' => 'Callback bearer token',
                 'type' => 'patwc_secret',
-                'description' => 'PayArc-provisioned secret expected in the callback Authorization header.',
+                'description' => 'PayArc-provided callback secret expected in the callback Authorization header.',
                 'default' => '',
             ),
-            'tenant_id' => array(
-                'title' => 'Tenant ID',
-                'type' => 'text',
-                'description' => 'Last 12 digits of the merchant identifier.',
+            'connection' => array(
+                'title' => 'PayArc connection',
+                'type' => 'patwc_connection',
+                'description' => 'Press Connect to call PayArc Login, fetch a Connect AccessToken, and discover terminals from PayArc.',
                 'default' => '',
             ),
             'default_terminal_id' => array(
-                'title' => 'Default terminal ID',
-                'type' => 'text',
-                'description' => '10-digit PAX terminal serial/id.',
-                'default' => '',
+                'title' => 'Default terminal',
+                'type' => 'select',
+                'description' => 'Discovered PayArc terminal used for payments. Use Refresh Terminals if the merchant adds or renames terminals in PayArc.',
+                'default' => $settings->default_terminal_id(),
+                'options' => $terminalOptions,
             ),
             'tender_type' => array(
                 'title' => 'Tender type',
@@ -97,19 +120,19 @@ trait GatewayImplementation
             'print_receipt' => array(
                 'title' => 'Print receipt',
                 'type' => 'select',
-                'description' => 'PayArc receipt flag.',
+                'description' => 'PayArc receipt flag: 0 none, 1 merchant, 2 customer, 3 both.',
                 'default' => '0',
                 'options' => array(
-                    '0' => '0',
-                    '1' => '1',
-                    '2' => '2',
-                    '3' => '3',
+                    '0' => '0 - No receipt',
+                    '1' => '1 - Merchant receipt',
+                    '2' => '2 - Customer receipt',
+                    '3' => '3 - Both receipts',
                 ),
             ),
             'webhook_url' => array(
                 'title' => 'Webhook URL',
                 'type' => 'text',
-                'description' => 'Configure PayArc callbacks to send transaction updates to this URL.',
+                'description' => 'Give this HTTPS callback URL to PayArc if they need to configure callbacks for the merchant account.',
                 'default' => $settings->webhook_url(),
                 'custom_attributes' => array(
                     'readonly' => 'readonly',
@@ -118,11 +141,12 @@ trait GatewayImplementation
             'diagnostics' => array(
                 'title' => 'PayArc diagnostics',
                 'type' => 'patwc_diagnostics',
-                'description' => 'Local-only diagnostics. This does not call PayArc and never displays bearer tokens.',
+                'description' => 'Safe diagnostics for connection state, callback URL, and terminal discovery. Secrets are never displayed.',
                 'default' => '',
             ),
         );
     }
+
 
     /**
      * @param array<string, mixed> $settings
@@ -133,21 +157,21 @@ trait GatewayImplementation
         $errors = array();
         $enabled = self::setting_string($settings, 'enabled') === 'yes';
         $mode = self::setting_string($settings, 'mode', 'test');
-        $tenantId = self::setting_string($settings, 'tenant_id');
+        $tenantId = self::tenant_id_from_settings($settings);
         $terminalId = self::setting_string($settings, 'default_terminal_id');
         $tenderType = strtoupper(self::setting_string($settings, 'tender_type', 'CREDIT'));
         $printReceipt = self::setting_string($settings, 'print_receipt', '0');
 
         if ($mode === 'production') {
-            $errors[] = 'Production mode cannot be saved until the production URL/token source is verified.';
+            $errors[] = 'Production mode cannot be saved until PayArc production Connect URLs are verified.';
         }
 
         if ($enabled && preg_match('/^[0-9]{12}$/', $tenantId) !== 1) {
-            $errors[] = 'Tenant ID must be exactly 12 digits when the gateway is enabled.';
+            $errors[] = 'PayArc MID must contain at least 12 digits so the tenant ID can be derived when the gateway is enabled.';
         }
 
         if ($enabled && preg_match('/^[0-9]{10}$/', $terminalId) !== 1) {
-            $errors[] = 'Default terminal ID must be exactly 10 digits when the gateway is enabled.';
+            $errors[] = 'Select a discovered PayArc terminal before enabling the gateway.';
         }
 
         if (!in_array($tenderType, array('CREDIT', 'DEBIT'), true)) {
@@ -161,8 +185,9 @@ trait GatewayImplementation
         return $errors;
     }
 
+
     /**
-     * Performs local-only settings diagnostics for the admin validation control.
+     * Performs safe settings diagnostics for the admin validation control.
      *
      * The return payload intentionally contains only generic check names/messages and never echoes
      * submitted secrets or raw tenant/terminal values.
@@ -173,13 +198,22 @@ trait GatewayImplementation
     public static function local_settings_diagnostics(array $settings): array
     {
         $checks = array();
+        $tenantId = self::tenant_id_from_settings($settings);
 
         self::append_local_check(
             $checks,
-            'api_bearer_token',
-            self::setting_configured($settings, 'api_bearer_token_configured', 'api_bearer_token'),
-            'API bearer token is configured.',
-            'API bearer token must be configured.'
+            'connect_secret_key',
+            self::setting_configured($settings, 'connect_secret_key_configured', 'connect_secret_key') || self::setting_configured($settings, 'api_bearer_token_configured', 'api_bearer_token'),
+            'PayArc SecretKey/API bearer token is configured.',
+            'PayArc SecretKey/API bearer token must be configured.'
+        );
+
+        self::append_local_check(
+            $checks,
+            'connect_access_token',
+            self::setting_configured($settings, 'connect_access_token_configured', 'connect_access_token'),
+            'PayArc Connect AccessToken is configured.',
+            'Press Connect PayArc to fetch a Connect AccessToken.'
         );
 
         self::append_local_check(
@@ -193,17 +227,17 @@ trait GatewayImplementation
         self::append_local_check(
             $checks,
             'tenant_id',
-            preg_match('/^[0-9]{12}$/', self::setting_string($settings, 'tenant_id')) === 1,
-            'Tenant ID format is valid.',
-            'Tenant ID must be exactly 12 digits.'
+            preg_match('/^[0-9]{12}$/', $tenantId) === 1,
+            'Tenant ID can be derived from the PayArc MID.',
+            'PayArc MID must contain at least 12 digits.'
         );
 
         self::append_local_check(
             $checks,
             'default_terminal_id',
             preg_match('/^[0-9]{10}$/', self::setting_string($settings, 'default_terminal_id')) === 1,
-            'Default terminal ID format is valid.',
-            'Default terminal ID must be exactly 10 digits.'
+            'Default terminal is selected.',
+            'Connect PayArc and select a discovered terminal.'
         );
 
         self::append_local_check(
@@ -244,6 +278,7 @@ trait GatewayImplementation
         );
     }
 
+
     public function process_admin_options()
     {
         $postedSettings = $this->posted_settings();
@@ -257,7 +292,14 @@ trait GatewayImplementation
             return false;
         }
 
-        return $this->process_valid_admin_options();
+        $connectionState = $this->saved_connection_state();
+        $result = $this->process_valid_admin_options();
+
+        if ($result !== false) {
+            $this->preserve_connection_state($connectionState);
+        }
+
+        return $result;
     }
 
     /**
@@ -373,7 +415,7 @@ trait GatewayImplementation
         $fieldKey = method_exists($this, 'get_field_key') ? $this->get_field_key($key) : 'woocommerce_' . Settings::GATEWAY_ID . '_' . $key;
         $title = $this->field_text($data, 'title', $key);
         $description = $this->field_text($data, 'description', '');
-        $configured = $this->gateway_option($key, '') !== '';
+        $configured = $this->secret_field_configured($key);
         $placeholder = $configured ? 'Configured - enter a new value to replace' : 'Not configured';
         $status = $configured ? 'Configured' : 'Empty';
 
@@ -395,13 +437,14 @@ trait GatewayImplementation
     {
         $fieldKey = method_exists($this, 'get_field_key') ? $this->get_field_key($key) : 'woocommerce_' . Settings::GATEWAY_ID . '_' . $key;
         $title = $this->field_text($data, 'title', 'PayArc diagnostics');
-        $description = $this->field_text($data, 'description', 'Local-only diagnostics. This does not call PayArc and never displays bearer tokens.');
+        $description = $this->field_text($data, 'description', 'Safe diagnostics. Secrets are never displayed.');
         $buttonId = $fieldKey . '_validate';
         $resultId = $fieldKey . '_result';
         $ajaxUrl = function_exists('admin_url') ? admin_url('admin-ajax.php') : 'admin-ajax.php';
         $nonce = function_exists('wp_create_nonce') ? wp_create_nonce('patwc_validate_settings') : '';
         $savedState = array(
-            'api_bearer_token_configured' => $this->gateway_option('api_bearer_token', '') !== '',
+            'connect_secret_key_configured' => $this->gateway_option('connect_secret_key', '') !== '' || $this->gateway_option('api_bearer_token', '') !== '',
+            'connect_access_token_configured' => $this->gateway_option('connect_access_token', '') !== '',
             'callback_bearer_token_configured' => $this->gateway_option('callback_bearer_token', '') !== '',
         );
 
@@ -424,9 +467,42 @@ trait GatewayImplementation
         return $html;
     }
 
+
+    /**
+     * Render the PayArc Connect controls.
+     *
+     * @param array<string, mixed> $data
+     */
+    public function generate_patwc_connection_html(string $key, array $data): string
+    {
+        $fieldKey = method_exists($this, 'get_field_key') ? $this->get_field_key($key) : 'woocommerce_' . Settings::GATEWAY_ID . '_' . $key;
+        $title = $this->field_text($data, 'title', 'PayArc connection');
+        $description = $this->field_text($data, 'description', 'Press Connect to call PayArc Login and discover terminals.');
+        $ajaxUrl = function_exists('admin_url') ? admin_url('admin-ajax.php') : 'admin-ajax.php';
+        $nonce = function_exists('wp_create_nonce') ? wp_create_nonce('patwc_payarc_connection') : '';
+        $resultId = $fieldKey . '_result';
+
+        $html = '<tr valign="top">';
+        $html .= '<th scope="row" class="titledesc">' . $this->escape_html($title) . '</th>';
+        $html .= '<td class="forminp patwc-connection-panel">';
+        $html .= '<p class="description">' . $this->escape_html($description) . '</p>';
+        $html .= '<p class="patwc-connection-actions">';
+        $html .= '<button type="button" class="button button-primary patwc-connect-payarc" data-action="patwc_connect_payarc" data-ajax-url="' . $this->escape_attr($ajaxUrl) . '" data-nonce="' . $this->escape_attr($nonce) . '" data-result-id="' . $this->escape_attr($resultId) . '">' . $this->escape_html('Connect PayArc') . '</button> ';
+        $html .= '<button type="button" class="button patwc-refresh-payarc-terminals" data-action="patwc_refresh_payarc_terminals" data-ajax-url="' . $this->escape_attr($ajaxUrl) . '" data-nonce="' . $this->escape_attr($nonce) . '" data-result-id="' . $this->escape_attr($resultId) . '">' . $this->escape_html('Refresh Terminals') . '</button> ';
+        $html .= '<button type="button" class="button patwc-disconnect-payarc" data-action="patwc_disconnect_payarc" data-ajax-url="' . $this->escape_attr($ajaxUrl) . '" data-nonce="' . $this->escape_attr($nonce) . '" data-result-id="' . $this->escape_attr($resultId) . '">' . $this->escape_html('Disconnect') . '</button>';
+        $html .= '</p>';
+        $html .= '<div id="' . $this->escape_attr($resultId) . '" class="patwc-connection-result" role="status" aria-live="polite"></div>';
+        $html .= '</td></tr>';
+
+        return $html;
+    }
+
     public function validate_patwc_secret_field(string $key, $value): string
     {
         $existing = $this->gateway_option($key, '');
+        if ($existing === '' && $key === 'connect_secret_key') {
+            $existing = $this->gateway_option('api_bearer_token', '');
+        }
 
         if (!is_scalar($value)) {
             return $existing;
@@ -458,10 +534,27 @@ trait GatewayImplementation
         return (string) $data[$key];
     }
 
+    private function secret_field_configured(string $key): bool
+    {
+        if ($this->gateway_option($key, '') !== '') {
+            return true;
+        }
+
+        if ($key === 'connect_secret_key' && $this->gateway_option('api_bearer_token', '') !== '') {
+            return true;
+        }
+
+        return false;
+    }
+
     private function secret_field_label(string $key): string
     {
-        if ($key === 'api_bearer_token') {
-            return 'API bearer token';
+        if ($key === 'api_bearer_token' || $key === 'connect_secret_key') {
+            return 'PayArc SecretKey/API bearer token';
+        }
+
+        if ($key === 'connect_client_secret') {
+            return 'PayArc ClientSecret';
         }
 
         if ($key === 'callback_bearer_token') {
@@ -481,15 +574,22 @@ trait GatewayImplementation
 
         return array(
             'Mode' => $settings->mode(),
-            'Connect base URL' => $settings->connect_base_url(),
+            'Connect Login URL' => $settings->connect_login_base_url(),
+            'Connect V3 URL' => $settings->connect_base_url(),
+            'Merchant API URL' => $settings->merchant_api_base_url(),
+            'PayArc login email' => $settings->connect_email() !== '' ? 'Configured' : 'Not configured',
+            'PayArc MID' => self::mask_identifier($settings->connect_mid()),
             'Tenant ID' => self::mask_identifier($settings->tenant_id()),
+            'Discovered terminals' => (string) count($settings->terminal_registry_options()),
             'Default terminal ID' => self::mask_identifier($settings->default_terminal_id()),
+            'Connect AccessToken' => $settings->connect_access_token() !== '' ? 'Configured' : 'Not configured',
             'Webhook URL' => $settings->webhook_url(),
             'Last callback timestamp' => self::diagnostic_text($this->diagnostic_option('patwc_last_callback_timestamp', 'None recorded')),
             'Last PayArc error code' => $lastError['code'],
             'Last PayArc error message' => $lastError['message'],
         );
     }
+
 
     /**
      * @return array{code:string, message:string}
@@ -547,13 +647,14 @@ trait GatewayImplementation
             'var result=document.getElementById(config.resultId);' .
             'if(!button||!result){return;}' .
             'function fieldValue(key){var el=document.getElementById(config.fieldPrefix+key);return el&&typeof el.value==="string"?el.value.trim():"";}' .
-            'function fieldConfigured(key){return fieldValue(key)!=="";}' .
+            'function configured(key,flag){return fieldValue(key)!==""||!!config.savedState[flag];}' .
             'function add(errors,condition,message){if(!condition){errors.push(message);}}' .
-            'function render(errors){if(errors.length===0){result.textContent="Local validation passed. No PayArc call was made.";return;}var html="<strong>Local validation found issues:</strong><ul>";for(var i=0;i<errors.length;i++){html+="<li>"+errors[i].replace(/[&<>]/g,function(c){return {\"&\":\"&amp;\",\"<\":\"&lt;\",\">\":\"&gt;\"}[c];})+"</li>";}result.innerHTML=html+"</ul>";}' .
-            'function localValidate(diagnostics){diagnostics=diagnostics||{};var errors=[];var apiConfigured=fieldConfigured("api_bearer_token")||!!diagnostics.api_bearer_token_configured||!!config.savedState.api_bearer_token_configured;var callbackConfigured=fieldConfigured("callback_bearer_token")||!!diagnostics.callback_bearer_token_configured||!!config.savedState.callback_bearer_token_configured;add(errors,apiConfigured,"API bearer token must be configured.");add(errors,callbackConfigured,"Callback bearer token must be configured.");add(errors,/^[0-9]{12}$/.test(fieldValue("tenant_id")),"Tenant ID must be exactly 12 digits.");add(errors,/^[0-9]{10}$/.test(fieldValue("default_terminal_id")),"Default terminal ID must be exactly 10 digits.");add(errors,/^https:\\/\\//i.test(fieldValue("webhook_url")),"Callback URL must be HTTPS.");add(errors,[\"0\",\"1\",\"2\",\"3\"].indexOf(fieldValue("print_receipt"))!==-1,"Print receipt must be one of 0, 1, 2, or 3.");add(errors,[\"CREDIT\",\"DEBIT\"].indexOf(fieldValue("tender_type").toUpperCase())!==-1,"Tender type must be CREDIT or DEBIT.");render(errors);}' .
-            'button.addEventListener("click",function(){var action=button.getAttribute("data-action")||"patwc_validate_settings";var nonce=button.getAttribute("data-nonce")||"";var ajaxUrl=button.getAttribute("data-ajax-url")||"admin-ajax.php";result.textContent="Running local validation...";if(!window.fetch||!window.FormData){localValidate({});return;}var data=new FormData();data.append("action",action);data.append("_ajax_nonce",nonce);window.fetch(ajaxUrl,{method:"POST",credentials:"same-origin",body:data}).then(function(response){return response.json();}).then(function(body){localValidate(body&&body.diagnostics?body.diagnostics:{});}).catch(function(){localValidate({});});});' .
+            'function render(errors){if(errors.length===0){result.textContent="Settings validation passed.";return;}var html="<strong>Settings validation found issues:</strong><ul>";for(var i=0;i<errors.length;i++){html+="<li>"+errors[i].replace(/[&<>]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c];})+"</li>";}result.innerHTML=html+"</ul>";}' .
+            'function localValidate(diagnostics){diagnostics=diagnostics||{};var errors=[];var mid=fieldValue("connect_mid").replace(/\D/g,"");var terminal=fieldValue("default_terminal_id");var secretConfigured=configured("connect_secret_key","connect_secret_key_configured")||!!diagnostics.connect_secret_key_configured;var accessConfigured=!!diagnostics.connect_access_token_configured||!!config.savedState.connect_access_token_configured;var callbackConfigured=configured("callback_bearer_token","callback_bearer_token_configured")||!!diagnostics.callback_bearer_token_configured;add(errors,secretConfigured,"PayArc SecretKey/API bearer token must be configured.");add(errors,accessConfigured,"Press Connect PayArc to fetch a Connect AccessToken.");add(errors,callbackConfigured,"Callback bearer token must be configured.");add(errors,mid.length>=12,"PayArc MID must contain at least 12 digits.");add(errors,/^[0-9]{10}$/.test(terminal),"Select a discovered PayArc terminal.");add(errors,/^https:\/\//i.test(fieldValue("webhook_url")),"Callback URL must be HTTPS.");add(errors,["0","1","2","3"].indexOf(fieldValue("print_receipt"))!==-1,"Print receipt must be one of 0, 1, 2, or 3.");add(errors,["CREDIT","DEBIT"].indexOf(fieldValue("tender_type").toUpperCase())!==-1,"Tender type must be CREDIT or DEBIT.");render(errors);}' .
+            'button.addEventListener("click",function(){var action=button.getAttribute("data-action")||"patwc_validate_settings";var nonce=button.getAttribute("data-nonce")||"";var ajaxUrl=button.getAttribute("data-ajax-url")||"admin-ajax.php";result.textContent="Checking saved settings...";if(!window.fetch||!window.FormData){localValidate({});return;}var data=new FormData();data.append("action",action);data.append("_ajax_nonce",nonce);window.fetch(ajaxUrl,{method:"POST",credentials:"same-origin",body:data}).then(function(response){return response.json();}).then(function(body){localValidate(body&&body.diagnostics?body.diagnostics:{});}).catch(function(){localValidate({});});});' .
             '})(' . $encoded . ');</script>';
     }
+
 
     /**
      * @param mixed $value
@@ -676,7 +777,7 @@ trait GatewayImplementation
      */
     private function enqueue_payment_assets($order, bool $authorized): void
     {
-        $version = defined('PATWC_VERSION') ? PATWC_VERSION : '0.1.0';
+        $version = defined('PATWC_VERSION') ? PATWC_VERSION : '0.1.1';
         $pluginUrl = defined('PATWC_PLUGIN_URL') ? rtrim(PATWC_PLUGIN_URL, '/') . '/' : '';
 
         if (function_exists('wp_enqueue_style')) {
@@ -840,6 +941,67 @@ trait GatewayImplementation
         }
 
         return '';
+    }
+
+    /**
+     * @param array<string, mixed> $settings
+     */
+    private static function tenant_id_from_settings(array $settings): string
+    {
+        $mid = preg_replace('/\D+/', '', self::setting_string($settings, 'connect_mid'));
+        if (is_string($mid) && strlen($mid) >= 12) {
+            return substr($mid, -12);
+        }
+
+        $manual = self::setting_string($settings, 'tenant_id');
+        if (preg_match('/^[0-9]{12}$/', $manual) === 1) {
+            return $manual;
+        }
+
+        return $manual;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function saved_connection_state(): array
+    {
+        if (!function_exists('get_option')) {
+            return array();
+        }
+
+        $option = 'woocommerce_' . Settings::GATEWAY_ID . '_settings';
+        $settings = get_option($option, array());
+        if (!is_array($settings)) {
+            return array();
+        }
+
+        $state = array();
+        foreach (array('connect_access_token', 'connect_token_expires_at', 'terminal_registry') as $key) {
+            if (array_key_exists($key, $settings)) {
+                $state[$key] = $settings[$key];
+            }
+        }
+
+        return $state;
+    }
+
+    /**
+     * @param array<string, mixed> $connectionState
+     */
+    private function preserve_connection_state(array $connectionState): void
+    {
+        if (count($connectionState) === 0 || !function_exists('get_option') || !function_exists('update_option')) {
+            return;
+        }
+
+        $option = 'woocommerce_' . Settings::GATEWAY_ID . '_settings';
+        $settings = get_option($option, array());
+        if (!is_array($settings)) {
+            $settings = array();
+        }
+
+        update_option($option, array_merge($settings, $connectionState));
     }
 
     /**

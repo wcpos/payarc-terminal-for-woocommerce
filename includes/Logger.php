@@ -90,7 +90,7 @@ class Logger
             return true;
         }
 
-        if (in_array($normalized, array('api_bearer_token', 'callback_bearer_token'), true)) {
+        if (in_array($normalized, array('api_bearer_token', 'connect_secret_key', 'connect_access_token', 'connect_client_secret', 'callback_bearer_token'), true)) {
             return true;
         }
 

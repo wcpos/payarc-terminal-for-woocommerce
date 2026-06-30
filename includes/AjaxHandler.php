@@ -3,6 +3,7 @@
 namespace WCPOS\WooCommercePOS\PayArcTerminal;
 
 use Throwable;
+use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcConnectionService;
 use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcPaymentService;
 
 class AjaxHandler
@@ -13,6 +14,9 @@ class AjaxHandler
     /** @var callable|object|null */
     private $order_locator;
 
+    /** @var object */
+    private $connection_service;
+
     /** @var array<string, mixed>|null */
     private $request_data;
 
@@ -20,12 +24,14 @@ class AjaxHandler
      * @param object|null $payment_service
      * @param callable|object|null $order_locator
      * @param array<string, mixed>|null $request_data
+     * @param object|null $connection_service
      */
-    public function __construct($payment_service = null, $order_locator = null, ?array $request_data = null)
+    public function __construct($payment_service = null, $order_locator = null, ?array $request_data = null, $connection_service = null)
     {
         $this->payment_service = $payment_service === null ? new PayArcPaymentService() : $payment_service;
         $this->order_locator = $order_locator;
         $this->request_data = $request_data;
+        $this->connection_service = $connection_service === null ? new PayArcConnectionService() : $connection_service;
     }
 
     public function init(): void
@@ -41,6 +47,9 @@ class AjaxHandler
         add_action('wp_ajax_patwc_cancel_payment', array($this, 'handle_cancel'));
         add_action('wp_ajax_nopriv_patwc_cancel_payment', array($this, 'handle_cancel'));
         add_action('wp_ajax_patwc_validate_settings', array($this, 'handle_validate_settings'));
+        add_action('wp_ajax_patwc_connect_payarc', array($this, 'handle_connect_payarc'));
+        add_action('wp_ajax_patwc_refresh_payarc_terminals', array($this, 'handle_refresh_payarc_terminals'));
+        add_action('wp_ajax_patwc_disconnect_payarc', array($this, 'handle_disconnect_payarc'));
     }
 
     /**
@@ -95,6 +104,34 @@ class AjaxHandler
         );
 
         return $this->maybe_emit($response, $emit);
+    }
+
+
+    /**
+     * @param array<string, mixed>|null $request
+     * @return array{status_code:int, body:array<string, mixed>}|void
+     */
+    public function handle_connect_payarc(?array $request = null)
+    {
+        return $this->handle_connection_action('connect', $request);
+    }
+
+    /**
+     * @param array<string, mixed>|null $request
+     * @return array{status_code:int, body:array<string, mixed>}|void
+     */
+    public function handle_refresh_payarc_terminals(?array $request = null)
+    {
+        return $this->handle_connection_action('refresh', $request);
+    }
+
+    /**
+     * @param array<string, mixed>|null $request
+     * @return array{status_code:int, body:array<string, mixed>}|void
+     */
+    public function handle_disconnect_payarc(?array $request = null)
+    {
+        return $this->handle_connection_action('disconnect', $request);
     }
 
     /**
@@ -185,6 +222,95 @@ class AjaxHandler
         }
 
         return $this->maybe_emit(array('status_code' => 200, 'body' => $this->normalize_body($body, $action)), $emit);
+    }
+
+
+    /**
+     * @param array<string, mixed>|null $request
+     * @return array{status_code:int, body:array<string, mixed>}|void
+     */
+    private function handle_connection_action(string $action, ?array $request = null)
+    {
+        $emit = $request === null;
+        $request = $this->request($request);
+
+        if (!function_exists('current_user_can') || !current_user_can('manage_woocommerce')) {
+            return $this->maybe_emit($this->error_response(403, 'Access denied.'), $emit);
+        }
+
+        if (!$this->has_valid_nonce($request, 'patwc_payarc_connection')) {
+            return $this->maybe_emit($this->error_response(403, 'Access denied.'), $emit);
+        }
+
+        try {
+            if ($action === 'connect') {
+                $body = $this->connection_service->connect($this->connection_overrides($request));
+            } elseif ($action === 'refresh') {
+                $body = $this->connection_service->refresh_terminals();
+            } else {
+                $body = $this->connection_service->disconnect();
+            }
+        } catch (Throwable $exception) {
+            return $this->maybe_emit($this->error_response(500, 'Unable to connect PayArc. Check the entered PayArc credentials and try again.'), $emit);
+        }
+
+        return $this->maybe_emit(array('status_code' => 200, 'body' => $this->public_connection_body($body)), $emit);
+    }
+
+    /**
+     * @param array<string, mixed> $request
+     * @return array<string, mixed>
+     */
+    private function connection_overrides(array $request): array
+    {
+        $overrides = array();
+        foreach (array('mode', 'connect_email', 'connect_mid', 'connect_client_secret', 'connect_secret_key', 'callback_bearer_token') as $key) {
+            if (isset($request[$key]) && is_scalar($request[$key])) {
+                $value = trim((string) $request[$key]);
+                if ($value !== '') {
+                    $overrides[$key] = $value;
+                }
+            }
+        }
+
+        return $overrides;
+    }
+
+    /**
+     * @param array<string, mixed> $body
+     * @return array<string, mixed>
+     */
+    private function public_connection_body(array $body): array
+    {
+        $public = array();
+        foreach (array('status', 'message', 'warning', 'tenant_id', 'default_terminal_id') as $key) {
+            if (isset($body[$key]) && is_scalar($body[$key]) && trim((string) $body[$key]) !== '') {
+                $public[$key] = (string) $body[$key];
+            }
+        }
+        foreach (array('tenant_id_configured', 'default_terminal_id_configured') as $key) {
+            if (array_key_exists($key, $body)) {
+                $public[$key] = (bool) $body[$key];
+            }
+        }
+        if (array_key_exists('terminal_count', $body)) {
+            $public['terminal_count'] = (int) $body['terminal_count'];
+        }
+        $public['terminals'] = array();
+        if (isset($body['terminals']) && is_array($body['terminals'])) {
+            foreach ($body['terminals'] as $terminal) {
+                if (!is_array($terminal)) {
+                    continue;
+                }
+                $terminalId = isset($terminal['terminal_id']) && is_scalar($terminal['terminal_id']) ? trim((string) $terminal['terminal_id']) : '';
+                $label = isset($terminal['label']) && is_scalar($terminal['label']) ? trim((string) $terminal['label']) : '';
+                if ($terminalId !== '' && $label !== '') {
+                    $public['terminals'][] = array('terminal_id' => $terminalId, 'label' => $label);
+                }
+            }
+        }
+
+        return $public;
     }
 
     /**

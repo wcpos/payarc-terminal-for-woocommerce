@@ -1,30 +1,39 @@
 # PayArc Terminal for WooCommerce
 
-PayArc PAX Terminal integration for WooCommerce POS.
+PayArc PAX Terminal integration for WooCommerce POS using PayArc Connect V3 server-driven terminal payments.
 
 ## Installation
 
-1. Copy this plugin directory to `wp-content/plugins/payarc-terminal-for-woocommerce`.
-2. From the plugin directory, run `composer dump-autoload` if your deployment relies on Composer autoloading.
-3. Activate **PayArc Terminal for WooCommerce** in WordPress.
-4. Configure WooCommerce POS/PayArc settings when the gateway implementation is available.
+1. Download the release ZIP and install it from **WordPress Admin → Plugins → Add New → Upload Plugin**.
+2. Activate **PayArc Terminal for WooCommerce**.
+3. Open **WooCommerce → Settings → Payments → PayArc Terminal**.
 
-## Setup notes
+## Merchant test setup
 
-This repository is currently in `MOCK_CONTRACT_CREATED` status for PayArc Connect V3 behavior. The plugin has docs-derived fixtures for sale, get-transaction, callback, and cancel flows, but no live PayArc sandbox calls or terminal evidence have been collected yet. Do not claim production readiness until the sandbox validation guide is completed with sanitized live evidence.
+This build is ready for a PayArc merchant to test with their own PayArc account and PAX terminal. The developer does not need a PayArc account because the plugin setup screen calls PayArc directly from the merchant's WordPress site.
 
-Required secure settings in WooCommerce admin:
+Required PayArc values from the merchant dashboard/API section:
 
-- PayArc test API bearer token.
-- PayArc callback bearer token.
-- Tenant ID, displayed only masked in diagnostics.
-- PAX terminal ID, displayed only masked in diagnostics.
-- Public HTTPS callback URL reachable by PayArc.
+- PayArc login email.
+- PayArc MID.
+- PayArc `ClientSecret`.
+- PayArc `SecretKey` / Merchant API bearer token.
+- PayArc-provided callback bearer token for validating terminal result callbacks.
 
-Use the gateway admin **Validate Settings** control for local checks only. It does not call PayArc; it verifies configured-token status, tenant/terminal formats, HTTPS callback URL, receipt enum, and tender enum without exposing secret values.
+Setup flow:
 
-See `/Users/kilbot/Projects/payarc-terminal-for-woocommerce/docs/payarc-sandbox-validation.md` for the required live sandbox validation sequence.
+1. Enter the PayArc values in the gateway settings.
+2. Press Connect PayArc. The plugin performs PayArc Login, stores the returned Connect AccessToken server-side, and runs terminal discovery.
+3. Select the discovered PAX terminal from the Default terminal dropdown. The terminal id comes from PayArc `pos_identifier`; normal setup does not require manually typing a terminal id.
+4. Confirm the Webhook URL is public HTTPS and give it to PayArc if callback configuration is required for the merchant account.
+5. Save settings and enable the gateway.
+6. Run a low-value test payment from WooCommerce POS/order-pay and complete the payment on the selected PAX terminal.
 
-## First release scope
+## What is verified in this repository
 
-Warning: the first release supports PayArc Connect V3 sale, callback, and cancel flows only. Other transaction types and PayArc APIs are out of scope for the initial release.
+- PayArc Connect V3 request/response shapes are implemented from current official PayArc docs.
+- The setup flow calls real PayArc endpoints when the merchant presses Connect PayArc.
+- Secrets are stored server-side and are not rendered back into admin HTML, diagnostics, AJAX responses, or terminal transaction payloads.
+- Terminal transactions use the PayArc Login `AccessToken`; the Merchant API token is only used for Login/terminal discovery.
+
+A merchant with PayArc credentials still needs to perform live terminal validation and report sanitized evidence. See `docs/payarc-sandbox-validation.md`.

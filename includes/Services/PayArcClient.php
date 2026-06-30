@@ -10,9 +10,16 @@ class PayArcClient
     /** @var Settings */
     private $settings;
 
-    public function __construct(?Settings $settings = null)
+    /** @var object */
+    private $connection_service;
+
+    /**
+     * @param object|null $connection_service
+     */
+    public function __construct(?Settings $settings = null, $connection_service = null)
     {
         $this->settings = $settings === null ? new Settings() : $settings;
+        $this->connection_service = $connection_service === null ? new PayArcConnectionService($this->settings) : $connection_service;
     }
 
     /**
@@ -68,14 +75,14 @@ class PayArcClient
     private function request(string $method, string $path, ?array $payload = null, ?string $idempotency_key = null): array
     {
         $baseUrl = rtrim($this->settings->connect_base_url(), '/');
-        $token = $this->settings->api_bearer_token();
+        $token = $this->connect_access_token();
 
         if ($baseUrl === '') {
             throw new RuntimeException('PayArc Connect base URL is not configured.');
         }
 
         if ($token === '') {
-            throw new RuntimeException('PayArc API bearer token is not configured.');
+            throw new RuntimeException('PayArc Connect access token is not configured. Press Connect PayArc in the gateway settings.');
         }
 
         $headers = array(
@@ -91,6 +98,7 @@ class PayArcClient
         $args = array(
             'method' => $method,
             'headers' => $headers,
+            'timeout' => 30,
         );
 
         if ($payload !== null) {
@@ -125,6 +133,26 @@ class PayArcClient
         }
 
         return $decoded;
+    }
+
+
+    private function connect_access_token(): string
+    {
+        $token = $this->settings->connect_access_token();
+        $expiresAt = $this->settings->connect_token_expires_at();
+        $now = time();
+
+        if ($token !== '' && ($expiresAt === 0 || $expiresAt > $now + 60)) {
+            return $token;
+        }
+
+        if (is_object($this->connection_service) && method_exists($this->connection_service, 'ensure_connect_access_token')) {
+            $refreshed = $this->connection_service->ensure_connect_access_token();
+
+            return is_scalar($refreshed) ? trim((string) $refreshed) : '';
+        }
+
+        return $token;
     }
 
     /**
