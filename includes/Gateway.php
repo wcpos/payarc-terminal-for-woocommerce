@@ -211,9 +211,10 @@ trait GatewayImplementation
     {
         $order = $this->current_payment_order();
         $orderId = $order !== null ? $this->order_id($order) : 0;
+        $authorized = $order !== null && $this->viewer_can_access_order($order);
 
         if ($order !== null) {
-            $this->enqueue_payment_assets($order);
+            $this->enqueue_payment_assets($order, $authorized);
         }
 
         echo '<div id="patwc-payment-panel" class="patwc-payment-panel" data-patwc-order-id="' . $this->escape_attr((string) $orderId) . '">';
@@ -224,7 +225,7 @@ trait GatewayImplementation
         echo '<p class="patwc-payment-panel__description">' . $this->escape_html('Start the in-person terminal payment, then wait for the terminal result before completing the order.') . '</p>';
         echo '<div id="patwc-payment-status" class="patwc-payment-status" role="status" aria-live="polite">' . $this->escape_html('Ready to start payment.') . '</div>';
         echo '<div class="patwc-payment-actions">';
-        echo '<button type="button" id="patwc-start-payment" class="button alt patwc-start-payment"' . ($order === null ? ' disabled="disabled"' : '') . '>' . $this->escape_html('Start Payment') . '</button>';
+        echo '<button type="button" id="patwc-start-payment" class="button alt patwc-start-payment"' . (!$authorized ? ' disabled="disabled"' : '') . '>' . $this->escape_html('Start Payment') . '</button>';
         echo '<button type="button" id="patwc-cancel-payment" class="button patwc-cancel-payment" hidden="hidden">' . $this->escape_html('Cancel Payment') . '</button>';
         echo '</div>';
         echo '<div id="patwc-payment-log" class="patwc-payment-log" aria-live="polite" aria-label="' . $this->escape_attr('Payment log') . '"></div>';
@@ -373,7 +374,7 @@ trait GatewayImplementation
     /**
      * @param object $order
      */
-    private function enqueue_payment_assets($order): void
+    private function enqueue_payment_assets($order, bool $authorized): void
     {
         $version = defined('PATWC_VERSION') ? PATWC_VERSION : '0.1.0';
         $pluginUrl = defined('PATWC_PLUGIN_URL') ? rtrim(PATWC_PLUGIN_URL, '/') . '/' : '';
@@ -391,7 +392,7 @@ trait GatewayImplementation
                 'ajaxUrl' => function_exists('admin_url') ? $this->escape_url(admin_url('admin-ajax.php')) : 'admin-ajax.php',
                 'nonce' => function_exists('wp_create_nonce') ? wp_create_nonce('patwc_payment') : '',
                 'orderId' => $this->order_id($order),
-                'orderToken' => class_exists(__NAMESPACE__ . '\\AjaxHandler') ? AjaxHandler::order_token_for($order) : '',
+                'orderToken' => $authorized && class_exists(__NAMESPACE__ . '\\AjaxHandler') ? AjaxHandler::order_token_for($order) : '',
                 'pollInterval' => 1500,
                 'timeoutMs' => 300000,
                 'strings' => array(
@@ -425,7 +426,10 @@ trait GatewayImplementation
         }
 
         if ($orderId <= 0 && isset($_GET['order_id'])) {
-            $orderId = $this->positive_int($_GET['order_id']);
+            $candidateOrderId = $this->positive_int($_GET['order_id']);
+            if ($candidateOrderId > 0 && $this->viewer_has_privileged_order_access($candidateOrderId)) {
+                $orderId = $candidateOrderId;
+            }
         }
 
         if ($orderId <= 0 || !function_exists('wc_get_order')) {
@@ -435,6 +439,62 @@ trait GatewayImplementation
         $order = wc_get_order($orderId);
 
         return is_object($order) ? $order : null;
+    }
+
+    /**
+     * @param object $order
+     */
+    private function viewer_can_access_order($order): bool
+    {
+        $orderId = $this->order_id($order);
+
+        if ($orderId > 0 && $this->viewer_has_privileged_order_access($orderId)) {
+            return true;
+        }
+
+        if (!method_exists($order, 'get_order_key')) {
+            return false;
+        }
+
+        $requestKey = $this->request_order_key();
+        if ($requestKey === '') {
+            return false;
+        }
+
+        $orderKey = (string) $order->get_order_key();
+
+        if (function_exists('hash_equals')) {
+            return hash_equals($orderKey, $requestKey);
+        }
+
+        return $orderKey === $requestKey;
+    }
+
+    private function viewer_has_privileged_order_access(int $orderId): bool
+    {
+        if (!function_exists('current_user_can')) {
+            return false;
+        }
+
+        return current_user_can('manage_woocommerce') || current_user_can('edit_shop_order', $orderId);
+    }
+
+    private function request_order_key(): string
+    {
+        $key = '';
+
+        if (function_exists('get_query_var')) {
+            $queryKey = get_query_var('key', '');
+            if (is_scalar($queryKey)) {
+                $key = trim((string) $queryKey);
+            }
+        }
+
+        if ($key === '' && isset($_GET['key']) && is_scalar($_GET['key'])) {
+            $key = trim((string) $_GET['key']);
+        }
+
+        return $key;
     }
 
     /**

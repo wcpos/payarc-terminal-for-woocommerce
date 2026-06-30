@@ -70,6 +70,18 @@ if (!function_exists('wp_salt')) {
     }
 }
 
+if (!function_exists('current_user_can')) {
+    function current_user_can($capability, ...$args)
+    {
+        $key = (string) $capability;
+        if (!empty($args)) {
+            $key .= ':' . implode(':', array_map('strval', $args));
+        }
+
+        return !empty($GLOBALS['patwc_gateway_caps'][$key]) || !empty($GLOBALS['patwc_gateway_caps'][(string) $capability]);
+    }
+}
+
 if (!function_exists('get_query_var')) {
     function get_query_var($query_var, $default = '')
     {
@@ -248,11 +260,50 @@ function patwc_gateway_ui_reset(): void
         2001 => new PatwcGatewayUiOrder(2001, false, 'wc_order_unpaid'),
         2002 => new PatwcGatewayUiOrder(2002, true, 'wc_order_paid'),
     );
+    $GLOBALS['patwc_gateway_caps'] = array();
+    $GLOBALS['patwc_ajax_caps'] = array();
     $GLOBALS['patwc_gateway_notices'] = array();
-    $GLOBALS['patwc_gateway_query_vars'] = array('order-pay' => 2001);
+    $GLOBALS['patwc_gateway_query_vars'] = array('order-pay' => 2001, 'key' => 'wc_order_unpaid');
     $GLOBALS['patwc_gateway_scripts'] = array();
     $GLOBALS['patwc_gateway_styles'] = array();
     $GLOBALS['patwc_gateway_localized'] = array();
+    $_GET = array();
+}
+
+/**
+ * @param array<string, mixed> $queryVars
+ * @param array<string, mixed> $get
+ * @param array<string, bool> $caps
+ * @return array<string, mixed>|null
+ */
+function patwc_gateway_ui_render_payment_data(array $queryVars, array $get = array(), array $caps = array()): ?array
+{
+    patwc_gateway_ui_reset();
+    $GLOBALS['patwc_gateway_query_vars'] = $queryVars;
+    $GLOBALS['patwc_gateway_caps'] = $caps;
+    $GLOBALS['patwc_ajax_caps'] = $caps;
+    $_GET = $get;
+
+    $gateway = new Gateway();
+    ob_start();
+    $gateway->payment_fields();
+    ob_get_clean();
+
+    $localized = $GLOBALS['patwc_gateway_localized']['patwc-payment'] ?? null;
+
+    return is_array($localized) && isset($localized['data']) && is_array($localized['data']) ? $localized['data'] : null;
+}
+
+/**
+ * @param array<string, mixed>|null $data
+ */
+function patwc_gateway_ui_order_token(?array $data): string
+{
+    if ($data === null || !isset($data['orderToken']) || !is_scalar($data['orderToken'])) {
+        return '';
+    }
+
+    return (string) $data['orderToken'];
 }
 
 patwc_gateway_ui_reset();
@@ -323,3 +374,15 @@ foreach (array('ready', 'starting', 'waiting', 'approved', 'retry', 'canceling',
         throw new RuntimeException('Localized strings should include non-empty key: ' . $key);
     }
 }
+
+$missingKeyData = patwc_gateway_ui_render_payment_data(array('order-pay' => 2001));
+patwc_gateway_ui_assert_same('', patwc_gateway_ui_order_token($missingKeyData), 'Guest order-pay render without key must not localize a usable order token.');
+
+$wrongKeyData = patwc_gateway_ui_render_payment_data(array('order-pay' => 2001, 'key' => 'wrong-key'));
+patwc_gateway_ui_assert_same('', patwc_gateway_ui_order_token($wrongKeyData), 'Guest order-pay render with wrong key must not localize a usable order token.');
+
+$orderIdFallbackData = patwc_gateway_ui_render_payment_data(array(), array('order_id' => 2001));
+patwc_gateway_ui_assert_same('', patwc_gateway_ui_order_token($orderIdFallbackData), 'Guest order_id fallback must not localize a usable order token.');
+
+$privilegedData = patwc_gateway_ui_render_payment_data(array('order-pay' => 2001), array(), array('edit_shop_order:2001' => true));
+patwc_gateway_ui_assert_same(AjaxHandler::order_token_for($GLOBALS['patwc_gateway_orders'][2001]), patwc_gateway_ui_order_token($privilegedData), 'Privileged users may localize an order token without an order key.');
