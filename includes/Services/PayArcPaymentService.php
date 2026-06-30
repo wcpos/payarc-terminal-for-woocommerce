@@ -14,6 +14,7 @@ class PayArcPaymentService
 {
     private const META_LAST_POLL_AT = '_patwc_last_poll_at';
     private const POLL_THROTTLE_SECONDS = 2;
+    private const RECONCILIATION_LOCK = 'reconcile';
 
     /** @var Settings */
     private $settings;
@@ -124,7 +125,7 @@ class PayArcPaymentService
             return $attempt;
         }
 
-        return PaymentLock::with_lock($this->order_id($order), 'poll', function () use ($order): array {
+        return PaymentLock::with_lock($this->order_id($order), self::RECONCILIATION_LOCK, function () use ($order): array {
             $attempt = PaymentAttempt::current($order);
             $status = isset($attempt['status']) ? (string) $attempt['status'] : 'created';
             $traceId = isset($attempt['trace_id']) && is_scalar($attempt['trace_id']) ? trim((string) $attempt['trace_id']) : '';
@@ -189,9 +190,11 @@ class PayArcPaymentService
                 $this->client->cancel($traceId, $terminal, PayArcIds::idempotency_key());
             } catch (Throwable $exception) {
                 if ($this->is_already_processed_error($exception)) {
-                    $payload = $this->client->get_transaction($traceId);
+                    return PaymentLock::with_lock($this->order_id($order), self::RECONCILIATION_LOCK, function () use ($order, $traceId): array {
+                        $payload = $this->client->get_transaction($traceId);
 
-                    return $this->reconcile($order, $payload, 'cancel_lookup');
+                        return $this->reconcile($order, $payload, 'cancel_lookup');
+                    });
                 }
 
                 throw $exception;

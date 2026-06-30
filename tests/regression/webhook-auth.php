@@ -8,6 +8,8 @@ declare(strict_types=1);
 
 use WCPOS\WooCommercePOS\PayArcTerminal\PaymentAttempt;
 use WCPOS\WooCommercePOS\PayArcTerminal\PaymentLock;
+use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcPaymentService;
+use WCPOS\WooCommercePOS\PayArcTerminal\Services\TerminalService;
 use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
 use WCPOS\WooCommercePOS\PayArcTerminal\WebhookHandler;
 
@@ -16,6 +18,8 @@ foreach (array(
     $root . '/includes/Settings.php',
     $root . '/includes/PaymentAttempt.php',
     $root . '/includes/PaymentLock.php',
+    $root . '/includes/Services/TerminalService.php',
+    $root . '/includes/Services/PayArcPaymentService.php',
     $root . '/includes/WebhookHandler.php',
 ) as $file) {
     if (!is_readable($file)) {
@@ -227,3 +231,33 @@ patwc_webhook_assert_same(202, $nestedLockResponse['status_code'], 'Nested locke
 patwc_webhook_assert_same('in_progress', $nestedLockResponse['body']['status'], 'Nested locked callback should report in_progress.');
 patwc_webhook_assert_same(array('trace-lock'), $lockedClient->get_calls, 'Nested locked callback should not fetch a second transaction.');
 patwc_webhook_assert_same(1, count($lockedReconciler->calls), 'Nested locked callback should not reconcile a second time.');
+
+$webhookPollOrder = new PatwcWebhookAuthOrder(2004);
+PaymentAttempt::record_new($webhookPollOrder, array('status' => 'processing', 'trace_id' => 'trace-webhook-poll-lock', 'transaction_id' => 'txn-webhook-poll-lock'));
+$webhookPollClient = new PatwcWebhookAuthFakeClient();
+$webhookPollClient->transaction_response = array('traceId' => 'trace-webhook-poll-lock', 'transactionId' => 'txn-webhook-poll-lock', 'status' => 'SUCCESS');
+$webhookPollReconciler = new PatwcWebhookAuthFakeReconciler();
+$webhookPollHandler = patwc_webhook_handler($webhookPollClient, $webhookPollReconciler, $webhookPollOrder);
+$nestedPollClient = new PatwcWebhookAuthFakeClient();
+$nestedPollReconciler = new PatwcWebhookAuthFakeReconciler();
+$nestedPollService = new PayArcPaymentService(
+    new Settings(array('tenant_id' => '123456789012', 'default_terminal_id' => '1234567890')),
+    $nestedPollClient,
+    new TerminalService(new Settings(array('tenant_id' => '123456789012', 'default_terminal_id' => '1234567890'))),
+    $nestedPollReconciler,
+    function (): int { return 3000; }
+);
+$nestedPollResult = null;
+$webhookPollClient->get_transaction_callback = function () use (&$nestedPollResult, $nestedPollService, $webhookPollOrder): void {
+    $nestedPollResult = $nestedPollService->poll_order($webhookPollOrder);
+};
+$webhookPollResponse = $webhookPollHandler->handle_request(json_encode(array(
+    'traceId' => 'trace-webhook-poll-lock',
+    'status' => 'SUCCESS',
+    'metadata' => array('order_id' => '2004'),
+)), array('HTTP_AUTHORIZATION' => 'Bearer expected-token'));
+patwc_webhook_assert_same(200, $webhookPollResponse['status_code'], 'Webhook should complete normally when nested poll observes reconciliation in progress.');
+patwc_webhook_assert_same('conflict', $nestedPollResult['status'], 'Poll overlapping webhook reconciliation should conflict on the shared reconciliation lock.');
+patwc_webhook_assert_same(true, $nestedPollResult['continue_polling'], 'Poll overlapping webhook reconciliation should continue polling.');
+patwc_webhook_assert_same(array(), $nestedPollClient->get_calls, 'Poll overlapping webhook reconciliation should not fetch transaction.');
+patwc_webhook_assert_same(array(), $nestedPollReconciler->calls, 'Poll overlapping webhook reconciliation should not reconcile.');

@@ -8,6 +8,8 @@ use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcClient;
 
 class WebhookHandler
 {
+    private const RECONCILIATION_LOCK = 'reconcile';
+
     /** @var Settings */
     private $settings;
 
@@ -92,7 +94,7 @@ class WebhookHandler
             return $this->response(202, array('status' => 'accepted_without_trace'));
         }
 
-        $lockedResponse = PaymentLock::with_lock($this->order_id($order), 'webhook_reconcile', function () use ($order, $traceId): array {
+        $lockedResponse = PaymentLock::with_lock($this->order_id($order), self::RECONCILIATION_LOCK, function () use ($order, $traceId): array {
             return $this->fetch_and_reconcile($order, $traceId);
         });
 
