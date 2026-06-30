@@ -83,18 +83,29 @@ if (($last['context']['source'] ?? '') !== 'payarc-terminal-for-woocommerce') {
 $GLOBALS['captured'] = array();
 Logger::log('Configuration summary', array(
     'connect_secret_key_configured' => true,
+    'connect_secret_key_submitted' => true,
     'connect_access_token_returned' => false,
     'connect_secret_key' => 'configured-secret-value',
+    'api_key' => 123456789,
+    'numericSecret' => 987654321,
 ));
 $summary = end($GLOBALS['captured']);
 if (!is_array($summary)) {
     throw new RuntimeException('Configuration summary log was not captured.');
 }
 
-if (($summary['context']['connect_secret_key_configured'] ?? null) !== true || ($summary['context']['connect_access_token_returned'] ?? null) !== false) {
+if (
+    ($summary['context']['connect_secret_key_configured'] ?? null) !== true
+    || ($summary['context']['connect_secret_key_submitted'] ?? null) !== true
+    || ($summary['context']['connect_access_token_returned'] ?? null) !== false
+) {
     throw new RuntimeException('Logger should preserve boolean diagnostic flags for secret-related configuration keys.');
 }
 
 if (($summary['context']['connect_secret_key'] ?? '') !== '[REDACTED]') {
     throw new RuntimeException('Logger should still redact actual secret values.');
+}
+
+if (($summary['context']['api_key'] ?? '') !== '[REDACTED]' || ($summary['context']['numericSecret'] ?? '') !== '[REDACTED]') {
+    throw new RuntimeException('Logger should redact numeric secret values.');
 }
