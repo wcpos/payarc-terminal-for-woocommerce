@@ -12,6 +12,7 @@ use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
 $root = dirname(__DIR__, 2);
 foreach (array(
     $root . '/includes/Settings.php',
+    $root . '/includes/Logger.php',
     $root . '/includes/AjaxHandler.php',
 ) as $file) {
     if (!is_readable($file)) {
@@ -19,6 +20,41 @@ foreach (array(
     }
 
     require_once $file;
+}
+
+if (!function_exists('wc_get_logger')) {
+    function wc_get_logger()
+    {
+        return new class {
+            public function info($message, array $context = array()): void
+            {
+                $this->capture('info', $message, $context);
+            }
+
+            public function warning($message, array $context = array()): void
+            {
+                $this->capture('warning', $message, $context);
+            }
+
+            public function error($message, array $context = array()): void
+            {
+                $this->capture('error', $message, $context);
+            }
+
+            private function capture(string $level, $message, array $context): void
+            {
+                $entry = array('level' => $level, 'message' => $message, 'context' => $context);
+
+                if (isset($GLOBALS['captured']) && is_array($GLOBALS['captured'])) {
+                    $GLOBALS['captured'][] = $entry;
+                }
+
+                if (isset($GLOBALS['patwc_captured_logs']) && is_array($GLOBALS['patwc_captured_logs'])) {
+                    $GLOBALS['patwc_captured_logs'][] = $entry;
+                }
+            }
+        };
+    }
 }
 
 if (!function_exists('add_action')) {
@@ -159,9 +195,16 @@ class PatwcAjaxFakeConnectionService
         'terminals' => array(array('terminal_id' => '1850528139', 'label' => 'Front Counter ••••••8139')),
     );
 
+    /** @var Throwable|null */
+    public $connect_exception = null;
+
     public function connect(array $overrides = array()): array
     {
         $this->connect_calls[] = $overrides;
+
+        if ($this->connect_exception instanceof Throwable) {
+            throw $this->connect_exception;
+        }
 
         return $this->connect_response;
     }
@@ -193,6 +236,13 @@ function patwc_ajax_assert_true($actual, string $message): void
     patwc_ajax_assert_same(true, (bool) $actual, $message);
 }
 
+function patwc_ajax_assert_contains(string $needle, string $haystack, string $message): void
+{
+    if (strpos($haystack, $needle) === false) {
+        throw new RuntimeException($message . ' Missing: ' . $needle . '. Haystack: ' . $haystack);
+    }
+}
+
 function patwc_ajax_assert_missing_keys(array $body, array $keys, string $message): void
 {
     foreach ($keys as $key) {
@@ -210,6 +260,7 @@ function patwc_ajax_reset_env(): void
         'patwc_payment' => 'valid-payment-nonce',
         'patwc_validate_settings' => 'valid-settings-nonce',
     );
+    $GLOBALS['patwc_captured_logs'] = array();
 }
 
 /**
@@ -422,6 +473,64 @@ patwc_ajax_assert_same(array(array(
     'connect_secret_key' => 'merchant-api-token',
 )), $connectionService->connect_calls, 'Connect endpoint should pass unsaved credentials to connection service.');
 patwc_ajax_assert_missing_keys($connect['body'], array('connect_secret_key', 'connect_client_secret', 'connect_access_token', 'api_bearer_token'), 'Connect response should omit secrets.');
+
+$connectionService->connect_exception = new RuntimeException('PayArc Login failed; ErrorCode: 401; ErrorMessage: Invalid merchant credentials.');
+$GLOBALS['patwc_captured_logs'] = array();
+$failedConnect = $handler->handle_connect_payarc(array(
+    '_ajax_nonce' => 'valid-connection-nonce',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'client-secret',
+    'connect_secret_key' => 'merchant-api-token',
+));
+patwc_ajax_assert_same(500, $failedConnect['status_code'], 'Connect failures should return 500.');
+patwc_ajax_assert_same('PayArc Login failed; ErrorCode: 401; ErrorMessage: Invalid merchant credentials.', $failedConnect['body']['message'], 'Safe PayArc Login failures should be shown to the merchant.');
+$encodedLogs = json_encode($GLOBALS['patwc_captured_logs']);
+if (!is_string($encodedLogs)) {
+    throw new RuntimeException('Unable to encode captured AJAX logs.');
+}
+patwc_ajax_assert_contains('PayArc connection action failed', $encodedLogs, 'Connect failures should be written to WooCommerce logs.');
+patwc_ajax_assert_contains('"action":"connect"', $encodedLogs, 'Connect failure logs should include the attempted action.');
+patwc_ajax_assert_contains('"level":"error"', $encodedLogs, 'Connect failure logs should use the error level.');
+patwc_ajax_assert_true(strpos($encodedLogs, 'merchant-api-token') === false, 'Connect failure logs should not include submitted API bearer tokens.');
+patwc_ajax_assert_true(strpos($encodedLogs, 'client-secret') === false, 'Connect failure logs should not include submitted client secrets.');
+
+$connectionService->connect_exception = new RuntimeException('PayArc request failed; HTTP status: 401; error: invalid key merchant-api-token.');
+$GLOBALS['patwc_captured_logs'] = array();
+$failedHttpConnect = $handler->handle_connect_payarc(array(
+    '_ajax_nonce' => 'valid-connection-nonce',
+    'connect_secret_key' => 'merchant-api-token',
+));
+patwc_ajax_assert_same(500, $failedHttpConnect['status_code'], 'HTTP connect failures should return 500.');
+patwc_ajax_assert_same('Unable to connect PayArc. Check the entered PayArc credentials and try again. See WooCommerce logs for details.', $failedHttpConnect['body']['message'], 'Provider HTTP error body text should not be shown to the merchant.');
+$encodedHttpLogs = json_encode($GLOBALS['patwc_captured_logs']);
+if (!is_string($encodedHttpLogs)) {
+    throw new RuntimeException('Unable to encode HTTP failure AJAX logs.');
+}
+patwc_ajax_assert_true(strpos($encodedHttpLogs, 'merchant-api-token') === false, 'HTTP connect failure logs should not include provider-echoed tokens.');
+
+$connectionService->connect_exception = new RuntimeException('PayArc request failed. HTTP status: 401. error: invalid merchant-api-token.');
+$GLOBALS['patwc_captured_logs'] = array();
+$failedDottedHttpConnect = $handler->handle_connect_payarc(array('_ajax_nonce' => 'valid-connection-nonce'));
+patwc_ajax_assert_same(500, $failedDottedHttpConnect['status_code'], 'HTTP connect failures with extra provider text should return 500.');
+patwc_ajax_assert_same('Unable to connect PayArc. Check the entered PayArc credentials and try again. See WooCommerce logs for details.', $failedDottedHttpConnect['body']['message'], 'Only the generic PayArc HTTP status message should be public.');
+
+$unsafeConnectionService = new PatwcAjaxFakeConnectionService();
+$unsafeConnectionService->connect_exception = new RuntimeException('Bearer live-merchant-token leaked');
+$unsafeHandler = new AjaxHandler($service, static function (int $order_id) use ($orders) {
+    return $orders[$order_id] ?? null;
+}, null, $unsafeConnectionService);
+$GLOBALS['patwc_captured_logs'] = array();
+$unsafeFailure = $unsafeHandler->handle_connect_payarc(array('_ajax_nonce' => 'valid-connection-nonce'));
+patwc_ajax_assert_same(500, $unsafeFailure['status_code'], 'Unsafe connect failures should return 500.');
+patwc_ajax_assert_same('Unable to connect PayArc. Check the entered PayArc credentials and try again. See WooCommerce logs for details.', $unsafeFailure['body']['message'], 'Unexpected connect failures should keep raw exception messages private.');
+$encodedUnsafeLogs = json_encode($GLOBALS['patwc_captured_logs']);
+if (!is_string($encodedUnsafeLogs)) {
+    throw new RuntimeException('Unable to encode unsafe AJAX logs.');
+}
+patwc_ajax_assert_true(strpos($encodedUnsafeLogs, 'live-merchant-token') === false, 'Unexpected connect logs should redact bearer tokens.');
+
+$connectionService->connect_exception = null;
 
 $refresh = $handler->handle_refresh_payarc_terminals(array('_ajax_nonce' => 'valid-connection-nonce'));
 patwc_ajax_assert_same(200, $refresh['status_code'], 'Manager should refresh PayArc terminals.');

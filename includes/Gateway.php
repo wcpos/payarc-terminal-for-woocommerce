@@ -68,25 +68,25 @@ trait GatewayImplementation
             'connect_email' => array(
                 'title' => 'PayArc login email',
                 'type' => 'text',
-                'description' => 'Email used to sign in to the PayArc merchant dashboard.',
+                'description' => 'Required before connecting. Enter the email used to sign in to the PayArc merchant dashboard; the plugin cannot fetch this for you.',
                 'default' => '',
             ),
             'connect_mid' => array(
                 'title' => 'PayArc MID',
                 'type' => 'text',
-                'description' => 'Merchant ID from the PayArc Merchant Profile. The plugin derives the Connect tenant id from the last 12 digits.',
+                'description' => 'Required before connecting. This is the merchant MID from the PayArc Merchant Profile, not the terminal ID. The plugin derives the Connect tenant ID from the last 12 digits.',
                 'default' => '',
             ),
             'connect_client_secret' => array(
                 'title' => 'PayArc ClientSecret',
                 'type' => 'patwc_secret',
-                'description' => 'ClientSecret from the PayArc dashboard API section. Stored server-side only.',
+                'description' => 'Required before connecting. Enter the ClientSecret from the PayArc dashboard API section. Stored server-side only.',
                 'default' => '',
             ),
             'connect_secret_key' => array(
                 'title' => 'PayArc SecretKey / API bearer token',
                 'type' => 'patwc_secret',
-                'description' => 'SecretKey/API bearer token from the PayArc dashboard. Used to call PayArc Login and terminal registry; terminal transactions use the Login AccessToken.',
+                'description' => 'Required before connecting. Enter the SecretKey/API bearer token from the PayArc dashboard. Used to call PayArc Login and terminal registry; terminal transactions use the Login AccessToken.',
                 'default' => '',
             ),
             'callback_bearer_token' => array(
@@ -98,7 +98,7 @@ trait GatewayImplementation
             'connection' => array(
                 'title' => 'PayArc connection',
                 'type' => 'patwc_connection',
-                'description' => 'Press Connect to call PayArc Login, fetch a Connect AccessToken, and discover terminals from PayArc.',
+                'description' => 'After entering the PayArc credentials above, connect to PayArc Login to fetch and store the Connect AccessToken and discover terminals.',
                 'default' => '',
             ),
             'default_terminal_id' => array(
@@ -213,7 +213,7 @@ trait GatewayImplementation
             'connect_access_token',
             self::setting_configured($settings, 'connect_access_token_configured', 'connect_access_token'),
             'PayArc Connect AccessToken is configured.',
-            'Press Connect PayArc to fetch a Connect AccessToken.'
+            'Click Connect using these credentials to fetch a Connect AccessToken.'
         );
 
         self::append_local_check(
@@ -477,7 +477,7 @@ trait GatewayImplementation
     {
         $fieldKey = method_exists($this, 'get_field_key') ? $this->get_field_key($key) : 'woocommerce_' . Settings::GATEWAY_ID . '_' . $key;
         $title = $this->field_text($data, 'title', 'PayArc connection');
-        $description = $this->field_text($data, 'description', 'Press Connect to call PayArc Login and discover terminals.');
+        $description = $this->field_text($data, 'description', 'After entering the PayArc credentials above, connect to PayArc Login to fetch and store the Connect AccessToken and discover terminals.');
         $ajaxUrl = function_exists('admin_url') ? admin_url('admin-ajax.php') : 'admin-ajax.php';
         $nonce = function_exists('wp_create_nonce') ? wp_create_nonce('patwc_payarc_connection') : '';
         $resultId = $fieldKey . '_result';
@@ -486,8 +486,17 @@ trait GatewayImplementation
         $html .= '<th scope="row" class="titledesc">' . $this->escape_html($title) . '</th>';
         $html .= '<td class="forminp patwc-connection-panel">';
         $html .= '<p class="description">' . $this->escape_html($description) . '</p>';
+        $html .= '<div class="patwc-connection-explainer">';
+        $html .= '<p><strong>' . $this->escape_html('What Connect does:') . '</strong> ' . $this->escape_html('This does not fetch your PayArc credentials. It uses the fields above to sign in to PayArc Login, fetch and store the Connect AccessToken, derive the tenant ID from the MID, and discover terminals.') . '</p>';
+        $html .= '<ol class="patwc-connection-steps">';
+        $html .= '<li>' . $this->escape_html('Enter PayArc login email, merchant MID, ClientSecret, and SecretKey/API bearer token.') . '</li>';
+        $html .= '<li>' . $this->escape_html('Click Connect using these credentials.') . '</li>';
+        $html .= '<li>' . $this->escape_html('Select a discovered terminal below, then Save changes.') . '</li>';
+        $html .= '</ol>';
+        $html .= '<p class="description">' . $this->escape_html('MID means merchant ID, not terminal ID. If PayArc rejects the connection, check WooCommerce > Status > Logs and select the payarc-terminal-for-woocommerce source.') . '</p>';
+        $html .= '</div>';
         $html .= '<p class="patwc-connection-actions">';
-        $html .= '<button type="button" class="button button-primary patwc-connect-payarc" data-action="patwc_connect_payarc" data-ajax-url="' . $this->escape_attr($ajaxUrl) . '" data-nonce="' . $this->escape_attr($nonce) . '" data-result-id="' . $this->escape_attr($resultId) . '">' . $this->escape_html('Connect PayArc') . '</button> ';
+        $html .= '<button type="button" class="button button-primary patwc-connect-payarc" data-action="patwc_connect_payarc" data-ajax-url="' . $this->escape_attr($ajaxUrl) . '" data-nonce="' . $this->escape_attr($nonce) . '" data-result-id="' . $this->escape_attr($resultId) . '">' . $this->escape_html('Connect using these credentials') . '</button> ';
         $html .= '<button type="button" class="button patwc-refresh-payarc-terminals" data-action="patwc_refresh_payarc_terminals" data-ajax-url="' . $this->escape_attr($ajaxUrl) . '" data-nonce="' . $this->escape_attr($nonce) . '" data-result-id="' . $this->escape_attr($resultId) . '">' . $this->escape_html('Refresh Terminals') . '</button> ';
         $html .= '<button type="button" class="button patwc-disconnect-payarc" data-action="patwc_disconnect_payarc" data-ajax-url="' . $this->escape_attr($ajaxUrl) . '" data-nonce="' . $this->escape_attr($nonce) . '" data-result-id="' . $this->escape_attr($resultId) . '">' . $this->escape_html('Disconnect') . '</button>';
         $html .= '</p>';
@@ -777,7 +786,7 @@ trait GatewayImplementation
      */
     private function enqueue_payment_assets($order, bool $authorized): void
     {
-        $version = defined('PATWC_VERSION') ? PATWC_VERSION : '0.1.2';
+        $version = defined('PATWC_VERSION') ? PATWC_VERSION : '0.1.3';
         $pluginUrl = defined('PATWC_PLUGIN_URL') ? rtrim(PATWC_PLUGIN_URL, '/') . '/' : '';
 
         if (function_exists('wp_enqueue_style')) {

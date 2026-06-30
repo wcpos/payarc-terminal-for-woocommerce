@@ -3,6 +3,7 @@
 namespace WCPOS\WooCommercePOS\PayArcTerminal\Services;
 
 use RuntimeException;
+use WCPOS\WooCommercePOS\PayArcTerminal\Logger;
 use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
 
 class PayArcConnectionService
@@ -33,6 +34,10 @@ class PayArcConnectionService
     public function connect(array $overrides = array()): array
     {
         $settings = $this->settings_with_overrides($overrides);
+        Logger::log('PayArc connection attempt started', $this->connection_log_context($settings, array(
+            'submitted_override_fields' => $this->submitted_override_fields($overrides),
+        )));
+
         $login = $this->login($settings);
         $registry = array();
         $registryWarning = '';
@@ -41,12 +46,22 @@ class PayArcConnectionService
             $registry = $this->terminal_registry($settings);
         } catch (RuntimeException $exception) {
             $registryWarning = $exception->getMessage();
+            Logger::log('PayArc terminal registry lookup failed during connect', $this->connection_log_context($settings, array(
+                'exception_class' => get_class($exception),
+                'message' => $this->safe_text($exception->getMessage()),
+            )), null, 'warning');
         }
 
         $loginTerminals = isset($login['Terminals']) && is_array($login['Terminals']) ? $login['Terminals'] : array();
         $terminals = $this->normalize_terminals(array_merge($loginTerminals, $registry));
         $tokenInfo = isset($login['BearerTokenInfo']) && is_array($login['BearerTokenInfo']) ? $login['BearerTokenInfo'] : array();
         $accessToken = isset($tokenInfo['AccessToken']) && is_scalar($tokenInfo['AccessToken']) ? trim((string) $tokenInfo['AccessToken']) : '';
+
+        Logger::log('PayArc Login completed', $this->connection_log_context($settings, array(
+            'connect_access_token_returned' => $accessToken !== '',
+            'login_terminal_count' => count($loginTerminals),
+            'registry_terminal_count' => count($registry),
+        )));
 
         if ($accessToken === '') {
             throw new RuntimeException('PayArc Login did not return a Connect access token.');
@@ -72,6 +87,13 @@ class PayArcConnectionService
             $result['warning'] = 'Connected with Login terminals only. Terminal Registry lookup failed. Refresh terminals after confirming Merchant API access.';
         }
 
+        Logger::log('PayArc connection completed', $this->connection_log_context($settings, array(
+            'tenant_id_masked' => Settings::mask_identifier($tenantId),
+            'default_terminal_id_masked' => Settings::mask_identifier($defaultTerminal),
+            'terminal_count' => count($terminals),
+            'terminal_registry_warning' => $registryWarning !== '',
+        )));
+
         return $result;
     }
 
@@ -80,6 +102,7 @@ class PayArcConnectionService
      */
     public function refresh_terminals(): array
     {
+        Logger::log('PayArc terminal refresh started', $this->connection_log_context($this->settings));
         $registry = $this->terminal_registry($this->settings);
         $terminals = $this->normalize_terminals($registry);
         $defaultTerminal = $this->choose_default_terminal($terminals, $this->settings->default_terminal_id());
@@ -89,6 +112,11 @@ class PayArcConnectionService
         }
         $this->persist($updates);
 
+        Logger::log('PayArc terminal refresh completed', $this->connection_log_context($this->settings, array(
+            'default_terminal_id_masked' => Settings::mask_identifier($defaultTerminal),
+            'terminal_count' => count($terminals),
+        )));
+
         return $this->public_result('connected', 'PayArc terminals refreshed.', $this->settings->tenant_id(), $defaultTerminal, $terminals);
     }
 
@@ -97,6 +125,7 @@ class PayArcConnectionService
      */
     public function disconnect(): array
     {
+        Logger::log('PayArc disconnect requested', $this->connection_log_context($this->settings));
         $this->persist(array(
             'connect_access_token' => '',
             'connect_token_expires_at' => '0',
@@ -136,6 +165,10 @@ class PayArcConnectionService
             'connect_access_token' => $accessToken,
             'connect_token_expires_at' => (string) $expiresAt,
         ));
+
+        Logger::log('PayArc Connect AccessToken refreshed', $this->connection_log_context($this->settings, array(
+            'connect_access_token_returned' => true,
+        )));
 
         return $accessToken;
     }
@@ -338,47 +371,49 @@ class PayArcConnectionService
 
         $response = wp_remote_request($url, $args);
         if (function_exists('is_wp_error') && is_wp_error($response)) {
+            Logger::log('PayArc request failed before response', $this->request_log_context($method, $url, $payload), null, 'error');
             throw new RuntimeException('PayArc request failed before receiving a response.');
         }
         if (!is_array($response)) {
+            Logger::log('PayArc response was not an array', $this->request_log_context($method, $url, $payload), null, 'error');
             throw new RuntimeException('PayArc response was not an array.');
         }
 
         $status = isset($response['response']) && is_array($response['response']) && isset($response['response']['code']) ? (int) $response['response']['code'] : 0;
         $body = isset($response['body']) ? $response['body'] : '';
         if (!is_string($body) || trim($body) === '') {
+            Logger::log('PayArc response body was empty', $this->request_log_context($method, $url, $payload, array('http_status' => $status)), null, 'error');
             throw new RuntimeException('PayArc response body was empty. HTTP status: ' . $status . '.');
         }
 
         $decoded = json_decode($body, true);
         if (!is_array($decoded) || json_last_error() !== JSON_ERROR_NONE) {
+            Logger::log('PayArc response was not valid JSON', $this->request_log_context($method, $url, $payload, array('http_status' => $status)), null, 'error');
             throw new RuntimeException('PayArc response was not valid JSON. HTTP status: ' . $status . '.');
         }
 
         if ($status < 200 || $status >= 300) {
-            throw new RuntimeException($this->failure_message($decoded, $status));
+            $message = $this->failure_message($status);
+            Logger::log('PayArc request returned an error status', $this->request_log_context($method, $url, $payload, array(
+                'http_status' => $status,
+                'message' => $message,
+            )), null, 'error');
+            throw new RuntimeException($message);
         }
 
         return $decoded;
     }
 
     /**
-     * @param array<string, mixed> $decoded
      */
-    private function failure_message(array $decoded, int $status): string
+    private function failure_message(int $status): string
     {
-        $parts = array('PayArc request failed');
+        $parts = array('PayArc request failed.');
         if ($status > 0) {
-            $parts[] = 'HTTP status: ' . $status;
-        }
-        if (isset($decoded['error']) && is_scalar($decoded['error'])) {
-            $parts[] = 'error: ' . $this->safe_text((string) $decoded['error']);
-        }
-        if (isset($decoded['ErrorMessage']) && is_scalar($decoded['ErrorMessage'])) {
-            $parts[] = 'ErrorMessage: ' . $this->safe_text((string) $decoded['ErrorMessage']);
+            $parts[] = 'HTTP status: ' . $status . '.';
         }
 
-        return implode('; ', $parts) . '.';
+        return implode(' ', $parts);
     }
 
     /**
@@ -464,6 +499,72 @@ class PayArcConnectionService
         return true;
     }
 
+    /**
+     * @param array<string, mixed> $extra
+     * @return array<string, mixed>
+     */
+    private function connection_log_context(Settings $settings, array $extra = array()): array
+    {
+        return array_merge(array(
+            'mode' => $settings->mode(),
+            'connect_email_configured' => $settings->connect_email() !== '',
+            'connect_mid_configured' => $settings->connect_mid() !== '',
+            'connect_mid_masked' => Settings::mask_identifier($settings->connect_mid()),
+            'tenant_id_masked' => Settings::mask_identifier($settings->tenant_id()),
+            'connect_client_secret_configured' => $settings->connect_client_secret() !== '',
+            'connect_secret_key_configured' => $settings->connect_secret_key() !== '',
+            'callback_bearer_token_configured' => $settings->callback_bearer_token() !== '',
+            'connect_login_host' => $this->url_host($settings->connect_login_base_url()),
+            'merchant_api_host' => $this->url_host($settings->merchant_api_base_url()),
+        ), $extra);
+    }
+
+    /**
+     * @param array<string, mixed> $overrides
+     * @return string[]
+     */
+    private function submitted_override_fields(array $overrides): array
+    {
+        $fields = array();
+
+        foreach (array('mode', 'connect_email', 'connect_mid', 'connect_client_secret', 'connect_secret_key', 'callback_bearer_token') as $key) {
+            if (array_key_exists($key, $overrides) && is_scalar($overrides[$key]) && trim((string) $overrides[$key]) !== '') {
+                $fields[] = $key;
+            }
+        }
+
+        return $fields;
+    }
+
+    /**
+     * @param array<string, mixed>|null $payload
+     * @param array<string, mixed> $extra
+     * @return array<string, mixed>
+     */
+    private function request_log_context(string $method, string $url, ?array $payload = null, array $extra = array()): array
+    {
+        return array_merge(array(
+            'method' => $method,
+            'host' => $this->url_host($url),
+            'path' => $this->url_path($url),
+            'has_payload' => $payload !== null,
+        ), $extra);
+    }
+
+    private function url_host(string $url): string
+    {
+        $host = parse_url($url, PHP_URL_HOST);
+
+        return is_string($host) ? $host : '';
+    }
+
+    private function url_path(string $url): string
+    {
+        $path = parse_url($url, PHP_URL_PATH);
+
+        return is_string($path) ? $path : '';
+    }
+
     private function now(): int
     {
         return $this->clock === null ? time() : (int) call_user_func($this->clock);
@@ -477,6 +578,11 @@ class PayArcConnectionService
         }
 
         $text = preg_replace('/\bBearer\s+[A-Za-z0-9._~+\/=:-]+/i', 'Bearer [REDACTED]', $text);
+        if (!is_string($text)) {
+            return '';
+        }
+
+        $text = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*(?:[:=]|\s+)\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=[REDACTED]', $text);
         if (!is_string($text)) {
             return '';
         }

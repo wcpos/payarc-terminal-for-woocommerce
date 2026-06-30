@@ -208,7 +208,7 @@ $diagnostics = Gateway::local_settings_diagnostics(array(
 patwc_gateway_diagnostics_assert_same('error', $diagnostics['status'], 'Invalid local diagnostics should report error status.');
 patwc_gateway_diagnostics_assert_same(array(
     'PayArc SecretKey/API bearer token must be configured.',
-    'Press Connect PayArc to fetch a Connect AccessToken.',
+    'Click Connect using these credentials to fetch a Connect AccessToken.',
     'Callback bearer token must be configured.',
     'PayArc MID must contain at least 12 digits.',
     'Connect PayArc and select a discovered terminal.',

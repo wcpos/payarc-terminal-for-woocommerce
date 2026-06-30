@@ -251,7 +251,10 @@ class AjaxHandler
                 $body = $this->connection_service->disconnect();
             }
         } catch (Throwable $exception) {
-            return $this->maybe_emit($this->error_response(500, 'Unable to connect PayArc. Check the entered PayArc credentials and try again.'), $emit);
+            $message = $this->public_connection_error_message($exception, $action);
+            Logger::log('PayArc connection action failed', $this->connection_exception_log_context($exception, $action, $request, $message), null, 'error');
+
+            return $this->maybe_emit($this->error_response(500, $message), $emit);
         }
 
         return $this->maybe_emit(array('status_code' => 200, 'body' => $this->public_connection_body($body)), $emit);
@@ -311,6 +314,120 @@ class AjaxHandler
         }
 
         return $public;
+    }
+
+    /**
+     * @param array<string, mixed> $request
+     * @return array<string, mixed>
+     */
+    private function connection_exception_log_context(Throwable $exception, string $action, array $request, string $publicMessage): array
+    {
+        $safe = $this->is_public_connection_error_message($exception->getMessage());
+
+        return array(
+            'action' => $action,
+            'exception_class' => get_class($exception),
+            'exception_message' => $safe ? $this->safe_public_error_text($exception->getMessage()) : 'Suppressed because it may contain secrets.',
+            'public_message' => $publicMessage,
+            'request_context' => $this->connection_request_context($request),
+        );
+    }
+
+    /**
+     * @param array<string, mixed> $request
+     * @return array<string, mixed>
+     */
+    private function connection_request_context(array $request): array
+    {
+        $mid = $this->request_scalar($request, 'connect_mid');
+
+        return array(
+            'mode_submitted' => $this->request_scalar($request, 'mode') !== '',
+            'connect_email_submitted' => $this->request_scalar($request, 'connect_email') !== '',
+            'connect_mid_submitted' => $mid !== '',
+            'connect_mid_masked' => Settings::mask_identifier($mid),
+            'connect_client_secret_submitted' => $this->request_scalar($request, 'connect_client_secret') !== '',
+            'connect_secret_key_submitted' => $this->request_scalar($request, 'connect_secret_key') !== '',
+            'callback_bearer_token_submitted' => $this->request_scalar($request, 'callback_bearer_token') !== '',
+        );
+    }
+
+    /**
+     * @param array<string, mixed> $request
+     */
+    private function request_scalar(array $request, string $key): string
+    {
+        return isset($request[$key]) && is_scalar($request[$key]) ? trim((string) $request[$key]) : '';
+    }
+
+    private function public_connection_error_message(Throwable $exception, string $action): string
+    {
+        if ($this->is_public_connection_error_message($exception->getMessage())) {
+            return $this->safe_public_error_text($exception->getMessage());
+        }
+
+        if ($action === 'refresh') {
+            return 'Unable to refresh PayArc terminals. Check the saved PayArc credentials and try again. See WooCommerce logs for details.';
+        }
+
+        if ($action === 'disconnect') {
+            return 'Unable to disconnect PayArc right now. See WooCommerce logs for details.';
+        }
+
+        return 'Unable to connect PayArc. Check the entered PayArc credentials and try again. See WooCommerce logs for details.';
+    }
+
+    private function is_public_connection_error_message(string $message): bool
+    {
+        $message = trim($message);
+        if ($message === '') {
+            return false;
+        }
+
+        if (preg_match('/^(PayArc login email|PayArc MID|PayArc ClientSecret|PayArc SecretKey\/API bearer token)(, .+)? required\.$/', $message) === 1) {
+            return true;
+        }
+
+        if (preg_match('/^PayArc request failed\.( HTTP status: [0-9]+\.)?$/', $message) === 1) {
+            return true;
+        }
+
+        foreach (array(
+            'PayArc Login failed;',
+            'PayArc Login did not return a Connect access token.',
+            'PayArc SecretKey/API bearer token is required to fetch terminals.',
+            'PayArc request failed before receiving a response.',
+            'PayArc response body was empty. HTTP status:',
+            'PayArc response was not valid JSON. HTTP status:',
+            'PayArc response was not an array.',
+            'Unable to encode PayArc request body.',
+        ) as $safePrefix) {
+            if (strpos($message, $safePrefix) === 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function safe_public_error_text(string $message): string
+    {
+        $message = preg_replace('/[[:cntrl:]]+/', ' ', $message);
+        if (!is_string($message)) {
+            return '';
+        }
+
+        $message = preg_replace('/\bBearer\s+[A-Za-z0-9._~+\/=:-]+/i', 'Bearer [REDACTED]', $message);
+        if (!is_string($message)) {
+            return '';
+        }
+
+        $message = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*(?:[:=]|\s+)\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=[REDACTED]', $message);
+        if (!is_string($message)) {
+            return '';
+        }
+
+        return trim($message);
     }
 
     /**
