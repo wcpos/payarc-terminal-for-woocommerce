@@ -393,7 +393,6 @@ class AjaxHandler
         }
 
         foreach (array(
-            'PayArc Login failed;',
             'PayArc Login did not return a Connect access token.',
             'PayArc SecretKey/API bearer token is required to fetch terminals.',
             'PayArc request failed before receiving a response.',

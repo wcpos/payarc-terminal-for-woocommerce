@@ -484,7 +484,7 @@ $failedConnect = $handler->handle_connect_payarc(array(
     'connect_secret_key' => 'merchant-api-token',
 ));
 patwc_ajax_assert_same(500, $failedConnect['status_code'], 'Connect failures should return 500.');
-patwc_ajax_assert_same('PayArc Login failed; ErrorCode: 401; ErrorMessage: Invalid merchant credentials.', $failedConnect['body']['message'], 'Safe PayArc Login failures should be shown to the merchant.');
+patwc_ajax_assert_same('Unable to connect PayArc. Check the entered PayArc credentials and try again. See WooCommerce logs for details.', $failedConnect['body']['message'], 'PayArc Login provider messages should stay private.');
 $encodedLogs = json_encode($GLOBALS['patwc_captured_logs']);
 if (!is_string($encodedLogs)) {
     throw new RuntimeException('Unable to encode captured AJAX logs.');
@@ -494,6 +494,25 @@ patwc_ajax_assert_contains('"action":"connect"', $encodedLogs, 'Connect failure 
 patwc_ajax_assert_contains('"level":"error"', $encodedLogs, 'Connect failure logs should use the error level.');
 patwc_ajax_assert_true(strpos($encodedLogs, 'merchant-api-token') === false, 'Connect failure logs should not include submitted API bearer tokens.');
 patwc_ajax_assert_true(strpos($encodedLogs, 'client-secret') === false, 'Connect failure logs should not include submitted client secrets.');
+patwc_ajax_assert_true(strpos($encodedLogs, 'Invalid merchant credentials') === false, 'Connect failure logs should not include raw PayArc Login ErrorMessage text.');
+
+$connectionService->connect_exception = new RuntimeException('PayArc Login failed; ErrorCode: 401; ErrorMessage: merchant@example.com 0000123456789012 unlabelled-live-secret.');
+$GLOBALS['patwc_captured_logs'] = array();
+$failedEchoingLogin = $handler->handle_connect_payarc(array(
+    '_ajax_nonce' => 'valid-connection-nonce',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_secret_key' => 'merchant-api-token',
+));
+patwc_ajax_assert_same(500, $failedEchoingLogin['status_code'], 'Echoing Login failures should return 500.');
+patwc_ajax_assert_same('Unable to connect PayArc. Check the entered PayArc credentials and try again. See WooCommerce logs for details.', $failedEchoingLogin['body']['message'], 'Echoing PayArc Login ErrorMessage text should not be public.');
+$encodedEchoingLoginLogs = json_encode($GLOBALS['patwc_captured_logs']);
+if (!is_string($encodedEchoingLoginLogs)) {
+    throw new RuntimeException('Unable to encode echoing Login failure logs.');
+}
+patwc_ajax_assert_true(strpos($encodedEchoingLoginLogs, 'merchant@example.com') === false, 'Echoing Login logs should not include submitted email.');
+patwc_ajax_assert_true(strpos($encodedEchoingLoginLogs, '0000123456789012') === false, 'Echoing Login logs should not include submitted MID.');
+patwc_ajax_assert_true(strpos($encodedEchoingLoginLogs, 'unlabelled-live-secret') === false, 'Echoing Login logs should not include unlabelled provider text.');
 
 $connectionService->connect_exception = new RuntimeException('PayArc request failed; HTTP status: 401; error: invalid key merchant-api-token.');
 $GLOBALS['patwc_captured_logs'] = array();

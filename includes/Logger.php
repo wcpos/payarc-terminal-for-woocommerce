@@ -55,7 +55,7 @@ class Logger
 
             foreach ($value as $key => $item) {
                 if (self::isSecretKey((string) $key)) {
-                    $redacted[$key] = (is_bool($item) || is_int($item) || is_float($item) || $item === null) ? $item : self::REDACTED;
+                    $redacted[$key] = is_bool($item) && self::isSecretDiagnosticKey((string) $key) ? $item : self::REDACTED;
                     continue;
                 }
 
@@ -74,23 +74,7 @@ class Logger
 
     private static function isSecretKey(string $key): bool
     {
-        $wordSeparated = preg_replace('/([a-z0-9])([A-Z])/', '$1_$2', $key);
-        if (!is_string($wordSeparated)) {
-            $wordSeparated = $key;
-        }
-
-        $normalized = strtolower($wordSeparated);
-        $normalized = preg_replace('/[^a-z0-9]+/', '_', $normalized);
-        if (!is_string($normalized)) {
-            $normalized = strtolower($wordSeparated);
-        }
-
-        $normalized = preg_replace('/_+/', '_', $normalized);
-        if (!is_string($normalized)) {
-            $normalized = strtolower($wordSeparated);
-        }
-
-        $normalized = trim($normalized, '_');
+        $normalized = self::normalizedKey($key);
         $compact = str_replace('_', '', $normalized);
 
         if ($normalized === 'authorization') {
@@ -120,6 +104,34 @@ class Logger
         }
 
         return false;
+    }
+
+    private static function isSecretDiagnosticKey(string $key): bool
+    {
+        $normalized = self::normalizedKey($key);
+
+        return preg_match('/_(configured|submitted|returned)$/', $normalized) === 1;
+    }
+
+    private static function normalizedKey(string $key): string
+    {
+        $wordSeparated = preg_replace('/([a-z0-9])([A-Z])/', '$1_$2', $key);
+        if (!is_string($wordSeparated)) {
+            $wordSeparated = $key;
+        }
+
+        $normalized = strtolower($wordSeparated);
+        $normalized = preg_replace('/[^a-z0-9]+/', '_', $normalized);
+        if (!is_string($normalized)) {
+            $normalized = strtolower($wordSeparated);
+        }
+
+        $normalized = preg_replace('/_+/', '_', $normalized);
+        if (!is_string($normalized)) {
+            $normalized = strtolower($wordSeparated);
+        }
+
+        return trim($normalized, '_');
     }
 
     private static function redactString(string $value): string
