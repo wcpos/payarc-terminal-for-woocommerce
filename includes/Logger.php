@@ -14,10 +14,11 @@ class Logger
      * @param array<string, mixed> $context Log context.
      * @param mixed $order Optional WooCommerce order object.
      */
-    public static function log($message, array $context = array(), $order = null): void
+    public static function log($message, array $context = array(), $order = null, string $level = 'info'): void
     {
         $safeMessage = self::redactValue($message);
         $safeContext = self::redactValue($context);
+        $safeLevel = self::normalizeLevel($level);
 
         if ($order !== null && is_object($order) && method_exists($order, 'get_id')) {
             $safeContext['order_id'] = $order->get_id();
@@ -28,13 +29,19 @@ class Logger
         if (function_exists('wc_get_logger')) {
             $logger = wc_get_logger();
 
+            if (is_object($logger) && method_exists($logger, $safeLevel)) {
+                $logger->{$safeLevel}(self::stringify($safeMessage), $safeContext);
+                return;
+            }
+
             if (is_object($logger) && method_exists($logger, 'info')) {
+                $safeContext['requested_level'] = $safeLevel;
                 $logger->info(self::stringify($safeMessage), $safeContext);
                 return;
             }
         }
 
-        error_log(self::stringify($safeMessage) . ' ' . self::stringify($safeContext));
+        error_log(strtoupper($safeLevel) . ' ' . self::stringify($safeMessage) . ' ' . self::stringify($safeContext));
     }
 
     /**
@@ -48,7 +55,7 @@ class Logger
 
             foreach ($value as $key => $item) {
                 if (self::isSecretKey((string) $key)) {
-                    $redacted[$key] = self::REDACTED;
+                    $redacted[$key] = (is_bool($item) || is_int($item) || is_float($item) || $item === null) ? $item : self::REDACTED;
                     continue;
                 }
 
@@ -117,7 +124,10 @@ class Logger
 
     private static function redactString(string $value): string
     {
-        return preg_replace('/Bearer\s+[A-Za-z0-9._~+\/=:-]+/i', 'Bearer ' . self::REDACTED, $value) ?? self::REDACTED;
+        $value = preg_replace('/Bearer\s+[A-Za-z0-9._~+\/=:-]+/i', 'Bearer ' . self::REDACTED, $value) ?? self::REDACTED;
+        $value = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*(?:[:=]|\s+)\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=' . self::REDACTED, $value);
+
+        return is_string($value) ? $value : self::REDACTED;
     }
 
     /**
@@ -136,5 +146,12 @@ class Logger
         }
 
         return '[unloggable]';
+    }
+
+    private static function normalizeLevel(string $level): string
+    {
+        $level = strtolower(trim($level));
+
+        return in_array($level, array('debug', 'info', 'notice', 'warning', 'error', 'critical', 'alert', 'emergency'), true) ? $level : 'info';
     }
 }

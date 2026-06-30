@@ -12,6 +12,7 @@ use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
 $root = dirname(__DIR__, 2);
 foreach (array(
     $root . '/includes/Settings.php',
+    $root . '/includes/Logger.php',
     $root . '/includes/Services/PayArcConnectionService.php',
 ) as $file) {
     if (!is_readable($file)) {
@@ -19,6 +20,41 @@ foreach (array(
     }
 
     require_once $file;
+}
+
+if (!function_exists('wc_get_logger')) {
+    function wc_get_logger()
+    {
+        return new class {
+            public function info($message, array $context = array()): void
+            {
+                $this->capture('info', $message, $context);
+            }
+
+            public function warning($message, array $context = array()): void
+            {
+                $this->capture('warning', $message, $context);
+            }
+
+            public function error($message, array $context = array()): void
+            {
+                $this->capture('error', $message, $context);
+            }
+
+            private function capture(string $level, $message, array $context): void
+            {
+                $entry = array('level' => $level, 'message' => $message, 'context' => $context);
+
+                if (isset($GLOBALS['captured']) && is_array($GLOBALS['captured'])) {
+                    $GLOBALS['captured'][] = $entry;
+                }
+
+                if (isset($GLOBALS['patwc_captured_logs']) && is_array($GLOBALS['patwc_captured_logs'])) {
+                    $GLOBALS['patwc_captured_logs'][] = $entry;
+                }
+            }
+        };
+    }
 }
 
 if (!function_exists('wp_remote_request')) {
@@ -46,6 +82,13 @@ function patwc_connection_assert_same($expected, $actual, string $message): void
     }
 }
 
+function patwc_connection_assert_contains(string $needle, string $haystack, string $message): void
+{
+    if (strpos($haystack, $needle) === false) {
+        throw new RuntimeException($message . ' Missing: ' . $needle . '. Haystack: ' . $haystack);
+    }
+}
+
 function patwc_connection_assert_missing_secret(array $payload, string $secret, string $message): void
 {
     $encoded = json_encode($payload);
@@ -58,6 +101,7 @@ function patwc_connection_assert_missing_secret(array $payload, string $secret, 
     }
 }
 
+$GLOBALS['patwc_captured_logs'] = array();
 $GLOBALS['patwc_http_requests'] = array();
 $GLOBALS['patwc_http_response_queue'] = array(
     array(
@@ -157,6 +201,17 @@ patwc_connection_assert_missing_secret($result, 'merchant-api-token', 'Connect r
 patwc_connection_assert_missing_secret($result, 'connect-access-token', 'Connect result should not expose Connect access token.');
 patwc_connection_assert_missing_secret($result, 'client-secret', 'Connect result should not expose client secret.');
 
+$encodedLogs = json_encode($GLOBALS['patwc_captured_logs']);
+if (!is_string($encodedLogs)) {
+    throw new RuntimeException('Unable to encode captured PayArc connection logs.');
+}
+patwc_connection_assert_contains('PayArc connection attempt started', $encodedLogs, 'Connect should log when a connection attempt starts.');
+patwc_connection_assert_contains('connect_mid_masked', $encodedLogs, 'Connect logs should include masked merchant context.');
+patwc_connection_assert_contains('PayArc connection completed', $encodedLogs, 'Connect should log a successful connection summary.');
+patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'merchant-api-token', 'Connect logs should redact API bearer token.');
+patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'connect-access-token', 'Connect logs should redact Connect access token.');
+patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'client-secret', 'Connect logs should redact client secret.');
+
 
 $GLOBALS['patwc_http_requests'] = array();
 $GLOBALS['patwc_http_response_queue'] = array(
@@ -233,3 +288,35 @@ $result = $service->connect();
 patwc_connection_assert_same(true, isset($result['warning']) && is_string($result['warning']), 'Registry failure should return a generic warning.');
 patwc_connection_assert_missing_secret($result, 'merchant-api-token', 'Registry warning should not reflect secret-like upstream text.');
 patwc_connection_assert_missing_secret($result, 'client-secret', 'Registry warning should not reflect client secret text.');
+patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'merchant-api-token', 'Registry failure logs should redact API bearer token.');
+patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'client-secret', 'Registry failure logs should redact client secret text.');
+
+$GLOBALS['patwc_captured_logs'] = array();
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 401),
+        'body' => json_encode(array(
+            'error' => 'invalid key merchant-api-token',
+            'ErrorMessage' => 'ClientSecret client-secret rejected',
+        )),
+    ),
+);
+$service = new PayArcConnectionService(new Settings(array(
+    'mode' => 'test',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'client-secret',
+    'connect_secret_key' => 'merchant-api-token',
+)));
+
+try {
+    $service->connect();
+    throw new RuntimeException('Connect should fail when PayArc returns an HTTP error.');
+} catch (RuntimeException $exception) {
+    patwc_connection_assert_missing_secret(array('message' => $exception->getMessage()), 'merchant-api-token', 'HTTP error exception should not echo submitted API bearer token.');
+    patwc_connection_assert_missing_secret(array('message' => $exception->getMessage()), 'client-secret', 'HTTP error exception should not echo submitted client secret.');
+    patwc_connection_assert_same('PayArc request failed. HTTP status: 401.', $exception->getMessage(), 'HTTP provider body text should stay private.');
+}
+patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'merchant-api-token', 'HTTP error logs should redact API bearer token.');
+patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'client-secret', 'HTTP error logs should redact client secret.');

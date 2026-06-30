@@ -24,6 +24,16 @@
     result.className = 'patwc-connection-result ' + (isError ? 'notice notice-error' : 'notice notice-success');
   }
 
+  function failureMessage(body) {
+    var message = body && body.message ? body.message : 'PayArc connection failed. Check WooCommerce > Status > Logs and select payarc-terminal-for-woocommerce.';
+
+    if (body && body.details) {
+      message += ' ' + body.details;
+    }
+
+    return message;
+  }
+
   function updateTerminalSelect(terminals, defaultTerminalId) {
     var select = field('default_terminal_id');
     if (!select || !Array.isArray(terminals)) {
@@ -77,7 +87,7 @@
     var button = event.currentTarget;
     var ajaxUrl = button.getAttribute('data-ajax-url') || 'admin-ajax.php';
     var action = button.getAttribute('data-action') || '';
-    var busyText = action === 'patwc_refresh_payarc_terminals' ? 'Refreshing PayArc terminals...' : (action === 'patwc_disconnect_payarc' ? 'Disconnecting PayArc...' : 'Connecting to PayArc...');
+    var busyText = action === 'patwc_refresh_payarc_terminals' ? 'Refreshing PayArc terminals...' : (action === 'patwc_disconnect_payarc' ? 'Disconnecting PayArc...' : 'Connecting to PayArc using the entered credentials...');
 
     if (!window.fetch || !window.FormData) {
       setResult(button, 'This browser cannot run the PayArc connection request. Save settings and try from a modern browser.', true);
@@ -95,7 +105,7 @@
       return response.json();
     }).then(function (body) {
       if (!body || body.status === 'error') {
-        setResult(button, body && body.message ? body.message : 'PayArc connection failed.', true);
+        setResult(button, failureMessage(body), true);
         return;
       }
 
@@ -107,9 +117,12 @@
       if (body.warning) {
         message += ' ' + body.warning;
       }
+      if (action === 'patwc_connect_payarc' && body.terminal_count !== undefined) {
+        message += ' Select the default terminal and Save changes.';
+      }
       setResult(button, message, false);
     }).catch(function () {
-      setResult(button, 'PayArc connection request failed. Check the browser console and WooCommerce logs.', true);
+      setResult(button, 'PayArc connection request failed before a JSON response was received. Check the browser console and WooCommerce > Status > Logs.', true);
     }).finally(function () {
       button.disabled = false;
     });

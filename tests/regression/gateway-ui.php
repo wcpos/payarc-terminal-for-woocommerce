@@ -317,6 +317,12 @@ if (!method_exists($gateway, 'payment_fields')) {
     throw new RuntimeException('Gateway should implement payment_fields().');
 }
 
+$connectionHtml = $gateway->generate_patwc_connection_html('connection', $gateway->form_fields['connection']);
+patwc_gateway_ui_assert_contains('Connect using these credentials', $connectionHtml, 'Connection settings should make the Connect button action explicit.');
+patwc_gateway_ui_assert_contains('This does not fetch your PayArc credentials', $connectionHtml, 'Connection settings should say credentials must be entered before connecting.');
+patwc_gateway_ui_assert_contains('MID means merchant ID, not terminal ID', $connectionHtml, 'Connection settings should clarify MID vs terminal id.');
+patwc_gateway_ui_assert_contains('fetch and store the Connect AccessToken', $connectionHtml, 'Connection settings should explain what the Connect button actually does.');
+
 $unpaidResult = $gateway->process_payment(2001);
 patwc_gateway_ui_assert_same(array(
     'result' => 'success',
