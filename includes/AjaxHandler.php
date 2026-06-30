@@ -40,16 +40,16 @@ class AjaxHandler
             return;
         }
 
-        add_action('wp_ajax_patwc_start_payment', array($this, 'handle_start'));
-        add_action('wp_ajax_nopriv_patwc_start_payment', array($this, 'handle_start'));
-        add_action('wp_ajax_patwc_poll_payment', array($this, 'handle_poll'));
-        add_action('wp_ajax_nopriv_patwc_poll_payment', array($this, 'handle_poll'));
-        add_action('wp_ajax_patwc_cancel_payment', array($this, 'handle_cancel'));
-        add_action('wp_ajax_nopriv_patwc_cancel_payment', array($this, 'handle_cancel'));
-        add_action('wp_ajax_patwc_validate_settings', array($this, 'handle_validate_settings'));
-        add_action('wp_ajax_patwc_connect_payarc', array($this, 'handle_connect_payarc'));
-        add_action('wp_ajax_patwc_refresh_payarc_terminals', array($this, 'handle_refresh_payarc_terminals'));
-        add_action('wp_ajax_patwc_disconnect_payarc', array($this, 'handle_disconnect_payarc'));
+        add_action('wp_ajax_patwc_start_payment', array($this, 'handle_start'), 10, 0);
+        add_action('wp_ajax_nopriv_patwc_start_payment', array($this, 'handle_start'), 10, 0);
+        add_action('wp_ajax_patwc_poll_payment', array($this, 'handle_poll'), 10, 0);
+        add_action('wp_ajax_nopriv_patwc_poll_payment', array($this, 'handle_poll'), 10, 0);
+        add_action('wp_ajax_patwc_cancel_payment', array($this, 'handle_cancel'), 10, 0);
+        add_action('wp_ajax_nopriv_patwc_cancel_payment', array($this, 'handle_cancel'), 10, 0);
+        add_action('wp_ajax_patwc_validate_settings', array($this, 'handle_validate_settings'), 10, 0);
+        add_action('wp_ajax_patwc_connect_payarc', array($this, 'handle_connect_payarc'), 10, 0);
+        add_action('wp_ajax_patwc_refresh_payarc_terminals', array($this, 'handle_refresh_payarc_terminals'), 10, 0);
+        add_action('wp_ajax_patwc_disconnect_payarc', array($this, 'handle_disconnect_payarc'), 10, 0);
     }
 
     /**

@@ -249,6 +249,12 @@ patwc_ajax_assert_same(array(
     'wp_ajax_patwc_validate_settings',
 ), $registeredHooks, 'init should register lifecycle, privileged validation, and privileged PayArc connection routes.');
 
+foreach ($GLOBALS['patwc_ajax_actions'] as $action) {
+    if (strpos($action['hook'], 'wp_ajax_') === 0) {
+        patwc_ajax_assert_same(0, $action['accepted_args'], 'AJAX callbacks should not receive WordPress do_action placeholder arguments.');
+    }
+}
+
 $unauthorizedValidate = $handler->handle_validate_settings(array());
 patwc_ajax_assert_same(403, $unauthorizedValidate['status_code'], 'Validate settings should require WooCommerce manager capability.');
 patwc_ajax_assert_true(!isset($unauthorizedValidate['body']['diagnostics']), 'Unauthorized validate settings should not include diagnostics.');
