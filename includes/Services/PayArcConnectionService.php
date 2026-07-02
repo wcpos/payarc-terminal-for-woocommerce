@@ -582,7 +582,11 @@ class PayArcConnectionService
             return '';
         }
 
-        $text = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*[:=]\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=[REDACTED]', $text);
+        // This sanitizes untrusted PayArc-returned error text (e.g. ErrorMessage),
+        // which can present secrets with a whitespace separator ("invalid key <token>").
+        // Redact aggressively here, accepting occasional over-redaction, rather than
+        // risk leaking a provider-echoed credential into exception text.
+        $text = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*(?:[:=]|\s+)\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=[REDACTED]', $text);
         if (!is_string($text)) {
             return '';
         }

@@ -21,7 +21,9 @@ class Logger
      */
     public static function log($message, array $context = array(), $order = null, string $level = 'info'): void
     {
-        if (function_exists('apply_filters') && !apply_filters('patwc_logging', true, $message)) {
+        // Toggle only — do not pass $message, which is still raw here, so the
+        // filter cannot become a way to read unredacted secrets.
+        if (function_exists('apply_filters') && !apply_filters('patwc_logging', true)) {
             return;
         }
 
@@ -146,6 +148,11 @@ class Logger
     private static function redactString(string $value): string
     {
         $value = preg_replace('/Bearer\s+[A-Za-z0-9._~+\/=:-]+/i', 'Bearer ' . self::REDACTED, $value) ?? self::REDACTED;
+        // Logger messages are the plugin's own (trusted) strings and context is
+        // already key-redacted, so require an explicit ":"/"=" delimiter here to
+        // avoid mangling ordinary prose like "the key rotated". Untrusted
+        // provider/exception text is handled by the aggressive safe_text()/
+        // safe_public_error_text() sanitizers instead.
         $value = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*[:=]\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=' . self::REDACTED, $value);
 
         return is_string($value) ? $value : self::REDACTED;

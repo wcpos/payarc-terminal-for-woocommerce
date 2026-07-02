@@ -320,3 +320,36 @@ try {
 }
 patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'merchant-api-token', 'HTTP error logs should redact API bearer token.');
 patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'client-secret', 'HTTP error logs should redact client secret.');
+
+// A nonzero ErrorCode embeds the PayArc-returned ErrorMessage into the thrown
+// exception via safe_text(). Provider text can present secrets with a plain
+// whitespace separator ("invalid key <token>"), which must still be redacted.
+$GLOBALS['patwc_captured_logs'] = array();
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'ErrorCode' => 12,
+            'ErrorMessage' => 'Rejected: invalid key merchant-api-token and token client-secret-value',
+        )),
+    ),
+);
+$service = new PayArcConnectionService(new Settings(array(
+    'mode' => 'test',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'client-secret-value',
+    'connect_secret_key' => 'merchant-api-token',
+)));
+
+try {
+    $service->connect();
+    throw new RuntimeException('Connect should fail when PayArc returns a nonzero ErrorCode.');
+} catch (RuntimeException $exception) {
+    patwc_connection_assert_missing_secret(array('message' => $exception->getMessage()), 'merchant-api-token', 'Provider ErrorMessage must not leak a whitespace-separated API token into the exception.');
+    patwc_connection_assert_missing_secret(array('message' => $exception->getMessage()), 'client-secret-value', 'Provider ErrorMessage must not leak a whitespace-separated client secret into the exception.');
+    if (strpos($exception->getMessage(), '[REDACTED]') === false) {
+        throw new RuntimeException('Provider ErrorMessage redaction marker missing from the exception.');
+    }
+}
