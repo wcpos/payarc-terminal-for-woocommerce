@@ -56,6 +56,36 @@ class Logger
     }
 
     /**
+     * Redact free-form UNTRUSTED text (provider responses, exception messages)
+     * before it is surfaced to a user or embedded in an exception.
+     *
+     * Unlike the logger's own messages, untrusted text can present a secret
+     * with a plain whitespace separator ("invalid key <token>"), so this
+     * redacts on whitespace as well as ":"/"=" — accepting occasional
+     * over-redaction as the safer trade-off. Shared by the gateway's
+     * safe_text()/safe_public_error_text() helpers so the two cannot drift.
+     */
+    public static function redact_untrusted_text(string $text): string
+    {
+        $text = preg_replace('/[[:cntrl:]]+/', ' ', $text);
+        if (!is_string($text)) {
+            return '';
+        }
+
+        $text = preg_replace('/\bBearer\s+[A-Za-z0-9._~+\/=:-]+/i', 'Bearer ' . self::REDACTED, $text);
+        if (!is_string($text)) {
+            return '';
+        }
+
+        $text = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*(?:[:=]|\s+)\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=' . self::REDACTED, $text);
+        if (!is_string($text)) {
+            return '';
+        }
+
+        return trim($text);
+    }
+
+    /**
      * @param mixed $value
      * @return mixed
      */

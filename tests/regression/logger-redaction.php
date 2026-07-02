@@ -145,6 +145,14 @@ if (!function_exists('apply_filters')) {
 }
 
 $GLOBALS['patwc_disable_logging'] = true;
+
+// The regression runner shares one PHP process, so a stub from another file
+// could shadow ours. Assert this test's stub is the authoritative one before
+// trusting the toggle, so the gate is always genuinely exercised.
+if (apply_filters('patwc_logging', true) !== false) {
+    throw new RuntimeException('Test setup: the patwc_logging stub in effect does not honor the toggle; cannot exercise the logging gate.');
+}
+
 $GLOBALS['captured'] = array();
 Logger::log('this must not be logged', array('foo' => 'bar'));
 if ($GLOBALS['captured'] !== array()) {
