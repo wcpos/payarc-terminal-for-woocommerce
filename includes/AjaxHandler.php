@@ -421,7 +421,7 @@ class AjaxHandler
             return '';
         }
 
-        $message = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*(?:[:=]|\s+)\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=[REDACTED]', $message);
+        $message = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*[:=]\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=[REDACTED]', $message);
         if (!is_string($message)) {
             return '';
         }

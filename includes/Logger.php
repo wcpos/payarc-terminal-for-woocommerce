@@ -10,12 +10,21 @@ class Logger
     /**
      * Write a redacted message to the WooCommerce logger or PHP error log.
      *
+     * Logging can be disabled with the `patwc_logging` filter (matching the
+     * Stripe/SumUp terminal gateways' `stwc_logging`/`sutwc_logging` toggles):
+     *
+     *     add_filter( 'patwc_logging', '__return_false' );
+     *
      * @param mixed $message Log message.
      * @param array<string, mixed> $context Log context.
      * @param mixed $order Optional WooCommerce order object.
      */
     public static function log($message, array $context = array(), $order = null, string $level = 'info'): void
     {
+        if (function_exists('apply_filters') && !apply_filters('patwc_logging', true, $message)) {
+            return;
+        }
+
         $safeMessage = self::redactValue($message);
         $safeContext = self::redactValue($context);
         $safeLevel = self::normalizeLevel($level);
@@ -137,7 +146,7 @@ class Logger
     private static function redactString(string $value): string
     {
         $value = preg_replace('/Bearer\s+[A-Za-z0-9._~+\/=:-]+/i', 'Bearer ' . self::REDACTED, $value) ?? self::REDACTED;
-        $value = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*(?:[:=]|\s+)\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=' . self::REDACTED, $value);
+        $value = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*[:=]\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=' . self::REDACTED, $value);
 
         return is_string($value) ? $value : self::REDACTED;
     }

@@ -582,7 +582,7 @@ class PayArcConnectionService
             return '';
         }
 
-        $text = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*(?:[:=]|\s+)\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=[REDACTED]', $text);
+        $text = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*[:=]\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=[REDACTED]', $text);
         if (!is_string($text)) {
             return '';
         }

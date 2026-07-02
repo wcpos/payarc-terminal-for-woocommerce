@@ -109,3 +109,52 @@ if (($summary['context']['connect_secret_key'] ?? '') !== '[REDACTED]') {
 if (($summary['context']['api_key'] ?? '') !== '[REDACTED]' || ($summary['context']['numericSecret'] ?? '') !== '[REDACTED]') {
     throw new RuntimeException('Logger should redact numeric secret values.');
 }
+
+// Redaction must not mangle ordinary prose that merely mentions a keyword
+// (a value is only treated as a secret when it follows a ":" or "=" delimiter).
+$GLOBALS['captured'] = array();
+Logger::log('the key rotated and the token refreshed and the password changed');
+$prose = end($GLOBALS['captured']);
+if (!is_array($prose) || strpos((string) $prose['message'], '[REDACTED]') !== false) {
+    throw new RuntimeException('Logger should not over-redact ordinary prose that mentions secret-related words.');
+}
+
+// A genuine "keyword=value" / "keyword: value" secret is still redacted.
+$GLOBALS['captured'] = array();
+Logger::log('api_key=sk_live_abcd1234 and token: bearer_value_9876');
+$leak = end($GLOBALS['captured']);
+if (
+    !is_array($leak)
+    || strpos((string) $leak['message'], 'sk_live_abcd1234') !== false
+    || strpos((string) $leak['message'], 'bearer_value_9876') !== false
+    || strpos((string) $leak['message'], '[REDACTED]') === false
+) {
+    throw new RuntimeException('Logger should still redact delimited keyword secrets.');
+}
+
+// The patwc_logging filter can disable logging entirely.
+if (!function_exists('apply_filters')) {
+    function apply_filters($hook, $value)
+    {
+        if ($hook === 'patwc_logging' && !empty($GLOBALS['patwc_disable_logging'])) {
+            return false;
+        }
+
+        return $value;
+    }
+}
+
+$GLOBALS['patwc_disable_logging'] = true;
+$GLOBALS['captured'] = array();
+Logger::log('this must not be logged', array('foo' => 'bar'));
+if ($GLOBALS['captured'] !== array()) {
+    throw new RuntimeException('patwc_logging=false should suppress all logging.');
+}
+
+$GLOBALS['patwc_disable_logging'] = false;
+$GLOBALS['captured'] = array();
+Logger::log('this should be logged');
+if ($GLOBALS['captured'] === array()) {
+    throw new RuntimeException('Logging should resume when patwc_logging is true.');
+}
+unset($GLOBALS['patwc_disable_logging']);
