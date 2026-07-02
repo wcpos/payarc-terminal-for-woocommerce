@@ -62,6 +62,15 @@ if (!function_exists('get_option')) {
     }
 }
 
+if (!function_exists('update_option')) {
+    function update_option($option, $value)
+    {
+        $GLOBALS['patwc_payment_attempt_options'][$option] = $value;
+
+        return true;
+    }
+}
+
 if (!function_exists('add_option')) {
     function add_option($option, $value = '', $deprecated = '', $autoload = 'yes')
     {
@@ -170,7 +179,19 @@ function patwc_payment_attempt_reset_options(): void
 {
     $GLOBALS['patwc_payment_attempt_options'] = array();
     $GLOBALS['patwc_payment_attempt_add_option_calls'] = array();
+    $GLOBALS['patwc_options'] = array();
 }
+
+patwc_payment_attempt_reset_options();
+$inFlightOrder = new PatwcPaymentAttemptRegressionOrder(4999);
+PaymentAttempt::record_new($inFlightOrder, array(
+    'trace_id' => 'trace-in-flight',
+    'transaction_id' => 'txn-in-flight',
+    'status' => 'created',
+));
+patwc_payment_attempt_assert_true(PaymentAttempt::has_in_flight_attempts(), 'record_new should index non-final PayArc attempts as in-flight.');
+PaymentAttempt::update_status($inFlightOrder, 'success');
+patwc_payment_attempt_assert_false(PaymentAttempt::has_in_flight_attempts(), 'final status should remove PayArc attempts from the in-flight index.');
 
 $order = new PatwcPaymentAttemptRegressionOrder(5001);
 $recorded = PaymentAttempt::record_new($order, array(

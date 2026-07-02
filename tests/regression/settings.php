@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use WCPOS\WooCommercePOS\PayArcTerminal\Gateway;
+use WCPOS\WooCommercePOS\PayArcTerminal\PaymentAttempt;
 use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
 
 if (!function_exists('get_option')) {
@@ -138,19 +139,18 @@ if (!class_exists('WC_Payment_Gateway')) {
     }
 }
 
-$settingsFile = dirname(__DIR__, 2) . '/includes/Settings.php';
-$gatewayFile = dirname(__DIR__, 2) . '/includes/Gateway.php';
+$root = dirname(__DIR__, 2);
+$settingsFile = $root . '/includes/Settings.php';
+$paymentAttemptFile = $root . '/includes/PaymentAttempt.php';
+$gatewayFile = $root . '/includes/Gateway.php';
 
-if (!is_readable($settingsFile)) {
-    throw new RuntimeException('Settings class file is missing.');
+foreach (array($settingsFile, $paymentAttemptFile, $gatewayFile) as $requiredFile) {
+    if (!is_readable($requiredFile)) {
+        throw new RuntimeException('Required class file is missing: ' . basename($requiredFile));
+    }
+
+    require_once $requiredFile;
 }
-
-if (!is_readable($gatewayFile)) {
-    throw new RuntimeException('Gateway class file is missing.');
-}
-
-require_once $settingsFile;
-require_once $gatewayFile;
 
 function patwc_assert_same($expected, $actual, string $message): void
 {
@@ -178,6 +178,36 @@ $settings = new Settings();
 patwc_assert_same('test', $settings->mode(), 'Default mode should be test.');
 patwc_assert_same('https://testpayarcconnectapi.payarc.net', $settings->connect_base_url(), 'Test Connect base URL mismatch.');
 patwc_assert_same('https://merchant.example/wp-admin/admin-ajax.php?action=patwc_payarc_callback', $settings->webhook_url(), 'Webhook URL mismatch.');
+
+$liveSettings = new Settings(array('mode' => 'production'));
+patwc_assert_same('production', $liveSettings->mode(), 'Production mode getter mismatch.');
+patwc_assert_same('https://payarcconnectapi.curvpos.com', $liveSettings->connect_login_base_url(), 'Production Login URL mismatch.');
+patwc_assert_same('https://payarcconnectapi.payarc.net', $liveSettings->connect_base_url(), 'Production Connect V3 URL mismatch.');
+patwc_assert_same('https://api.payarc.net', $liveSettings->merchant_api_base_url(), 'Production Merchant API URL mismatch.');
+
+$testConnected = new Settings(array(
+    'mode' => 'test',
+    'connected_mode' => 'test',
+    'connect_access_token' => 'token',
+    'default_terminal_id' => '1234567890',
+));
+patwc_assert_same('test', $testConnected->connected_mode(), 'Connected mode getter should return test.');
+patwc_assert_same(true, $testConnected->is_connected_for_current_mode(), 'Matching test connection should be active.');
+
+$staleConnected = new Settings(array(
+    'mode' => 'production',
+    'connected_mode' => 'test',
+    'connect_access_token' => 'token',
+    'default_terminal_id' => '1234567890',
+));
+patwc_assert_same(false, $staleConnected->is_connected_for_current_mode(), 'Stale test connection must not be active in production mode.');
+$liveWithoutFingerprint = new Settings(array(
+    'mode' => 'production',
+    'connected_mode' => 'production',
+    'connect_access_token' => 'token',
+    'default_terminal_id' => '1234567890',
+));
+patwc_assert_same(false, $liveWithoutFingerprint->is_connected_for_current_mode(), 'Production connection should require a credential fingerprint.');
 
 $GLOBALS['patwc_options'] = array(
     'woocommerce_' . Settings::GATEWAY_ID . '_settings' => array(
@@ -222,6 +252,9 @@ patwc_assert_same('connect-access-token', $merchantSettings->connect_access_toke
 patwc_assert_same('123456789012', $merchantSettings->tenant_id(), 'Tenant id should derive from last 12 MID digits.');
 patwc_assert_same('1850528139', $merchantSettings->default_terminal_id(), 'Default terminal id should derive from discovered registry when no manual default is stored.');
 patwc_assert_same(array('1850528139' => 'Front Counter A920 (pax_A920) ••••••8139'), $merchantSettings->terminal_registry_options(), 'Terminal registry options mismatch.');
+$fingerprint = $merchantSettings->connection_fingerprint();
+patwc_assert_same(64, strlen($fingerprint), 'Connection fingerprint should be a SHA-256 HMAC hex string.');
+patwc_assert_same($fingerprint, Settings::connection_fingerprint_for($merchantSettings->all()), 'Static fingerprint helper should match Settings fingerprint.');
 
 $staleTenantSettings = new Settings(array(
     'tenant_id' => '999999999999',
@@ -260,16 +293,46 @@ patwc_assert_same(array(), Gateway::validate_settings(array(
     'print_receipt' => '0',
 )), 'Valid gateway settings should not return errors.');
 
-patwc_assert_same(array(
-    'Production mode cannot be saved until PayArc production Connect URLs are verified.',
-), Gateway::validate_settings(array(
+$liveValidationSettings = array(
     'enabled' => 'yes',
     'mode' => 'production',
+    'connected_mode' => 'production',
+    'connect_email' => 'merchant@example.com',
     'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'live-client-secret',
+    'connect_secret_key' => 'live-merchant-api-token',
     'default_terminal_id' => '1234567890',
     'tender_type' => 'CREDIT',
     'print_receipt' => '0',
-)), 'Production mode should be rejected until verified.');
+    'webhook_url' => 'https://merchant.example/wp-admin/admin-ajax.php?action=patwc_payarc_callback',
+);
+$liveValidationSettings['connected_fingerprint'] = Settings::connection_fingerprint_for($liveValidationSettings);
+
+patwc_assert_same(array(
+    'Press Connect PayArc after changing mode so the Connect AccessToken and terminal list match Live mode.',
+    'Press Connect PayArc after changing PayArc credentials so the Connect AccessToken and terminal list match the saved credentials.',
+    'Callback URL must be HTTPS before enabling Live mode.',
+), Gateway::validate_settings(array(
+    'enabled' => 'yes',
+    'mode' => 'production',
+    'connected_mode' => 'test',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'live-client-secret',
+    'connect_secret_key' => 'live-merchant-api-token',
+    'default_terminal_id' => '1234567890',
+    'tender_type' => 'CREDIT',
+    'print_receipt' => '0',
+    'webhook_url' => 'http://merchant.example/wp-admin/admin-ajax.php?action=patwc_payarc_callback',
+)), 'Live mode should require a matching connection and HTTPS callback URL.');
+
+$changedCredentialSettings = $liveValidationSettings;
+$changedCredentialSettings['connect_mid'] = '0000123456789999';
+patwc_assert_same(array(
+    'Press Connect PayArc after changing PayArc credentials so the Connect AccessToken and terminal list match the saved credentials.',
+), Gateway::validate_settings($changedCredentialSettings), 'Live mode should require reconnect after same-mode PayArc credentials change.');
+
+patwc_assert_same(array(), Gateway::validate_settings($liveValidationSettings), 'Live mode should be allowed after matching connection, fingerprint, and HTTPS callback URL.');
 
 $GLOBALS['patwc_actions'] = array();
 $gateway = new Gateway();
@@ -306,6 +369,52 @@ $_POST = array(
 );
 
 patwc_assert_same(false, $gateway->process_admin_options(), 'Gateway admin save should reject posted production mode.');
+$_POST = array();
+
+$currentConnectedSettings = array(
+    'enabled' => 'yes',
+    'mode' => 'test',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'client-secret',
+    'connect_secret_key' => 'merchant-api-token',
+    'connected_mode' => 'test',
+    'connect_access_token' => 'connect-access-token',
+    'connect_token_expires_at' => '1893456000',
+    'terminal_registry' => array(array(
+        'terminal_id' => '1850528139',
+        'label' => 'Front Counter A920 (pax_A920) ••••••8139',
+        'enabled' => true,
+    )),
+    'tenant_id' => '123456789012',
+    'default_terminal_id' => '1850528139',
+    'callback_bearer_token' => 'callback-secret-token',
+    'webhook_url' => 'https://merchant.example/wp-admin/admin-ajax.php?action=patwc_payarc_callback',
+    'tender_type' => 'CREDIT',
+    'print_receipt' => '0',
+);
+$currentConnectedSettings['connected_fingerprint'] = Settings::connection_fingerprint_for($currentConnectedSettings);
+$GLOBALS['patwc_options'] = array(
+    'woocommerce_' . Settings::GATEWAY_ID . '_settings' => $currentConnectedSettings,
+    PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS => array('5001' => array('status' => 'created')),
+);
+$GLOBALS['patwc_admin_errors'] = array();
+$gateway = new Gateway();
+$_POST = array(
+    'woocommerce_' . Settings::GATEWAY_ID . '_enabled' => 'yes',
+    'woocommerce_' . Settings::GATEWAY_ID . '_mode' => 'production',
+    'woocommerce_' . Settings::GATEWAY_ID . '_connect_email' => 'merchant@example.com',
+    'woocommerce_' . Settings::GATEWAY_ID . '_connect_mid' => '0000123456789012',
+    'woocommerce_' . Settings::GATEWAY_ID . '_connect_client_secret' => '',
+    'woocommerce_' . Settings::GATEWAY_ID . '_connect_secret_key' => '',
+    'woocommerce_' . Settings::GATEWAY_ID . '_callback_bearer_token' => '',
+    'woocommerce_' . Settings::GATEWAY_ID . '_default_terminal_id' => '1850528139',
+    'woocommerce_' . Settings::GATEWAY_ID . '_tender_type' => 'CREDIT',
+    'woocommerce_' . Settings::GATEWAY_ID . '_print_receipt' => '0',
+    'woocommerce_' . Settings::GATEWAY_ID . '_webhook_url' => 'https://merchant.example/wp-admin/admin-ajax.php?action=patwc_payarc_callback',
+);
+patwc_assert_same(false, $gateway->process_admin_options(), 'Gateway admin save should block mode changes while a PayArc payment is in progress.');
+patwc_assert_same(true, in_array('Wait for in-progress PayArc terminal payments to finish before changing PayArc mode or credentials.', $GLOBALS['patwc_admin_errors'], true), 'In-flight mode change should produce a clear admin error.');
 $_POST = array();
 
 $GLOBALS['patwc_options'] = array(

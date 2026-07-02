@@ -8,6 +8,9 @@ class Settings
     private const TEST_CONNECT_LOGIN_BASE_URL = 'https://testpayarcconnectapi.curvpos.com';
     private const TEST_CONNECT_BASE_URL = 'https://testpayarcconnectapi.payarc.net';
     private const TEST_MERCHANT_API_BASE_URL = 'https://testapi.payarc.net';
+    private const PRODUCTION_CONNECT_LOGIN_BASE_URL = 'https://payarcconnectapi.curvpos.com';
+    private const PRODUCTION_CONNECT_BASE_URL = 'https://payarcconnectapi.payarc.net';
+    private const PRODUCTION_MERCHANT_API_BASE_URL = 'https://api.payarc.net';
 
     /**
      * @var array<string, mixed>
@@ -36,7 +39,7 @@ class Settings
             return rtrim($override, '/');
         }
 
-        return self::TEST_CONNECT_LOGIN_BASE_URL;
+        return $this->mode() === 'production' ? self::PRODUCTION_CONNECT_LOGIN_BASE_URL : self::TEST_CONNECT_LOGIN_BASE_URL;
     }
 
     public function connect_base_url(): string
@@ -46,7 +49,7 @@ class Settings
             return rtrim($override, '/');
         }
 
-        return self::TEST_CONNECT_BASE_URL;
+        return $this->mode() === 'production' ? self::PRODUCTION_CONNECT_BASE_URL : self::TEST_CONNECT_BASE_URL;
     }
 
     public function merchant_api_base_url(): string
@@ -56,7 +59,50 @@ class Settings
             return rtrim($override, '/');
         }
 
-        return self::TEST_MERCHANT_API_BASE_URL;
+        return $this->mode() === 'production' ? self::PRODUCTION_MERCHANT_API_BASE_URL : self::TEST_MERCHANT_API_BASE_URL;
+    }
+
+    public function connected_mode(): string
+    {
+        $mode = $this->string_setting('connected_mode', '');
+
+        return $mode === 'production' ? 'production' : ($mode === 'test' ? 'test' : '');
+    }
+
+    public function connected_fingerprint(): string
+    {
+        return $this->string_setting('connected_fingerprint', '');
+    }
+
+    public function connection_fingerprint(): string
+    {
+        $parts = array(
+            'mode=' . $this->mode(),
+            'email=' . strtolower($this->connect_email()),
+            'mid=' . preg_replace('/\D+/', '', $this->connect_mid()),
+            'client=' . $this->connect_client_secret(),
+            'secret=' . $this->connect_secret_key(),
+        );
+
+        return hash_hmac('sha256', implode("\n", $parts), self::fingerprint_salt());
+    }
+
+    /**
+     * @param array<string, mixed> $settings
+     */
+    public static function connection_fingerprint_for(array $settings): string
+    {
+        return (new self($settings))->connection_fingerprint();
+    }
+
+    public function is_connected_for_current_mode(): bool
+    {
+        $connectedFingerprint = $this->connected_fingerprint();
+
+        return $this->connected_mode() === $this->mode()
+            && ($connectedFingerprint !== '' ? hash_equals($connectedFingerprint, $this->connection_fingerprint()) : $this->mode() !== 'production')
+            && $this->connect_access_token() !== ''
+            && preg_match('/^[0-9]{10}$/', $this->default_terminal_id()) === 1;
     }
 
     public function connect_email(): string
@@ -244,7 +290,9 @@ class Settings
             'connect_secret_key_configured' => $this->connect_secret_key() !== '',
             'connect_access_token_configured' => $this->connect_access_token() !== '',
             'callback_bearer_token_configured' => $this->callback_bearer_token() !== '',
-            'production_connect_base_url_verified' => false,
+            'connected_mode' => $this->connected_mode(),
+            'connected_for_current_mode' => $this->is_connected_for_current_mode(),
+            'production_connect_base_url_verified' => true,
         );
     }
 
@@ -281,6 +329,18 @@ class Settings
     /**
      * @return array<string, mixed>
      */
+    private static function fingerprint_salt(): string
+    {
+        if (function_exists('wp_salt')) {
+            $salt = wp_salt('auth');
+            if (is_string($salt) && $salt !== '') {
+                return $salt;
+            }
+        }
+
+        return self::GATEWAY_ID;
+    }
+
     private function load_settings(): array
     {
         $option = 'woocommerce_' . self::GATEWAY_ID . '_settings';

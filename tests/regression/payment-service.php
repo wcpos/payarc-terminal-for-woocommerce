@@ -49,7 +49,20 @@ if (!function_exists('get_option')) {
             return $GLOBALS['patwc_payment_service_options'][$option];
         }
 
+        if (isset($GLOBALS['patwc_options']) && is_array($GLOBALS['patwc_options']) && array_key_exists($option, $GLOBALS['patwc_options'])) {
+            return $GLOBALS['patwc_options'][$option];
+        }
+
         return $default;
+    }
+}
+
+if (!function_exists('update_option')) {
+    function update_option($option, $value)
+    {
+        $GLOBALS['patwc_options'][$option] = $value;
+
+        return true;
     }
 }
 
@@ -273,6 +286,7 @@ function patwc_payment_service_reset_uuids(array $uuids = array()): void
 {
     $GLOBALS['patwc_payment_service_uuids'] = $uuids;
     $GLOBALS['patwc_payment_service_options'] = array();
+    $GLOBALS['patwc_options'] = array();
 }
 
 patwc_payment_service_reset_uuids(array('attempt-invalid', 'idem-invalid'));
@@ -289,8 +303,27 @@ if (count($invalidClient->sale_calls) !== 0) {
     throw new RuntimeException('Invalid terminal settings should not call sale.');
 }
 
+patwc_payment_service_reset_uuids(array('attempt-empty-registry', 'idem-empty-registry'));
+$emptyRegistryClient = new PatwcPaymentServiceFakeClient();
+$emptyRegistryService = patwc_payment_service_make_service(patwc_payment_service_settings(array(
+    'connected_mode' => 'test',
+    'connect_access_token' => 'connect-access-token',
+    'terminal_registry' => array(),
+)), $emptyRegistryClient);
+try {
+    $emptyRegistryService->start_payment_for_order(new PatwcPaymentServiceOrder(9002));
+} catch (InvalidArgumentException $exception) {
+    patwc_payment_service_assert_same(0, count($emptyRegistryClient->sale_calls), 'Connected settings with an empty terminal registry should be rejected before sale.');
+}
+if (count($emptyRegistryClient->sale_calls) !== 0) {
+    throw new RuntimeException('Connected empty terminal registry should not call sale.');
+}
+
 patwc_payment_service_reset_uuids(array('550e8400-e29b-41d4-a716-446655440000', '550e8400-e29b-41d4-a716-446655440001'));
 $client = new PatwcPaymentServiceFakeClient();
+$client->sale_callback = function () use (&$client): void {
+    patwc_payment_service_assert_true(PaymentAttempt::has_in_flight_attempts(), 'Payment attempt should be marked in-flight before the external PayArc sale call starts.');
+};
 $service = patwc_payment_service_make_service(patwc_payment_service_settings(), $client);
 $order = new PatwcPaymentServiceOrder(123);
 $started = $service->start_payment_for_order($order);
