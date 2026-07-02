@@ -10,12 +10,23 @@ class Logger
     /**
      * Write a redacted message to the WooCommerce logger or PHP error log.
      *
+     * Logging can be disabled with the `patwc_logging` filter (matching the
+     * Stripe/SumUp terminal gateways' `stwc_logging`/`sutwc_logging` toggles):
+     *
+     *     add_filter( 'patwc_logging', '__return_false' );
+     *
      * @param mixed $message Log message.
      * @param array<string, mixed> $context Log context.
      * @param mixed $order Optional WooCommerce order object.
      */
     public static function log($message, array $context = array(), $order = null, string $level = 'info'): void
     {
+        // Toggle only — do not pass $message, which is still raw here, so the
+        // filter cannot become a way to read unredacted secrets.
+        if (function_exists('apply_filters') && !apply_filters('patwc_logging', true)) {
+            return;
+        }
+
         $safeMessage = self::redactValue($message);
         $safeContext = self::redactValue($context);
         $safeLevel = self::normalizeLevel($level);
@@ -42,6 +53,36 @@ class Logger
         }
 
         error_log(strtoupper($safeLevel) . ' ' . self::stringify($safeMessage) . ' ' . self::stringify($safeContext));
+    }
+
+    /**
+     * Redact free-form UNTRUSTED text (provider responses, exception messages)
+     * before it is surfaced to a user or embedded in an exception.
+     *
+     * Unlike the logger's own messages, untrusted text can present a secret
+     * with a plain whitespace separator ("invalid key <token>"), so this
+     * redacts on whitespace as well as ":"/"=" — accepting occasional
+     * over-redaction as the safer trade-off. Shared by the gateway's
+     * safe_text()/safe_public_error_text() helpers so the two cannot drift.
+     */
+    public static function redact_untrusted_text(string $text): string
+    {
+        $text = preg_replace('/[[:cntrl:]]+/', ' ', $text);
+        if (!is_string($text)) {
+            return '';
+        }
+
+        $text = preg_replace('/\bBearer\s+[A-Za-z0-9._~+\/=:-]+/i', 'Bearer ' . self::REDACTED, $text);
+        if (!is_string($text)) {
+            return '';
+        }
+
+        $text = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*(?:[:=]|\s+)\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=' . self::REDACTED, $text);
+        if (!is_string($text)) {
+            return '';
+        }
+
+        return trim($text);
     }
 
     /**
@@ -137,7 +178,12 @@ class Logger
     private static function redactString(string $value): string
     {
         $value = preg_replace('/Bearer\s+[A-Za-z0-9._~+\/=:-]+/i', 'Bearer ' . self::REDACTED, $value) ?? self::REDACTED;
-        $value = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*(?:[:=]|\s+)\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=' . self::REDACTED, $value);
+        // Logger messages are the plugin's own (trusted) strings and context is
+        // already key-redacted, so require an explicit ":"/"=" delimiter here to
+        // avoid mangling ordinary prose like "the key rotated". Untrusted
+        // provider/exception text is handled by the aggressive safe_text()/
+        // safe_public_error_text() sanitizers instead.
+        $value = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*[:=]\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=' . self::REDACTED, $value);
 
         return is_string($value) ? $value : self::REDACTED;
     }

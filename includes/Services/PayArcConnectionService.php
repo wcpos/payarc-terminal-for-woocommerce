@@ -572,21 +572,8 @@ class PayArcConnectionService
 
     private function safe_text(string $text): string
     {
-        $text = preg_replace('/[[:cntrl:]]+/', ' ', $text);
-        if (!is_string($text)) {
-            return '';
-        }
-
-        $text = preg_replace('/\bBearer\s+[A-Za-z0-9._~+\/=:-]+/i', 'Bearer [REDACTED]', $text);
-        if (!is_string($text)) {
-            return '';
-        }
-
-        $text = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*(?:[:=]|\s+)\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=[REDACTED]', $text);
-        if (!is_string($text)) {
-            return '';
-        }
-
-        return trim($text);
+        // Untrusted PayArc-returned error text (e.g. ErrorMessage) embedded into
+        // exceptions — redacted aggressively via the shared Logger helper.
+        return Logger::redact_untrusted_text($text);
     }
 }

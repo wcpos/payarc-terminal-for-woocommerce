@@ -411,22 +411,9 @@ class AjaxHandler
 
     private function safe_public_error_text(string $message): string
     {
-        $message = preg_replace('/[[:cntrl:]]+/', ' ', $message);
-        if (!is_string($message)) {
-            return '';
-        }
-
-        $message = preg_replace('/\bBearer\s+[A-Za-z0-9._~+\/=:-]+/i', 'Bearer [REDACTED]', $message);
-        if (!is_string($message)) {
-            return '';
-        }
-
-        $message = preg_replace('/\b(token|secret|key|password|client_secret|secret_key|access_token|api_key)\s*(?:[:=]|\s+)\s*[A-Za-z0-9._~+\/=:-]{4,}/i', '$1=[REDACTED]', $message);
-        if (!is_string($message)) {
-            return '';
-        }
-
-        return trim($message);
+        // Untrusted exception/provider text — redacted aggressively via the
+        // shared Logger helper (kept identical to safe_text()).
+        return Logger::redact_untrusted_text($message);
     }
 
     /**
