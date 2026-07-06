@@ -13,6 +13,7 @@ class PaymentAttempt
     public const META_ATTEMPT_HISTORY = '_patwc_attempt_history';
     public const META_PROCESSED_CALLBACKS = '_patwc_processed_callbacks';
     public const OPTION_IN_FLIGHT_ATTEMPTS = 'patwc_payarc_in_flight_attempts';
+    private const IN_FLIGHT_STALE_AFTER_SECONDS = 1800;
 
     /**
      * @param object $order WooCommerce order-like object.
@@ -128,8 +129,44 @@ class PaymentAttempt
         }
 
         $index = get_option(self::OPTION_IN_FLIGHT_ATTEMPTS, array());
+        if (!is_array($index)) {
+            return false;
+        }
 
-        return is_array($index) && count($index) > 0;
+        $active = self::active_in_flight_index($index);
+        if (function_exists('update_option') && $active !== $index) {
+            update_option(self::OPTION_IN_FLIGHT_ATTEMPTS, $active);
+        }
+
+        return count($active) > 0;
+    }
+
+    /**
+     * @param array<string, mixed> $index
+     * @return array<string, mixed>
+     */
+    private static function active_in_flight_index(array $index): array
+    {
+        $cutoff = time() - self::IN_FLIGHT_STALE_AFTER_SECONDS;
+        foreach ($index as $orderId => $attempt) {
+            if (!is_array($attempt)) {
+                unset($index[$orderId]);
+                continue;
+            }
+
+            $status = self::normalize_status(isset($attempt['status']) ? (string) $attempt['status'] : 'created');
+            if (!self::is_non_final($status) && $status !== 'cancel_requested') {
+                unset($index[$orderId]);
+                continue;
+            }
+
+            $updatedAt = isset($attempt['updated_at']) && is_numeric($attempt['updated_at']) ? (int) $attempt['updated_at'] : 0;
+            if ($updatedAt <= 0 || $updatedAt < $cutoff) {
+                unset($index[$orderId]);
+            }
+        }
+
+        return $index;
     }
 
     /**

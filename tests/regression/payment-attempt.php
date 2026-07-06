@@ -193,6 +193,21 @@ patwc_payment_attempt_assert_true(PaymentAttempt::has_in_flight_attempts(), 'rec
 PaymentAttempt::update_status($inFlightOrder, 'success');
 patwc_payment_attempt_assert_false(PaymentAttempt::has_in_flight_attempts(), 'final status should remove PayArc attempts from the in-flight index.');
 
+patwc_payment_attempt_reset_options();
+$GLOBALS['patwc_payment_attempt_options'][PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS] = array(
+    '5000' => array('status' => 'created', 'updated_at' => time() - 1900),
+);
+patwc_payment_attempt_assert_false(PaymentAttempt::has_in_flight_attempts(), 'stale non-final PayArc attempts should not block connection changes forever.');
+patwc_payment_attempt_assert_same(array(), get_option(PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS, array()), 'stale in-flight markers should be pruned from the index.');
+
+patwc_payment_attempt_reset_options();
+$GLOBALS['patwc_payment_attempt_options'][PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS] = array(
+    '5000' => array('status' => 'created', 'updated_at' => time() - 1900),
+    '5001' => array('status' => 'processing', 'updated_at' => time()),
+);
+patwc_payment_attempt_assert_true(PaymentAttempt::has_in_flight_attempts(), 'fresh non-final PayArc attempts should still block connection changes.');
+patwc_payment_attempt_assert_array_not_has_key('5000', get_option(PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS, array()), 'stale in-flight markers should be pruned while fresh markers remain.');
+
 $order = new PatwcPaymentAttemptRegressionOrder(5001);
 $recorded = PaymentAttempt::record_new($order, array(
     'trace_id' => 'trace-001',

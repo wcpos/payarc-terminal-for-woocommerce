@@ -458,7 +458,7 @@ try {
     patwc_connection_assert_same('https://payarcconnectapi.curvpos.com/Login', $GLOBALS['patwc_http_requests'][0]['url'], 'Non-auth failure should only call selected Live Login.');
 }
 
-$GLOBALS['patwc_options'][PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS] = array('123' => array('status' => 'created'));
+$GLOBALS['patwc_options'][PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS] = array('123' => array('status' => 'created', 'updated_at' => time()));
 $GLOBALS['patwc_http_requests'] = array();
 $service = new PayArcConnectionService(new Settings(array(
     'mode' => 'test',

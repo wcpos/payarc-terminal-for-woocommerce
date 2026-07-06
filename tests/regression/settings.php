@@ -396,7 +396,7 @@ $currentConnectedSettings = array(
 $currentConnectedSettings['connected_fingerprint'] = Settings::connection_fingerprint_for($currentConnectedSettings);
 $GLOBALS['patwc_options'] = array(
     'woocommerce_' . Settings::GATEWAY_ID . '_settings' => $currentConnectedSettings,
-    PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS => array('5001' => array('status' => 'created')),
+    PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS => array('5001' => array('status' => 'created', 'updated_at' => time())),
 );
 $GLOBALS['patwc_admin_errors'] = array();
 $gateway = new Gateway();
@@ -419,7 +419,7 @@ $_POST = array();
 
 $GLOBALS['patwc_options'] = array(
     'woocommerce_' . Settings::GATEWAY_ID . '_settings' => $currentConnectedSettings,
-    PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS => array('5002' => array('status' => 'created')),
+    PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS => array('5002' => array('status' => 'created', 'updated_at' => time())),
 );
 $GLOBALS['patwc_admin_errors'] = array();
 $gateway = new Gateway();
