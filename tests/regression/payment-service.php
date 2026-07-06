@@ -328,6 +328,7 @@ $service = patwc_payment_service_make_service(patwc_payment_service_settings(), 
 $order = new PatwcPaymentServiceOrder(123);
 $started = $service->start_payment_for_order($order);
 $expectedTransactionId = PayArcIds::transaction_id(123, '550e8400-e29b-41d4-a716-446655440000');
+$expectedCallbackUrl = function_exists('admin_url') ? admin_url('admin-ajax.php?action=patwc_payarc_callback') : 'admin-ajax.php?action=patwc_payarc_callback';
 patwc_payment_service_assert_same(1, count($client->sale_calls), 'start_payment_for_order should call sale once.');
 patwc_payment_service_assert_same(array(
     'tenantId' => '123456789012',
@@ -336,7 +337,7 @@ patwc_payment_service_assert_same(array(
     'tenderType' => 'DEBIT',
     'amount' => Money::to_payarc_amount_object('10.23', 'USD'),
     'printReceipt' => 2,
-    'callbackURL' => 'admin-ajax.php?action=patwc_payarc_callback',
+    'callbackURL' => $expectedCallbackUrl,
     'metadata' => array('order_id' => 123, 'terminal_id' => '1234567890', 'mode' => 'test'),
 ), $client->sale_calls[0]['payload'], 'Sale payload mismatch.');
 patwc_payment_service_assert_same('550e8400-e29b-41d4-a716-446655440001', $client->sale_calls[0]['idempotency_key'], 'Sale idempotency key mismatch.');

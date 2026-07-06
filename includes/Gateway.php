@@ -185,7 +185,7 @@ trait GatewayImplementation
             $errors[] = 'Press Connect PayArc after changing PayArc credentials so the Connect AccessToken and terminal list match the saved credentials.';
         }
 
-        if ($enabled && $mode === 'production' && stripos(self::setting_string($settings, 'webhook_url'), 'https://') !== 0) {
+        if ($enabled && $mode === 'production' && stripos((new Settings($settings))->webhook_url(), 'https://') !== 0) {
             $errors[] = 'Callback URL must be HTTPS before enabling Live mode.';
         }
 
@@ -266,7 +266,7 @@ trait GatewayImplementation
         self::append_local_check(
             $checks,
             'webhook_url',
-            stripos(self::setting_string($settings, 'webhook_url'), 'https://') === 0,
+            stripos((new Settings($settings))->webhook_url(), 'https://') === 0,
             'Callback URL is HTTPS.',
             'Callback URL must be HTTPS.'
         );

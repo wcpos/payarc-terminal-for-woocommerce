@@ -25,7 +25,11 @@ if (!function_exists('update_option')) {
 if (!function_exists('admin_url')) {
     function admin_url($path = '')
     {
-        return 'https://merchant.example/wp-admin/' . ltrim((string) $path, '/');
+        $base = isset($GLOBALS['patwc_admin_url_base']) && is_string($GLOBALS['patwc_admin_url_base'])
+            ? $GLOBALS['patwc_admin_url_base']
+            : 'https://merchant.example/wp-admin/';
+
+        return rtrim($base, '/') . '/' . ltrim((string) $path, '/');
     }
 }
 
@@ -311,7 +315,6 @@ $liveValidationSettings['connected_fingerprint'] = Settings::connection_fingerpr
 patwc_assert_same(array(
     'Press Connect PayArc after changing mode so the Connect AccessToken and terminal list match Live mode.',
     'Press Connect PayArc after changing PayArc credentials so the Connect AccessToken and terminal list match the saved credentials.',
-    'Callback URL must be HTTPS before enabling Live mode.',
 ), Gateway::validate_settings(array(
     'enabled' => 'yes',
     'mode' => 'production',
@@ -324,7 +327,7 @@ patwc_assert_same(array(
     'tender_type' => 'CREDIT',
     'print_receipt' => '0',
     'webhook_url' => 'http://merchant.example/wp-admin/admin-ajax.php?action=patwc_payarc_callback',
-)), 'Live mode should require a matching connection and HTTPS callback URL.');
+)), 'Live mode should require a matching connection and ignore tampered posted callback URLs when the runtime callback URL is HTTPS.');
 
 $changedCredentialSettings = $liveValidationSettings;
 $changedCredentialSettings['connect_mid'] = '0000123456789999';
@@ -333,6 +336,12 @@ patwc_assert_same(array(
 ), Gateway::validate_settings($changedCredentialSettings), 'Live mode should require reconnect after same-mode PayArc credentials change.');
 
 patwc_assert_same(array(), Gateway::validate_settings($liveValidationSettings), 'Live mode should be allowed after matching connection, fingerprint, and HTTPS callback URL.');
+
+$GLOBALS['patwc_admin_url_base'] = 'http://merchant.example/wp-admin/';
+patwc_assert_same(array(
+    'Callback URL must be HTTPS before enabling Live mode.',
+), Gateway::validate_settings($liveValidationSettings), 'Live mode should validate the runtime callback URL used in transaction payloads, not the posted readonly field.');
+unset($GLOBALS['patwc_admin_url_base']);
 
 $GLOBALS['patwc_actions'] = array();
 $gateway = new Gateway();

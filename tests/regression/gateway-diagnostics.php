@@ -36,6 +36,17 @@ if (!function_exists('wp_create_nonce')) {
     }
 }
 
+if (!function_exists('admin_url')) {
+    function admin_url($path = '')
+    {
+        $base = isset($GLOBALS['patwc_admin_url_base']) && is_string($GLOBALS['patwc_admin_url_base'])
+            ? $GLOBALS['patwc_admin_url_base']
+            : 'https://merchant.example/wp-admin/';
+
+        return rtrim($base, '/') . '/' . ltrim((string) $path, '/');
+    }
+}
+
 if (!function_exists('add_action')) {
     function add_action($hook, $callback, $priority = 10, $accepted_args = 1)
     {
@@ -194,6 +205,7 @@ patwc_gateway_diagnostics_assert_not_contains('callback-secret-token-should-not-
 patwc_gateway_diagnostics_assert_not_contains('123456789012', $html, 'Diagnostics HTML must not render raw tenant id.');
 patwc_gateway_diagnostics_assert_not_contains('9876543210', $html, 'Diagnostics HTML must not render raw terminal id.');
 
+$GLOBALS['patwc_admin_url_base'] = 'http://merchant.example/wp-admin/';
 $diagnostics = Gateway::local_settings_diagnostics(array(
     'connect_secret_key_configured' => false,
     'connect_access_token_configured' => false,
@@ -216,6 +228,7 @@ patwc_gateway_diagnostics_assert_same(array(
     'Print receipt must be one of 0, 1, 2, or 3.',
     'Tender type must be CREDIT or DEBIT.',
 ), $diagnostics['errors'], 'Local validation errors should cover required Connect token, callback, MID, terminal, HTTPS, receipt, and tender checks.');
+unset($GLOBALS['patwc_admin_url_base']);
 
 $encodedDiagnostics = json_encode($diagnostics);
 if (!is_string($encodedDiagnostics)) {

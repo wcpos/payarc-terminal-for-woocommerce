@@ -369,7 +369,8 @@ if (!is_array($localized)) {
 
 patwc_gateway_ui_assert_same('patwcPaymentData', $localized['object_name'], 'Localized object name mismatch.');
 $data = $localized['data'];
-patwc_gateway_ui_assert_same('admin-ajax.php', $data['ajaxUrl'] ?? null, 'Localized ajax URL mismatch.');
+$expectedAjaxUrl = function_exists('admin_url') ? admin_url('admin-ajax.php') : 'admin-ajax.php';
+patwc_gateway_ui_assert_same($expectedAjaxUrl, $data['ajaxUrl'] ?? null, 'Localized ajax URL mismatch.');
 patwc_gateway_ui_assert_same('nonce-for-patwc_payment', $data['nonce'] ?? null, 'Localized payment nonce mismatch.');
 patwc_gateway_ui_assert_same(2001, $data['orderId'] ?? null, 'Localized order id mismatch.');
 patwc_gateway_ui_assert_same(AjaxHandler::order_token_for($GLOBALS['patwc_gateway_orders'][2001]), $data['orderToken'] ?? null, 'Localized order token mismatch.');
