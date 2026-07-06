@@ -163,6 +163,13 @@ function patwc_payment_attempt_assert_false($actual, string $message): void
 }
 
 
+function patwc_payment_attempt_assert_array_has_key(string $key, array $array, string $message): void
+{
+    if (!array_key_exists($key, $array)) {
+        throw new RuntimeException($message . ' Expected key ' . $key . ' in ' . var_export($array, true) . '.');
+    }
+}
+
 function patwc_payment_attempt_assert_array_not_has_key(string $key, array $array, string $message): void
 {
     if (array_key_exists($key, $array)) {
@@ -207,6 +214,7 @@ $GLOBALS['patwc_payment_attempt_options'][PaymentAttempt::OPTION_IN_FLIGHT_ATTEM
 );
 patwc_payment_attempt_assert_true(PaymentAttempt::has_in_flight_attempts(), 'fresh non-final PayArc attempts should still block connection changes.');
 patwc_payment_attempt_assert_array_not_has_key('5000', get_option(PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS, array()), 'stale in-flight markers should be pruned while fresh markers remain.');
+patwc_payment_attempt_assert_array_has_key('5001', get_option(PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS, array()), 'fresh in-flight markers should remain after pruning.');
 
 $order = new PatwcPaymentAttemptRegressionOrder(5001);
 $recorded = PaymentAttempt::record_new($order, array(
