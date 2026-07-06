@@ -215,7 +215,7 @@ class PayArcConnectionService
         $message = $exception->getMessage();
 
         return preg_match('/^PayArc request failed\. HTTP status: (401|403)\.$/', $message) === 1
-            || preg_match('/^PayArc Login failed; ErrorCode: (401|403); /', $message) === 1;
+            || preg_match('/^PayArc Login failed; ErrorCode: (1|401|403); /', $message) === 1;
     }
 
     private function opposite_mode_accepts_credentials(Settings $settings, string $oppositeMode): bool

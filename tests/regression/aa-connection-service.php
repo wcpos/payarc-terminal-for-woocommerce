@@ -398,6 +398,39 @@ try {
 $GLOBALS['patwc_http_requests'] = array();
 $GLOBALS['patwc_http_response_queue'] = array(
     array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'ErrorCode' => 1,
+            'ErrorMessage' => 'wrong environment live selected test-token-secret',
+        )),
+    ),
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'ErrorCode' => 0,
+            'BearerTokenInfo' => array('AccessToken' => 'opposite-test-token-from-error-code-1'),
+        )),
+    ),
+);
+$service = new PayArcConnectionService(new Settings(array(
+    'mode' => 'production',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'test-client-secret',
+    'connect_secret_key' => 'test-token-secret',
+)));
+try {
+    $service->connect();
+    throw new RuntimeException('Live-mode connect should probe Test when Login returns ErrorCode 1.');
+} catch (RuntimeException $exception) {
+    patwc_connection_assert_contains('These look like Test PayArc credentials', $exception->getMessage(), 'ErrorCode 1 Login auth failure should warn when credentials look Test.');
+    patwc_connection_assert_missing_secret(array('message' => $exception->getMessage()), 'test-token-secret', 'ErrorCode 1 mismatch warning must not leak API token.');
+    patwc_connection_assert_same(2, count($GLOBALS['patwc_http_requests']), 'ErrorCode 1 auth mismatch should probe opposite Login only.');
+}
+
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
         'response' => array('code' => 500),
         'body' => json_encode(array('error' => 'temporary upstream outage')),
     ),
