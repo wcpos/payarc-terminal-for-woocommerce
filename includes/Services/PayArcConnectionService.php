@@ -82,6 +82,7 @@ class PayArcConnectionService
         $updates['terminal_registry'] = $terminals;
         $updates['default_terminal_id'] = $defaultTerminal;
 
+        $this->assert_no_in_flight_payment_attempts();
         $this->persist($updates);
 
         $result = $this->public_result('connected', 'Connected to PayArc. Select a discovered terminal and save settings.', $tenantId, $defaultTerminal, $terminals);
@@ -113,6 +114,7 @@ class PayArcConnectionService
             'terminal_registry' => $terminals,
             'default_terminal_id' => $defaultTerminal,
         );
+        $this->assert_no_in_flight_payment_attempts();
         $this->persist($updates);
 
         Logger::log('PayArc terminal refresh completed', $this->connection_log_context($this->settings, array(
@@ -130,6 +132,7 @@ class PayArcConnectionService
     {
         $this->assert_no_in_flight_payment_attempts();
         Logger::log('PayArc disconnect requested', $this->connection_log_context($this->settings));
+        $this->assert_no_in_flight_payment_attempts();
         $this->persist(array(
             'connected_mode' => '',
             'connected_fingerprint' => '',

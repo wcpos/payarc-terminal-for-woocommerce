@@ -91,7 +91,16 @@ if (!function_exists('wp_remote_request')) {
         }
 
         if (isset($GLOBALS['patwc_http_response_queue']) && is_array($GLOBALS['patwc_http_response_queue']) && count($GLOBALS['patwc_http_response_queue']) > 0) {
-            return array_shift($GLOBALS['patwc_http_response_queue']);
+            $response = array_shift($GLOBALS['patwc_http_response_queue']);
+            if (isset($GLOBALS['patwc_after_http_request']) && is_callable($GLOBALS['patwc_after_http_request'])) {
+                call_user_func($GLOBALS['patwc_after_http_request'], $record);
+            }
+
+            return $response;
+        }
+
+        if (isset($GLOBALS['patwc_after_http_request']) && is_callable($GLOBALS['patwc_after_http_request'])) {
+            call_user_func($GLOBALS['patwc_after_http_request'], $record);
         }
 
         return $GLOBALS['patwc_client_response'] ?? array('response' => array('code' => 500), 'body' => '{}');
@@ -446,6 +455,60 @@ try {
     patwc_connection_assert_same(0, count($GLOBALS['patwc_http_requests']), 'In-flight refresh block should happen before PayArc terminal lookup.');
 }
 unset($GLOBALS['patwc_options'][PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS]);
+
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'ErrorCode' => 0,
+            'Terminals' => array(array(
+                'Terminal' => 'Race Counter A920',
+                'Type' => 'pax_A920',
+                'Is_enabled' => true,
+                'Pos_identifier' => '1850528151',
+            )),
+            'BearerTokenInfo' => array(
+                'AccessToken' => 'race-connect-access-token',
+                'ExpiresIn' => 3600,
+            ),
+        )),
+    ),
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'data' => array(array(
+                'terminal' => 'Race Counter A920',
+                'type' => 'pax_A920',
+                'is_enabled' => true,
+                'pos_identifier' => '1850528151',
+            )),
+        )),
+    ),
+);
+$persistedDuringRace = false;
+$GLOBALS['patwc_after_http_request'] = static function (): void {
+    if (count($GLOBALS['patwc_http_requests']) === 2) {
+        $GLOBALS['patwc_options'][PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS] = array('456' => array('status' => 'created', 'updated_at' => time()));
+    }
+};
+$service = new PayArcConnectionService(new Settings(array(
+    'mode' => 'test',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'client-secret',
+    'connect_secret_key' => 'merchant-api-token',
+)), static function (array $updates) use (&$persistedDuringRace): void {
+    $persistedDuringRace = true;
+});
+try {
+    $service->connect();
+    throw new RuntimeException('Connect should recheck in-flight payments before persisting connection state.');
+} catch (RuntimeException $exception) {
+    patwc_connection_assert_same('Wait for in-progress PayArc terminal payments to finish before changing the PayArc connection.', $exception->getMessage(), 'In-flight connect race block message mismatch.');
+    patwc_connection_assert_same(false, $persistedDuringRace, 'In-flight connect race should not persist connection updates.');
+}
+unset($GLOBALS['patwc_after_http_request'], $GLOBALS['patwc_options'][PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS]);
 
 $GLOBALS['patwc_http_requests'] = array();
 $GLOBALS['patwc_http_response_queue'] = array(
