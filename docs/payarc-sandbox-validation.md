@@ -2,7 +2,7 @@
 
 Status: `MERCHANT_TEST_AND_LIVE_READY_WITH_ENVIRONMENT_WARNINGS`
 
-This plugin now contains the live-docs-backed PayArc Connect setup flow. A merchant with a PayArc account can install the release, choose **Test** or **Live**, press **Connect PayArc**, fetch a Connect AccessToken through PayArc Login, discover terminals, and run a terminal payment. Live mode can process real payments.
+This plugin now contains the live-docs-backed PayArc Connect setup flow. A merchant with a PayArc account can install the release, use the default **Live** mode or switch to **Test**, press **Connect PayArc**, fetch a Connect AccessToken through PayArc Login, discover terminals, and run a terminal payment. Live mode can process real payments.
 
 ## Official PayArc docs used
 
@@ -20,7 +20,7 @@ Use real PayArc values only through WooCommerce admin or another approved secure
 
 Required settings:
 
-1. Gateway mode: **Test** for test dashboard/test Connect app credentials, or **Live** for live dashboard/live terminal credentials.
+1. Gateway mode: **Live** is the default for live dashboard/live terminal credentials; switch to **Test** for test dashboard/test Connect app credentials.
 2. PayArc login email for the selected environment.
 3. PayArc MID for the selected environment.
 4. PayArc ClientSecret for the selected environment.
@@ -32,7 +32,7 @@ Required settings:
 
 1. Activate **PayArc Terminal for WooCommerce**.
 2. Open the PayArc Terminal gateway settings.
-3. Select **Test** or **Live** mode. Do not use Live unless the merchant intends to connect live credentials and a live terminal.
+3. Leave **Live** selected when the merchant intends to connect live credentials and a live terminal, or switch to **Test** for test credentials/test terminal validation.
 4. Enter the PayArc login email, MID, ClientSecret, SecretKey/API bearer token, and callback bearer token for that same environment.
 5. Press **Connect PayArc**.
 6. If the plugin warns that the credentials look like the opposite environment, switch the mode or replace the credentials before continuing.

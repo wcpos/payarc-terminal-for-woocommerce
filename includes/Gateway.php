@@ -59,8 +59,8 @@ trait GatewayImplementation
             'mode' => array(
                 'title' => 'Mode',
                 'type' => 'select',
-                'description' => 'Use Test with PayArc test dashboard credentials and the PayArc Connect Test app. Use Live only with live PayArc credentials and terminals; Live mode can process real payments.',
-                'default' => 'test',
+                'description' => 'Live is the default and can process real payments. Switch to Test only when using PayArc test dashboard credentials and the PayArc Connect Test app.',
+                'default' => 'production',
                 'options' => array(
                     'test' => 'Test',
                     'production' => 'Live',

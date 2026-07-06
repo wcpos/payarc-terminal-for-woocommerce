@@ -175,8 +175,8 @@ function patwc_assert_missing_secret(array $diagnostics, string $secret): void
 $GLOBALS['patwc_options'] = array();
 $settings = new Settings();
 
-patwc_assert_same('test', $settings->mode(), 'Default mode should be test.');
-patwc_assert_same('https://testpayarcconnectapi.payarc.net', $settings->connect_base_url(), 'Test Connect base URL mismatch.');
+patwc_assert_same('production', $settings->mode(), 'Default mode should be Live/production.');
+patwc_assert_same('https://payarcconnectapi.payarc.net', $settings->connect_base_url(), 'Default Live Connect base URL mismatch.');
 patwc_assert_same('https://merchant.example/wp-admin/admin-ajax.php?action=patwc_payarc_callback', $settings->webhook_url(), 'Webhook URL mismatch.');
 
 $liveSettings = new Settings(array('mode' => 'production'));

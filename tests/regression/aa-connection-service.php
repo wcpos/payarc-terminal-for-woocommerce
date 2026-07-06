@@ -202,7 +202,7 @@ patwc_connection_assert_same('Front Counter A920 (pax_A920) ••••••81
 patwc_connection_assert_same('connect-access-token', $stored['connect_access_token'], 'Connect access token should be stored server-side.');
 patwc_connection_assert_same(false, array_key_exists('mode', $stored), 'Connect should not switch the active saved mode before WooCommerce settings are saved.');
 patwc_connection_assert_same('test', $stored['connected_mode'], 'Successful test connection should store connected mode.');
-patwc_connection_assert_same((new Settings($stored))->connection_fingerprint(), $stored['connected_fingerprint'], 'Successful test connection should bind the token to the submitted PayArc credentials.');
+patwc_connection_assert_same((new Settings(array_merge(array('mode' => 'test'), $stored)))->connection_fingerprint(), $stored['connected_fingerprint'], 'Successful test connection should bind the token to the submitted PayArc credentials.');
 patwc_connection_assert_same('123456789012', $stored['tenant_id'], 'Derived tenant id should be stored.');
 patwc_connection_assert_same('1850528139', $stored['default_terminal_id'], 'Default terminal should be the discovered PayArc terminal id.');
 patwc_connection_assert_same('1850528139', $stored['terminal_registry'][0]['terminal_id'], 'Normalized terminal registry should be stored.');

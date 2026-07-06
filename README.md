@@ -12,7 +12,7 @@ PayArc PAX Terminal integration for WooCommerce POS using PayArc Connect V3 serv
 
 This build is ready for a PayArc merchant to connect with their own PayArc account and PAX terminal. The developer does not need a PayArc account because the plugin setup screen calls PayArc directly from the merchant's WordPress site.
 
-Choose the correct gateway mode before pressing **Connect PayArc**:
+**Live is the default gateway mode.** Switch to Test before pressing **Connect PayArc** only when validating with PayArc test credentials:
 
 - **Test** uses PayArc test dashboard credentials, PayArc test endpoints, and the PayArc Connect Test app/terminal environment.
 - **Live** uses PayArc live dashboard credentials, live endpoints, and live terminals. Live mode can process real payments.
@@ -27,7 +27,7 @@ Required PayArc values from the matching PayArc dashboard/API section:
 
 Setup flow:
 
-1. Select **Test** or **Live** mode.
+1. Leave **Live** selected for live credentials/terminals, or switch to **Test** for PayArc test credentials and the Connect Test app.
 2. Enter the PayArc values for that same environment in the gateway settings.
 3. Press Connect PayArc. The plugin performs PayArc Login against the selected environment, stores the returned Connect AccessToken server-side, and runs terminal discovery.
 4. If the credentials authenticate against the opposite environment, the plugin warns you to switch modes instead of storing a mismatched connection.

@@ -27,7 +27,7 @@ class Settings
 
     public function mode(): string
     {
-        $mode = $this->string_setting('mode', 'test');
+        $mode = $this->string_setting('mode', 'production');
 
         return $mode === 'production' ? 'production' : 'test';
     }

@@ -317,6 +317,7 @@ if (!method_exists($gateway, 'payment_fields')) {
     throw new RuntimeException('Gateway should implement payment_fields().');
 }
 
+patwc_gateway_ui_assert_same('production', $gateway->form_fields['mode']['default'] ?? null, 'Gateway mode field should default to Live mode.');
 patwc_gateway_ui_assert_same('Live', $gateway->form_fields['mode']['options']['production'] ?? null, 'Gateway mode field should offer Live mode.');
 patwc_gateway_ui_assert_contains('real payments', $gateway->form_fields['mode']['description'], 'Mode description should warn that Live can process real payments.');
 
