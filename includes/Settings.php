@@ -327,7 +327,7 @@ class Settings
     }
 
     /**
-     * @return array<string, mixed>
+     * @return string
      */
     private static function fingerprint_salt(): string
     {
