@@ -13,6 +13,7 @@ $root = dirname(__DIR__, 2);
 foreach (array(
     $root . '/includes/Settings.php',
     $root . '/includes/Logger.php',
+    $root . '/includes/Services/PayArcConnectionService.php',
     $root . '/includes/AjaxHandler.php',
 ) as $file) {
     if (!is_readable($file)) {
@@ -495,6 +496,30 @@ patwc_ajax_assert_contains('"level":"error"', $encodedLogs, 'Connect failure log
 patwc_ajax_assert_true(strpos($encodedLogs, 'merchant-api-token') === false, 'Connect failure logs should not include submitted API bearer tokens.');
 patwc_ajax_assert_true(strpos($encodedLogs, 'client-secret') === false, 'Connect failure logs should not include submitted client secrets.');
 patwc_ajax_assert_true(strpos($encodedLogs, 'Invalid merchant credentials') === false, 'Connect failure logs should not include raw PayArc Login ErrorMessage text.');
+
+$connectionService->connect_exception = new RuntimeException('These look like Live PayArc credentials. Switch Mode to Live and click Connect PayArc again.');
+$GLOBALS['patwc_captured_logs'] = array();
+$mismatchedCredentials = $handler->handle_connect_payarc(array(
+    '_ajax_nonce' => 'valid-connection-nonce',
+    'mode' => 'test',
+    'connect_secret_key' => 'live-merchant-api-token',
+));
+patwc_ajax_assert_same(500, $mismatchedCredentials['status_code'], 'Mismatched-environment credentials should return 500.');
+patwc_ajax_assert_same('These look like Live PayArc credentials. Switch Mode to Live and click Connect PayArc again.', $mismatchedCredentials['body']['message'], 'Mismatched-environment warning should be public because it contains no secrets.');
+patwc_ajax_assert_true(strpos(json_encode($mismatchedCredentials['body']), 'live-merchant-api-token') === false, 'Mismatched-environment response should not include submitted API bearer token.');
+$encodedMismatchLogs = json_encode($GLOBALS['patwc_captured_logs']);
+if (!is_string($encodedMismatchLogs)) {
+    throw new RuntimeException('Unable to encode mismatch AJAX logs.');
+}
+patwc_ajax_assert_true(strpos($encodedMismatchLogs, 'live-merchant-api-token') === false, 'Mismatched-environment logs should not include submitted API bearer token.');
+
+$connectionService->connect_exception = new RuntimeException('Wait for in-progress PayArc terminal payments to finish before changing the PayArc connection.');
+$GLOBALS['patwc_captured_logs'] = array();
+$inFlightConnect = $handler->handle_connect_payarc(array(
+    '_ajax_nonce' => 'valid-connection-nonce',
+));
+patwc_ajax_assert_same(500, $inFlightConnect['status_code'], 'In-flight connection changes should return 500.');
+patwc_ajax_assert_same('Wait for in-progress PayArc terminal payments to finish before changing the PayArc connection.', $inFlightConnect['body']['message'], 'In-flight connection warning should be public because it contains no secrets.');
 
 $connectionService->connect_exception = new RuntimeException('PayArc Login failed; ErrorCode: 401; ErrorMessage: merchant@example.com 0000123456789012 unlabelled-live-secret.');
 $GLOBALS['patwc_captured_logs'] = array();

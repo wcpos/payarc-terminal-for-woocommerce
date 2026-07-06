@@ -4,6 +4,7 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Services;
 
 use RuntimeException;
 use WCPOS\WooCommercePOS\PayArcTerminal\Logger;
+use WCPOS\WooCommercePOS\PayArcTerminal\PaymentAttempt;
 use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
 
 class PayArcConnectionService
@@ -34,11 +35,12 @@ class PayArcConnectionService
     public function connect(array $overrides = array()): array
     {
         $settings = $this->settings_with_overrides($overrides);
+        $this->assert_no_in_flight_payment_attempts();
         Logger::log('PayArc connection attempt started', $this->connection_log_context($settings, array(
             'submitted_override_fields' => $this->submitted_override_fields($overrides),
         )));
 
-        $login = $this->login($settings);
+        $login = $this->login_selected_mode($settings);
         $registry = array();
         $registryWarning = '';
 
@@ -72,14 +74,15 @@ class PayArcConnectionService
         $tenantId = $settings->tenant_id();
         $defaultTerminal = $this->choose_default_terminal($terminals, $settings->default_terminal_id());
         $updates = $this->credential_updates($settings, $overrides);
+        $updates['connected_mode'] = $settings->mode();
+        $updates['connected_fingerprint'] = $settings->connection_fingerprint();
         $updates['connect_access_token'] = $accessToken;
         $updates['connect_token_expires_at'] = (string) $expiresAt;
         $updates['tenant_id'] = $tenantId;
         $updates['terminal_registry'] = $terminals;
-        if ($defaultTerminal !== '') {
-            $updates['default_terminal_id'] = $defaultTerminal;
-        }
+        $updates['default_terminal_id'] = $defaultTerminal;
 
+        $this->assert_no_in_flight_payment_attempts();
         $this->persist($updates);
 
         $result = $this->public_result('connected', 'Connected to PayArc. Select a discovered terminal and save settings.', $tenantId, $defaultTerminal, $terminals);
@@ -102,14 +105,16 @@ class PayArcConnectionService
      */
     public function refresh_terminals(): array
     {
+        $this->assert_no_in_flight_payment_attempts();
         Logger::log('PayArc terminal refresh started', $this->connection_log_context($this->settings));
         $registry = $this->terminal_registry($this->settings);
         $terminals = $this->normalize_terminals($registry);
         $defaultTerminal = $this->choose_default_terminal($terminals, $this->settings->default_terminal_id());
-        $updates = array('terminal_registry' => $terminals);
-        if ($defaultTerminal !== '') {
-            $updates['default_terminal_id'] = $defaultTerminal;
-        }
+        $updates = array(
+            'terminal_registry' => $terminals,
+            'default_terminal_id' => $defaultTerminal,
+        );
+        $this->assert_no_in_flight_payment_attempts();
         $this->persist($updates);
 
         Logger::log('PayArc terminal refresh completed', $this->connection_log_context($this->settings, array(
@@ -125,8 +130,12 @@ class PayArcConnectionService
      */
     public function disconnect(): array
     {
+        $this->assert_no_in_flight_payment_attempts();
         Logger::log('PayArc disconnect requested', $this->connection_log_context($this->settings));
+        $this->assert_no_in_flight_payment_attempts();
         $this->persist(array(
+            'connected_mode' => '',
+            'connected_fingerprint' => '',
             'connect_access_token' => '',
             'connect_token_expires_at' => '0',
             'terminal_registry' => array(),
@@ -173,6 +182,76 @@ class PayArcConnectionService
         return $accessToken;
     }
 
+    private function assert_no_in_flight_payment_attempts(): void
+    {
+        if (class_exists(PaymentAttempt::class) && PaymentAttempt::has_in_flight_attempts()) {
+            throw new RuntimeException('Wait for in-progress PayArc terminal payments to finish before changing the PayArc connection.');
+        }
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function login_selected_mode(Settings $settings): array
+    {
+        try {
+            return $this->login($settings);
+        } catch (RuntimeException $exception) {
+            if (!$this->is_login_authentication_failure($exception)) {
+                throw $exception;
+            }
+
+            $oppositeMode = $this->opposite_mode($settings->mode());
+            if ($this->opposite_mode_accepts_credentials($settings, $oppositeMode)) {
+                throw new RuntimeException('These look like ' . $this->mode_label($oppositeMode) . ' PayArc credentials. Switch Mode to ' . $this->mode_label($oppositeMode) . ' and click Connect PayArc again.');
+            }
+
+            throw $exception;
+        }
+    }
+
+    private function is_login_authentication_failure(RuntimeException $exception): bool
+    {
+        return in_array((int) $exception->getCode(), array(1, 401, 403), true);
+    }
+
+    private function opposite_mode_accepts_credentials(Settings $settings, string $oppositeMode): bool
+    {
+        $oppositeSettings = $settings->all();
+        $oppositeSettings['mode'] = $oppositeMode;
+        unset($oppositeSettings['connect_login_base_url'], $oppositeSettings['connect_base_url'], $oppositeSettings['merchant_api_base_url']);
+
+        try {
+            $response = $this->login(new Settings($oppositeSettings));
+        } catch (RuntimeException $exception) {
+            Logger::log('PayArc opposite environment credential probe did not authenticate', $this->connection_log_context(new Settings($oppositeSettings), array(
+                'exception_class' => get_class($exception),
+                'message' => $this->safe_text($exception->getMessage()),
+            )), null, 'info');
+
+            return false;
+        }
+
+        $tokenInfo = isset($response['BearerTokenInfo']) && is_array($response['BearerTokenInfo']) ? $response['BearerTokenInfo'] : array();
+        $accessToken = isset($tokenInfo['AccessToken']) && is_scalar($tokenInfo['AccessToken']) ? trim((string) $tokenInfo['AccessToken']) : '';
+
+        Logger::log('PayArc opposite environment credential probe authenticated', $this->connection_log_context(new Settings($oppositeSettings), array(
+            'connect_access_token_returned' => $accessToken !== '',
+        )), null, 'warning');
+
+        return $accessToken !== '';
+    }
+
+    private function opposite_mode(string $mode): string
+    {
+        return $mode === 'production' ? 'test' : 'production';
+    }
+
+    private function mode_label(string $mode): string
+    {
+        return $mode === 'production' ? 'Live' : 'Test';
+    }
+
     /**
      * @return array<string, mixed>
      */
@@ -197,7 +276,7 @@ class PayArcConnectionService
         $errorCode = isset($response['ErrorCode']) && is_scalar($response['ErrorCode']) ? (int) $response['ErrorCode'] : 0;
         if ($errorCode !== 0) {
             $message = isset($response['ErrorMessage']) && is_scalar($response['ErrorMessage']) ? (string) $response['ErrorMessage'] : 'PayArc Login failed.';
-            throw new RuntimeException('PayArc Login failed; ErrorCode: ' . $errorCode . '; ErrorMessage: ' . $this->safe_text($message) . '.');
+            throw new RuntimeException('PayArc Login failed; ErrorCode: ' . $errorCode . '; ErrorMessage: ' . $this->safe_text($message) . '.', $errorCode);
         }
 
         return $response;
@@ -398,7 +477,7 @@ class PayArcConnectionService
                 'http_status' => $status,
                 'message' => $message,
             )), null, 'error');
-            throw new RuntimeException($message);
+            throw new RuntimeException($message, $status);
         }
 
         return $decoded;

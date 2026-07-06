@@ -138,6 +138,21 @@ class PayArcClient
 
     private function connect_access_token(): string
     {
+        $connectedMode = $this->settings->connected_mode();
+        $connectedFingerprint = $this->settings->connected_fingerprint();
+        $currentFingerprint = $this->settings->connection_fingerprint();
+        if ($connectedMode !== '' && $connectedMode !== $this->settings->mode()) {
+            throw new RuntimeException('PayArc Connect AccessToken does not match the selected PayArc mode. Press Connect PayArc after changing mode before taking payments.');
+        }
+
+        if ($connectedFingerprint !== '' && !hash_equals($connectedFingerprint, $currentFingerprint)) {
+            throw new RuntimeException('PayArc Connect AccessToken does not match the saved PayArc credentials. Press Connect PayArc after changing credentials before taking payments.');
+        }
+
+        if ($this->settings->mode() === 'production' && ($connectedMode !== 'production' || $connectedFingerprint === '')) {
+            throw new RuntimeException('PayArc Live mode requires a Live Connect AccessToken. Press Connect PayArc in Live mode before taking payments.');
+        }
+
         $token = $this->settings->connect_access_token();
         $expiresAt = $this->settings->connect_token_expires_at();
         $now = time();

@@ -317,6 +317,10 @@ if (!method_exists($gateway, 'payment_fields')) {
     throw new RuntimeException('Gateway should implement payment_fields().');
 }
 
+patwc_gateway_ui_assert_same('production', $gateway->form_fields['mode']['default'] ?? null, 'Gateway mode field should default to Live mode.');
+patwc_gateway_ui_assert_same('Live', $gateway->form_fields['mode']['options']['production'] ?? null, 'Gateway mode field should offer Live mode.');
+patwc_gateway_ui_assert_contains('real payments', $gateway->form_fields['mode']['description'], 'Mode description should warn that Live can process real payments.');
+
 $connectionHtml = $gateway->generate_patwc_connection_html('connection', $gateway->form_fields['connection']);
 patwc_gateway_ui_assert_contains('Connect using these credentials', $connectionHtml, 'Connection settings should make the Connect button action explicit.');
 patwc_gateway_ui_assert_contains('This does not fetch your PayArc credentials', $connectionHtml, 'Connection settings should say credentials must be entered before connecting.');
@@ -365,7 +369,8 @@ if (!is_array($localized)) {
 
 patwc_gateway_ui_assert_same('patwcPaymentData', $localized['object_name'], 'Localized object name mismatch.');
 $data = $localized['data'];
-patwc_gateway_ui_assert_same('admin-ajax.php', $data['ajaxUrl'] ?? null, 'Localized ajax URL mismatch.');
+$expectedAjaxUrl = function_exists('admin_url') ? admin_url('admin-ajax.php') : 'admin-ajax.php';
+patwc_gateway_ui_assert_same($expectedAjaxUrl, $data['ajaxUrl'] ?? null, 'Localized ajax URL mismatch.');
 patwc_gateway_ui_assert_same('nonce-for-patwc_payment', $data['nonce'] ?? null, 'Localized payment nonce mismatch.');
 patwc_gateway_ui_assert_same(2001, $data['orderId'] ?? null, 'Localized order id mismatch.');
 patwc_gateway_ui_assert_same(AjaxHandler::order_token_for($GLOBALS['patwc_gateway_orders'][2001]), $data['orderToken'] ?? null, 'Localized order token mismatch.');

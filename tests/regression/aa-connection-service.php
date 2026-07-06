@@ -6,6 +6,7 @@
 
 declare(strict_types=1);
 
+use WCPOS\WooCommercePOS\PayArcTerminal\PaymentAttempt;
 use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcConnectionService;
 use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
 
@@ -13,6 +14,7 @@ $root = dirname(__DIR__, 2);
 foreach (array(
     $root . '/includes/Settings.php',
     $root . '/includes/Logger.php',
+    $root . '/includes/PaymentAttempt.php',
     $root . '/includes/Services/PayArcConnectionService.php',
 ) as $file) {
     if (!is_readable($file)) {
@@ -57,6 +59,27 @@ if (!function_exists('wc_get_logger')) {
     }
 }
 
+if (!function_exists('get_option')) {
+    function get_option($option, $default = false)
+    {
+        foreach (array('patwc_options', 'patwc_gateway_options', 'patwc_gateway_diagnostics_options', 'patwc_payment_service_options', 'patwc_payment_attempt_options') as $store) {
+            if (isset($GLOBALS[$store]) && is_array($GLOBALS[$store]) && array_key_exists($option, $GLOBALS[$store])) {
+                return $GLOBALS[$store][$option];
+            }
+        }
+
+        return $default;
+    }
+}
+
+if (!function_exists('update_option')) {
+    function update_option($option, $value)
+    {
+        $GLOBALS['patwc_options'][$option] = $value;
+        return true;
+    }
+}
+
 if (!function_exists('wp_remote_request')) {
     function wp_remote_request($url, $args = array())
     {
@@ -68,7 +91,16 @@ if (!function_exists('wp_remote_request')) {
         }
 
         if (isset($GLOBALS['patwc_http_response_queue']) && is_array($GLOBALS['patwc_http_response_queue']) && count($GLOBALS['patwc_http_response_queue']) > 0) {
-            return array_shift($GLOBALS['patwc_http_response_queue']);
+            $response = array_shift($GLOBALS['patwc_http_response_queue']);
+            if (isset($GLOBALS['patwc_after_http_request']) && is_callable($GLOBALS['patwc_after_http_request'])) {
+                call_user_func($GLOBALS['patwc_after_http_request'], $record);
+            }
+
+            return $response;
+        }
+
+        if (isset($GLOBALS['patwc_after_http_request']) && is_callable($GLOBALS['patwc_after_http_request'])) {
+            call_user_func($GLOBALS['patwc_after_http_request'], $record);
         }
 
         return $GLOBALS['patwc_client_response'] ?? array('response' => array('code' => 500), 'body' => '{}');
@@ -101,6 +133,27 @@ function patwc_connection_assert_missing_secret(array $payload, string $secret, 
     }
 }
 
+class PatwcStructuredAuthFailureConnectionService extends PayArcConnectionService
+{
+    /** @var int */
+    public $login_calls = 0;
+
+    public function login(?Settings $settings = null): array
+    {
+        $this->login_calls++;
+
+        if ($this->login_calls === 1) {
+            throw new RuntimeException('PayArc Login authentication failed; trace id trace-structured-auth.', 401);
+        }
+
+        return array(
+            'ErrorCode' => 0,
+            'BearerTokenInfo' => array('AccessToken' => 'opposite-test-token-structured'),
+        );
+    }
+}
+
+$GLOBALS['patwc_options'] = array();
 $GLOBALS['patwc_captured_logs'] = array();
 $GLOBALS['patwc_http_requests'] = array();
 $GLOBALS['patwc_http_response_queue'] = array(
@@ -176,6 +229,9 @@ patwc_connection_assert_same(1, $result['terminal_count'], 'Only enabled termina
 patwc_connection_assert_same('1850528139', $result['terminals'][0]['terminal_id'], 'Terminal id should come from PayArc pos_identifier.');
 patwc_connection_assert_same('Front Counter A920 (pax_A920) ••••••8139', $result['terminals'][0]['label'], 'Terminal label should be merchant-friendly and masked.');
 patwc_connection_assert_same('connect-access-token', $stored['connect_access_token'], 'Connect access token should be stored server-side.');
+patwc_connection_assert_same(false, array_key_exists('mode', $stored), 'Connect should not switch the active saved mode before WooCommerce settings are saved.');
+patwc_connection_assert_same('test', $stored['connected_mode'], 'Successful test connection should store connected mode.');
+patwc_connection_assert_same((new Settings(array_merge(array('mode' => 'test'), $stored)))->connection_fingerprint(), $stored['connected_fingerprint'], 'Successful test connection should bind the token to the submitted PayArc credentials.');
 patwc_connection_assert_same('123456789012', $stored['tenant_id'], 'Derived tenant id should be stored.');
 patwc_connection_assert_same('1850528139', $stored['default_terminal_id'], 'Default terminal should be the discovered PayArc terminal id.');
 patwc_connection_assert_same('1850528139', $stored['terminal_registry'][0]['terminal_id'], 'Normalized terminal registry should be stored.');
@@ -211,6 +267,350 @@ patwc_connection_assert_contains('PayArc connection completed', $encodedLogs, 'C
 patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'merchant-api-token', 'Connect logs should redact API bearer token.');
 patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'connect-access-token', 'Connect logs should redact Connect access token.');
 patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'client-secret', 'Connect logs should redact client secret.');
+
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'ErrorCode' => 0,
+            'Terminals' => array(array(
+                'Terminal' => 'Live Counter A920',
+                'Type' => 'pax_A920',
+                'Is_enabled' => true,
+                'Pos_identifier' => '1850528150',
+            )),
+            'BearerTokenInfo' => array(
+                'AccessToken' => 'live-connect-access-token',
+                'ExpiresIn' => 3600,
+            ),
+        )),
+    ),
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'data' => array(array(
+                'terminal' => 'Live Counter A920',
+                'type' => 'pax_A920',
+                'is_enabled' => true,
+                'pos_identifier' => '1850528150',
+            )),
+        )),
+    ),
+);
+$stored = array();
+$service = new PayArcConnectionService(new Settings(array(
+    'mode' => 'production',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'live-client-secret',
+    'connect_secret_key' => 'live-merchant-api-token',
+)), static function (array $updates) use (&$stored): void {
+    $stored = array_merge($stored, $updates);
+});
+$liveResult = $service->connect();
+patwc_connection_assert_same(false, array_key_exists('mode', $stored), 'Live connect should not switch the active saved mode before WooCommerce settings are saved.');
+patwc_connection_assert_same('production', $stored['connected_mode'], 'Successful Live connection should store connected mode.');
+patwc_connection_assert_same((new Settings(array_merge(array('mode' => 'production'), $stored)))->connection_fingerprint(), $stored['connected_fingerprint'], 'Successful Live connection should bind the token to the submitted PayArc credentials.');
+patwc_connection_assert_same('1850528150', $liveResult['default_terminal_id'], 'Live connection should select a live terminal.');
+patwc_connection_assert_same('https://payarcconnectapi.curvpos.com/Login', $GLOBALS['patwc_http_requests'][0]['url'], 'Live Login URL mismatch.');
+patwc_connection_assert_same('https://api.payarc.net/v1/terminalregistries', $GLOBALS['patwc_http_requests'][1]['url'], 'Live terminal registry URL mismatch.');
+patwc_connection_assert_missing_secret($liveResult, 'live-merchant-api-token', 'Live connect result should not expose API bearer token.');
+patwc_connection_assert_missing_secret($liveResult, 'live-client-secret', 'Live connect result should not expose client secret.');
+
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 401),
+        'body' => json_encode(array('error' => 'wrong environment test selected live-token-secret')),
+    ),
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'ErrorCode' => 0,
+            'BearerTokenInfo' => array('AccessToken' => 'opposite-live-token'),
+        )),
+    ),
+);
+$service = new PayArcConnectionService(new Settings(array(
+    'mode' => 'test',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'live-client-secret',
+    'connect_secret_key' => 'live-token-secret',
+)));
+try {
+    $service->connect();
+    throw new RuntimeException('Test-mode connect should fail when credentials authenticate against Live.');
+} catch (RuntimeException $exception) {
+    patwc_connection_assert_contains('These look like Live PayArc credentials', $exception->getMessage(), 'Test-mode connect should warn when credentials look Live.');
+    patwc_connection_assert_missing_secret(array('message' => $exception->getMessage()), 'live-token-secret', 'Live mismatch warning must not leak API token.');
+    patwc_connection_assert_same('https://testpayarcconnectapi.curvpos.com/Login', $GLOBALS['patwc_http_requests'][0]['url'], 'Mismatch probe should try selected Test Login first.');
+    patwc_connection_assert_same('https://payarcconnectapi.curvpos.com/Login', $GLOBALS['patwc_http_requests'][1]['url'], 'Mismatch probe should try opposite Live Login second.');
+    patwc_connection_assert_same(2, count($GLOBALS['patwc_http_requests']), 'Mismatch probe should not call terminal registry.');
+}
+
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 401),
+        'body' => json_encode(array('error' => 'wrong environment live selected test-token-secret')),
+    ),
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'ErrorCode' => 0,
+            'BearerTokenInfo' => array('AccessToken' => 'opposite-test-token'),
+        )),
+    ),
+);
+$service = new PayArcConnectionService(new Settings(array(
+    'mode' => 'production',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'test-client-secret',
+    'connect_secret_key' => 'test-token-secret',
+)));
+try {
+    $service->connect();
+    throw new RuntimeException('Live-mode connect should fail when credentials authenticate against Test.');
+} catch (RuntimeException $exception) {
+    patwc_connection_assert_contains('These look like Test PayArc credentials', $exception->getMessage(), 'Live-mode connect should warn when credentials look Test.');
+    patwc_connection_assert_missing_secret(array('message' => $exception->getMessage()), 'test-token-secret', 'Test mismatch warning must not leak API token.');
+    patwc_connection_assert_same('https://payarcconnectapi.curvpos.com/Login', $GLOBALS['patwc_http_requests'][0]['url'], 'Mismatch probe should try selected Live Login first.');
+    patwc_connection_assert_same('https://testpayarcconnectapi.curvpos.com/Login', $GLOBALS['patwc_http_requests'][1]['url'], 'Mismatch probe should try opposite Test Login second.');
+    patwc_connection_assert_same(2, count($GLOBALS['patwc_http_requests']), 'Inverse mismatch probe should not call terminal registry.');
+}
+
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'ErrorCode' => 401,
+            'ErrorMessage' => 'wrong environment live selected test-token-secret',
+        )),
+    ),
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'ErrorCode' => 0,
+            'BearerTokenInfo' => array('AccessToken' => 'opposite-test-token-from-error-code'),
+        )),
+    ),
+);
+$service = new PayArcConnectionService(new Settings(array(
+    'mode' => 'production',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'test-client-secret',
+    'connect_secret_key' => 'test-token-secret',
+)));
+try {
+    $service->connect();
+    throw new RuntimeException('Live-mode connect should probe Test when Login returns an API-level auth ErrorCode.');
+} catch (RuntimeException $exception) {
+    patwc_connection_assert_contains('These look like Test PayArc credentials', $exception->getMessage(), 'API-level Login auth failure should warn when credentials look Test.');
+    patwc_connection_assert_missing_secret(array('message' => $exception->getMessage()), 'test-token-secret', 'API-level mismatch warning must not leak API token.');
+    patwc_connection_assert_same(2, count($GLOBALS['patwc_http_requests']), 'API-level auth mismatch should probe opposite Login only.');
+}
+
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'ErrorCode' => 1,
+            'ErrorMessage' => 'wrong environment live selected test-token-secret',
+        )),
+    ),
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'ErrorCode' => 0,
+            'BearerTokenInfo' => array('AccessToken' => 'opposite-test-token-from-error-code-1'),
+        )),
+    ),
+);
+$service = new PayArcConnectionService(new Settings(array(
+    'mode' => 'production',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'test-client-secret',
+    'connect_secret_key' => 'test-token-secret',
+)));
+try {
+    $service->connect();
+    throw new RuntimeException('Live-mode connect should probe Test when Login returns ErrorCode 1.');
+} catch (RuntimeException $exception) {
+    patwc_connection_assert_contains('These look like Test PayArc credentials', $exception->getMessage(), 'ErrorCode 1 Login auth failure should warn when credentials look Test.');
+    patwc_connection_assert_missing_secret(array('message' => $exception->getMessage()), 'test-token-secret', 'ErrorCode 1 mismatch warning must not leak API token.');
+    patwc_connection_assert_same(2, count($GLOBALS['patwc_http_requests']), 'ErrorCode 1 auth mismatch should probe opposite Login only.');
+}
+
+$service = new PatwcStructuredAuthFailureConnectionService(new Settings(array(
+    'mode' => 'production',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'test-client-secret',
+    'connect_secret_key' => 'test-token-secret',
+)));
+try {
+    $service->connect();
+    throw new RuntimeException('Live-mode connect should probe Test when Login throws a structured auth failure.');
+} catch (RuntimeException $exception) {
+    patwc_connection_assert_contains('These look like Test PayArc credentials', $exception->getMessage(), 'Structured auth failure should warn when credentials look Test.');
+    patwc_connection_assert_same(2, $service->login_calls, 'Structured auth mismatch should probe opposite Login only.');
+}
+
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 500),
+        'body' => json_encode(array('error' => 'temporary upstream outage')),
+    ),
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'ErrorCode' => 0,
+            'BearerTokenInfo' => array('AccessToken' => 'opposite-mode-token-that-must-not-be-used'),
+        )),
+    ),
+);
+$service = new PayArcConnectionService(new Settings(array(
+    'mode' => 'production',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'live-client-secret',
+    'connect_secret_key' => 'live-token-secret',
+)));
+try {
+    $service->connect();
+    throw new RuntimeException('Live-mode connect should preserve a selected-mode server error instead of probing Test.');
+} catch (RuntimeException $exception) {
+    patwc_connection_assert_same('PayArc request failed. HTTP status: 500.', $exception->getMessage(), 'Non-auth Login failure should not be replaced by a wrong-mode warning.');
+    patwc_connection_assert_same(1, count($GLOBALS['patwc_http_requests']), 'Non-auth Login failure should not probe the opposite environment.');
+    patwc_connection_assert_same('https://payarcconnectapi.curvpos.com/Login', $GLOBALS['patwc_http_requests'][0]['url'], 'Non-auth failure should only call selected Live Login.');
+}
+
+$GLOBALS['patwc_options'][PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS] = array('123' => array('status' => 'created', 'updated_at' => time()));
+$GLOBALS['patwc_http_requests'] = array();
+$service = new PayArcConnectionService(new Settings(array(
+    'mode' => 'test',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'client-secret',
+    'connect_secret_key' => 'merchant-api-token',
+)));
+try {
+    $service->connect();
+    throw new RuntimeException('Connect should be blocked while a PayArc payment is in progress.');
+} catch (RuntimeException $exception) {
+    patwc_connection_assert_same('Wait for in-progress PayArc terminal payments to finish before changing the PayArc connection.', $exception->getMessage(), 'In-flight connect block message mismatch.');
+    patwc_connection_assert_same(0, count($GLOBALS['patwc_http_requests']), 'In-flight connect block should happen before PayArc Login.');
+}
+try {
+    $service->disconnect();
+    throw new RuntimeException('Disconnect should be blocked while a PayArc payment is in progress.');
+} catch (RuntimeException $exception) {
+    patwc_connection_assert_same('Wait for in-progress PayArc terminal payments to finish before changing the PayArc connection.', $exception->getMessage(), 'In-flight disconnect block message mismatch.');
+}
+try {
+    $service->refresh_terminals();
+    throw new RuntimeException('Terminal refresh should be blocked while a PayArc payment is in progress.');
+} catch (RuntimeException $exception) {
+    patwc_connection_assert_same('Wait for in-progress PayArc terminal payments to finish before changing the PayArc connection.', $exception->getMessage(), 'In-flight refresh block message mismatch.');
+    patwc_connection_assert_same(0, count($GLOBALS['patwc_http_requests']), 'In-flight refresh block should happen before PayArc terminal lookup.');
+}
+unset($GLOBALS['patwc_options'][PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS]);
+
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'ErrorCode' => 0,
+            'Terminals' => array(array(
+                'Terminal' => 'Race Counter A920',
+                'Type' => 'pax_A920',
+                'Is_enabled' => true,
+                'Pos_identifier' => '1850528151',
+            )),
+            'BearerTokenInfo' => array(
+                'AccessToken' => 'race-connect-access-token',
+                'ExpiresIn' => 3600,
+            ),
+        )),
+    ),
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'data' => array(array(
+                'terminal' => 'Race Counter A920',
+                'type' => 'pax_A920',
+                'is_enabled' => true,
+                'pos_identifier' => '1850528151',
+            )),
+        )),
+    ),
+);
+$persistedDuringRace = false;
+$GLOBALS['patwc_after_http_request'] = static function (): void {
+    if (count($GLOBALS['patwc_http_requests']) === 2) {
+        $GLOBALS['patwc_options'][PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS] = array('456' => array('status' => 'created', 'updated_at' => time()));
+    }
+};
+$service = new PayArcConnectionService(new Settings(array(
+    'mode' => 'test',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'client-secret',
+    'connect_secret_key' => 'merchant-api-token',
+)), static function (array $updates) use (&$persistedDuringRace): void {
+    $persistedDuringRace = true;
+});
+try {
+    $service->connect();
+    throw new RuntimeException('Connect should recheck in-flight payments before persisting connection state.');
+} catch (RuntimeException $exception) {
+    patwc_connection_assert_same('Wait for in-progress PayArc terminal payments to finish before changing the PayArc connection.', $exception->getMessage(), 'In-flight connect race block message mismatch.');
+    patwc_connection_assert_same(false, $persistedDuringRace, 'In-flight connect race should not persist connection updates.');
+}
+unset($GLOBALS['patwc_after_http_request'], $GLOBALS['patwc_options'][PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS]);
+
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'ErrorCode' => 0,
+            'Terminals' => array(),
+            'BearerTokenInfo' => array(
+                'AccessToken' => 'connect-token-without-terminals',
+                'ExpiresIn' => 3600,
+            ),
+        )),
+    ),
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array('data' => array())),
+    ),
+);
+$stored = array();
+$service = new PayArcConnectionService(new Settings(array(
+    'mode' => 'test',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'client-secret',
+    'connect_secret_key' => 'merchant-api-token',
+    'default_terminal_id' => '1850528139',
+)), static function (array $updates) use (&$stored): void {
+    $stored = array_merge($stored, $updates);
+});
+$noTerminalResult = $service->connect();
+patwc_connection_assert_same(0, $noTerminalResult['terminal_count'], 'Connect without valid terminals should report zero terminals.');
+patwc_connection_assert_same('', $stored['default_terminal_id'], 'Connect without valid terminals should clear any stale default terminal id.');
+patwc_connection_assert_same(array(), $stored['terminal_registry'], 'Connect without valid terminals should store an empty terminal registry.');
 
 
 $GLOBALS['patwc_http_requests'] = array();
@@ -249,6 +649,26 @@ $service = new PayArcConnectionService(new Settings(array(
 $refresh = $service->refresh_terminals();
 patwc_connection_assert_same('1850528139', $stored['default_terminal_id'], 'Refresh should preserve the existing selected terminal when it is still discovered.');
 patwc_connection_assert_same('1850528139', $refresh['default_terminal_id'], 'Refresh response should preserve the existing selected terminal when it is still discovered.');
+
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array('data' => array())),
+    ),
+);
+$stored = array();
+$service = new PayArcConnectionService(new Settings(array(
+    'mode' => 'test',
+    'connect_mid' => '0000123456789012',
+    'connect_secret_key' => 'merchant-api-token',
+    'default_terminal_id' => '1850528139',
+)), static function (array $updates) use (&$stored): void {
+    $stored = array_merge($stored, $updates);
+});
+$emptyRefresh = $service->refresh_terminals();
+patwc_connection_assert_same('', $stored['default_terminal_id'], 'Refresh without valid terminals should clear any stale default terminal id.');
+patwc_connection_assert_same('', $emptyRefresh['default_terminal_id'], 'Refresh response should clear stale default terminal id when no terminals are discovered.');
 
 
 $GLOBALS['patwc_http_requests'] = array();

@@ -392,9 +392,14 @@ class AjaxHandler
             return true;
         }
 
+        if (preg_match('/^These look like (Test|Live) PayArc credentials\. Switch Mode to (Test|Live) and click Connect PayArc again\.$/', $message) === 1) {
+            return true;
+        }
+
         foreach (array(
             'PayArc Login did not return a Connect access token.',
             'PayArc SecretKey/API bearer token is required to fetch terminals.',
+            'Wait for in-progress PayArc terminal payments to finish before changing the PayArc connection.',
             'PayArc request failed before receiving a response.',
             'PayArc response body was empty. HTTP status:',
             'PayArc response was not valid JSON. HTTP status:',

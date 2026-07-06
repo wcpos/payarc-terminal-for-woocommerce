@@ -6,25 +6,22 @@ use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcClient;
 use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
 use WCPOS\WooCommercePOS\PayArcTerminal\Utils\Money;
 
-$settingsFile = dirname(__DIR__, 2) . '/includes/Settings.php';
-$moneyFile = dirname(__DIR__, 2) . '/includes/Utils/Money.php';
-$clientFile = dirname(__DIR__, 2) . '/includes/Services/PayArcClient.php';
+$root = dirname(__DIR__, 2);
+$requiredFiles = array(
+    $root . '/includes/Settings.php',
+    $root . '/includes/Logger.php',
+    $root . '/includes/Services/PayArcConnectionService.php',
+    $root . '/includes/Utils/Money.php',
+    $root . '/includes/Services/PayArcClient.php',
+);
 
-if (!is_readable($settingsFile)) {
-    throw new RuntimeException('Settings class file is missing.');
+foreach ($requiredFiles as $requiredFile) {
+    if (!is_readable($requiredFile)) {
+        throw new RuntimeException('Required class file is missing: ' . basename($requiredFile));
+    }
+
+    require_once $requiredFile;
 }
-
-if (!is_readable($moneyFile)) {
-    throw new RuntimeException('Money utility class file is missing.');
-}
-
-if (!is_readable($clientFile)) {
-    throw new RuntimeException('PayArc client class file is missing.');
-}
-
-require_once $settingsFile;
-require_once $moneyFile;
-require_once $clientFile;
 
 if (!function_exists('wp_remote_request')) {
     function wp_remote_request($url, $args = array())
@@ -102,6 +99,55 @@ patwc_client_assert_same(array(
 $encodedRequest = json_encode($request);
 if (!is_string($encodedRequest) || strpos($encodedRequest, 'callback-secret-token') !== false) {
     throw new RuntimeException('Sale request must not include callback bearer token.');
+}
+
+$GLOBALS['patwc_client_requests'] = array();
+$mismatchedModeClient = new PayArcClient(new Settings(array(
+    'mode' => 'production',
+    'connected_mode' => 'test',
+    'connect_access_token' => 'test-connect-access-token',
+)));
+try {
+    $mismatchedModeClient->sale($payload, $idempotencyKey);
+    throw new RuntimeException('Client should reject a token created for a different PayArc mode.');
+} catch (RuntimeException $exception) {
+    patwc_client_assert_same('PayArc Connect AccessToken does not match the selected PayArc mode. Press Connect PayArc after changing mode before taking payments.', $exception->getMessage(), 'Mode mismatch should produce an actionable local error.');
+    patwc_client_assert_same(0, count($GLOBALS['patwc_client_requests']), 'Mode mismatch should be blocked before any PayArc transaction request.');
+}
+
+$GLOBALS['patwc_client_requests'] = array();
+$staleFingerprintSettings = array(
+    'mode' => 'test',
+    'connected_mode' => 'test',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'client-secret',
+    'connect_secret_key' => 'new-merchant-api-token',
+    'connect_access_token' => 'old-connect-access-token',
+);
+$oldFingerprintSettings = $staleFingerprintSettings;
+$oldFingerprintSettings['connect_secret_key'] = 'old-merchant-api-token';
+$staleFingerprintSettings['connected_fingerprint'] = Settings::connection_fingerprint_for($oldFingerprintSettings);
+$staleFingerprintClient = new PayArcClient(new Settings($staleFingerprintSettings));
+try {
+    $staleFingerprintClient->sale($payload, $idempotencyKey);
+    throw new RuntimeException('Client should reject a token created for different PayArc credentials.');
+} catch (RuntimeException $exception) {
+    patwc_client_assert_same('PayArc Connect AccessToken does not match the saved PayArc credentials. Press Connect PayArc after changing credentials before taking payments.', $exception->getMessage(), 'Credential mismatch should produce an actionable local error.');
+    patwc_client_assert_same(0, count($GLOBALS['patwc_client_requests']), 'Credential mismatch should be blocked before any PayArc transaction request.');
+}
+
+$GLOBALS['patwc_client_requests'] = array();
+$liveWithoutLiveConnectClient = new PayArcClient(new Settings(array(
+    'mode' => 'production',
+    'connect_access_token' => 'legacy-token-without-connected-mode',
+)));
+try {
+    $liveWithoutLiveConnectClient->sale($payload, $idempotencyKey);
+    throw new RuntimeException('Client should reject Live mode without a Live connection marker.');
+} catch (RuntimeException $exception) {
+    patwc_client_assert_same('PayArc Live mode requires a Live Connect AccessToken. Press Connect PayArc in Live mode before taking payments.', $exception->getMessage(), 'Live mode without a Live connection should produce an actionable local error.');
+    patwc_client_assert_same(0, count($GLOBALS['patwc_client_requests']), 'Live mode without a Live connection should be blocked before any PayArc transaction request.');
 }
 
 

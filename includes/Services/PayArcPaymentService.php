@@ -84,14 +84,22 @@ class PayArcPaymentService
                 ),
             );
 
-            $response = $this->client->sale($payload, $idempotencyKey);
             $attempt = array(
                 'attempt_uuid' => $attemptUuid,
                 'transaction_id' => $transactionId,
                 'terminal_id' => $terminal['terminalId'],
                 'status' => 'created',
-                'sale_response' => $response,
             );
+            PaymentAttempt::mark_in_flight($order, $attempt);
+
+            try {
+                $response = $this->client->sale($payload, $idempotencyKey);
+            } catch (Throwable $exception) {
+                PaymentAttempt::clear_in_flight($order);
+                throw $exception;
+            }
+
+            $attempt['sale_response'] = $response;
 
             $traceId = $this->extract_scalar($response, 'traceId');
             if ($traceId !== '') {

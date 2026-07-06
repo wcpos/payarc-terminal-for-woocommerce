@@ -59,10 +59,11 @@ trait GatewayImplementation
             'mode' => array(
                 'title' => 'Mode',
                 'type' => 'select',
-                'description' => 'Use Test for PayArc Connect Test merchants and terminals. Production endpoints remain disabled until PayArc production Connect URLs are verified.',
-                'default' => 'test',
+                'description' => 'Live is the default and can process real payments. Switch to Test only when using PayArc test dashboard credentials and the PayArc Connect Test app.',
+                'default' => 'production',
                 'options' => array(
                     'test' => 'Test',
+                    'production' => 'Live',
                 ),
             ),
             'connect_email' => array(
@@ -161,9 +162,31 @@ trait GatewayImplementation
         $terminalId = self::setting_string($settings, 'default_terminal_id');
         $tenderType = strtoupper(self::setting_string($settings, 'tender_type', 'CREDIT'));
         $printReceipt = self::setting_string($settings, 'print_receipt', '0');
+        $connectedMode = self::setting_string($settings, 'connected_mode');
+        $connectedFingerprint = self::setting_string($settings, 'connected_fingerprint');
+        $currentFingerprint = Settings::connection_fingerprint_for($settings);
+        $modeLabel = $mode === 'production' ? 'Live' : 'Test';
 
-        if ($mode === 'production') {
-            $errors[] = 'Production mode cannot be saved until PayArc production Connect URLs are verified.';
+        if (!in_array($mode, array('test', 'production'), true)) {
+            $errors[] = 'PayArc mode must be Test or Live.';
+            $mode = 'test';
+            $modeLabel = 'Test';
+        }
+
+        if ($enabled && $connectedMode !== '' && $connectedMode !== $mode) {
+            $errors[] = 'Press Connect PayArc after changing mode so the Connect AccessToken and terminal list match ' . $modeLabel . ' mode.';
+        } elseif ($enabled && $mode === 'production' && $connectedMode !== 'production') {
+            $errors[] = 'Press Connect PayArc after changing mode so the Connect AccessToken and terminal list match Live mode.';
+        }
+
+        if ($enabled && $connectedMode === $mode && $connectedFingerprint !== '' && !hash_equals($connectedFingerprint, $currentFingerprint)) {
+            $errors[] = 'Press Connect PayArc after changing PayArc credentials so the Connect AccessToken and terminal list match the saved credentials.';
+        } elseif ($enabled && $mode === 'production' && ($connectedFingerprint === '' || !hash_equals($connectedFingerprint, $currentFingerprint))) {
+            $errors[] = 'Press Connect PayArc after changing PayArc credentials so the Connect AccessToken and terminal list match the saved credentials.';
+        }
+
+        if ($enabled && $mode === 'production' && stripos((new Settings($settings))->webhook_url(), 'https://') !== 0) {
+            $errors[] = 'Callback URL must be HTTPS before enabling Live mode.';
         }
 
         if ($enabled && preg_match('/^[0-9]{12}$/', $tenantId) !== 1) {
@@ -243,7 +266,7 @@ trait GatewayImplementation
         self::append_local_check(
             $checks,
             'webhook_url',
-            stripos(self::setting_string($settings, 'webhook_url'), 'https://') === 0,
+            stripos((new Settings($settings))->webhook_url(), 'https://') === 0,
             'Callback URL is HTTPS.',
             'Callback URL must be HTTPS.'
         );
@@ -282,7 +305,13 @@ trait GatewayImplementation
     public function process_admin_options()
     {
         $postedSettings = $this->posted_settings();
-        $errors = self::validate_settings($postedSettings);
+        $currentSettings = $this->saved_gateway_settings();
+        $connectionState = $this->saved_connection_state();
+        $validationSettings = $this->settings_for_validation($postedSettings, $currentSettings, $connectionState);
+        $errors = self::validate_settings($validationSettings);
+        if ($this->has_in_flight_payment_attempts() && $this->connection_sensitive_settings_changed($validationSettings, $currentSettings)) {
+            $errors[] = 'Wait for in-progress PayArc terminal payments to finish before changing PayArc mode or credentials.';
+        }
 
         foreach ($errors as $error) {
             $this->add_admin_error($error);
@@ -292,7 +321,6 @@ trait GatewayImplementation
             return false;
         }
 
-        $connectionState = $this->saved_connection_state();
         $result = $this->process_valid_admin_options();
 
         if ($result !== false) {
@@ -786,7 +814,7 @@ trait GatewayImplementation
      */
     private function enqueue_payment_assets($order, bool $authorized): void
     {
-        $version = defined('PATWC_VERSION') ? PATWC_VERSION : '0.1.4';
+        $version = defined('PATWC_VERSION') ? PATWC_VERSION : '0.1.6';
         $pluginUrl = defined('PATWC_PLUGIN_URL') ? rtrim(PATWC_PLUGIN_URL, '/') . '/' : '';
 
         if (function_exists('wp_enqueue_style')) {
@@ -975,24 +1003,74 @@ trait GatewayImplementation
      */
     private function saved_connection_state(): array
     {
-        if (!function_exists('get_option')) {
-            return array();
-        }
-
-        $option = 'woocommerce_' . Settings::GATEWAY_ID . '_settings';
-        $settings = get_option($option, array());
-        if (!is_array($settings)) {
+        $settings = $this->saved_gateway_settings();
+        if (count($settings) === 0) {
             return array();
         }
 
         $state = array();
-        foreach (array('connect_access_token', 'connect_token_expires_at', 'terminal_registry') as $key) {
+        foreach (array('connected_mode', 'connected_fingerprint', 'connect_access_token', 'connect_token_expires_at', 'terminal_registry') as $key) {
             if (array_key_exists($key, $settings)) {
                 $state[$key] = $settings[$key];
             }
         }
 
         return $state;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function saved_gateway_settings(): array
+    {
+        if (!function_exists('get_option')) {
+            return array();
+        }
+
+        $option = 'woocommerce_' . Settings::GATEWAY_ID . '_settings';
+        $settings = get_option($option, array());
+
+        return is_array($settings) ? $settings : array();
+    }
+
+    /**
+     * @param array<string, string> $postedSettings
+     * @param array<string, mixed> $currentSettings
+     * @param array<string, mixed> $connectionState
+     * @return array<string, mixed>
+     */
+    private function settings_for_validation(array $postedSettings, array $currentSettings, array $connectionState): array
+    {
+        $settings = $currentSettings;
+        foreach ($postedSettings as $key => $value) {
+            if (in_array($key, array('connect_client_secret', 'connect_secret_key', 'callback_bearer_token'), true) && trim($value) === '') {
+                continue;
+            }
+
+            $settings[$key] = $value;
+        }
+
+        return array_merge($settings, $connectionState);
+    }
+
+    /**
+     * @param array<string, mixed> $nextSettings
+     * @param array<string, mixed> $currentSettings
+     */
+    private function connection_sensitive_settings_changed(array $nextSettings, array $currentSettings): bool
+    {
+        foreach (array('mode', 'connect_email', 'connect_mid', 'connect_client_secret', 'connect_secret_key', 'callback_bearer_token') as $key) {
+            if (self::setting_string($nextSettings, $key) !== self::setting_string($currentSettings, $key)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function has_in_flight_payment_attempts(): bool
+    {
+        return class_exists(PaymentAttempt::class) && PaymentAttempt::has_in_flight_attempts();
     }
 
     /**
