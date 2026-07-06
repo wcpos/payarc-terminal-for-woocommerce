@@ -1059,7 +1059,7 @@ trait GatewayImplementation
      */
     private function connection_sensitive_settings_changed(array $nextSettings, array $currentSettings): bool
     {
-        foreach (array('mode', 'connect_email', 'connect_mid', 'connect_client_secret', 'connect_secret_key') as $key) {
+        foreach (array('mode', 'connect_email', 'connect_mid', 'connect_client_secret', 'connect_secret_key', 'callback_bearer_token') as $key) {
             if (self::setting_string($nextSettings, $key) !== self::setting_string($currentSettings, $key)) {
                 return true;
             }

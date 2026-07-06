@@ -418,6 +418,29 @@ patwc_assert_same(true, in_array('Wait for in-progress PayArc terminal payments 
 $_POST = array();
 
 $GLOBALS['patwc_options'] = array(
+    'woocommerce_' . Settings::GATEWAY_ID . '_settings' => $currentConnectedSettings,
+    PaymentAttempt::OPTION_IN_FLIGHT_ATTEMPTS => array('5002' => array('status' => 'created')),
+);
+$GLOBALS['patwc_admin_errors'] = array();
+$gateway = new Gateway();
+$_POST = array(
+    'woocommerce_' . Settings::GATEWAY_ID . '_enabled' => 'yes',
+    'woocommerce_' . Settings::GATEWAY_ID . '_mode' => 'test',
+    'woocommerce_' . Settings::GATEWAY_ID . '_connect_email' => 'merchant@example.com',
+    'woocommerce_' . Settings::GATEWAY_ID . '_connect_mid' => '0000123456789012',
+    'woocommerce_' . Settings::GATEWAY_ID . '_connect_client_secret' => '',
+    'woocommerce_' . Settings::GATEWAY_ID . '_connect_secret_key' => '',
+    'woocommerce_' . Settings::GATEWAY_ID . '_callback_bearer_token' => 'new-callback-secret-token',
+    'woocommerce_' . Settings::GATEWAY_ID . '_default_terminal_id' => '1850528139',
+    'woocommerce_' . Settings::GATEWAY_ID . '_tender_type' => 'CREDIT',
+    'woocommerce_' . Settings::GATEWAY_ID . '_print_receipt' => '0',
+    'woocommerce_' . Settings::GATEWAY_ID . '_webhook_url' => 'https://merchant.example/wp-admin/admin-ajax.php?action=patwc_payarc_callback',
+);
+patwc_assert_same(false, $gateway->process_admin_options(), 'Gateway admin save should block callback bearer token changes while a PayArc payment is in progress.');
+patwc_assert_same(true, in_array('Wait for in-progress PayArc terminal payments to finish before changing PayArc mode or credentials.', $GLOBALS['patwc_admin_errors'], true), 'In-flight callback token change should produce a clear admin error.');
+$_POST = array();
+
+$GLOBALS['patwc_options'] = array(
     'woocommerce_' . Settings::GATEWAY_ID . '_settings' => array(
         'enabled' => 'no',
         'connect_email' => 'merchant@example.com',
