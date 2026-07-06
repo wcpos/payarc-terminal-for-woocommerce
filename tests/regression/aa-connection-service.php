@@ -133,6 +133,26 @@ function patwc_connection_assert_missing_secret(array $payload, string $secret, 
     }
 }
 
+class PatwcStructuredAuthFailureConnectionService extends PayArcConnectionService
+{
+    /** @var int */
+    public $login_calls = 0;
+
+    public function login(?Settings $settings = null): array
+    {
+        $this->login_calls++;
+
+        if ($this->login_calls === 1) {
+            throw new RuntimeException('PayArc Login authentication failed; trace id trace-structured-auth.', 401);
+        }
+
+        return array(
+            'ErrorCode' => 0,
+            'BearerTokenInfo' => array('AccessToken' => 'opposite-test-token-structured'),
+        );
+    }
+}
+
 $GLOBALS['patwc_options'] = array();
 $GLOBALS['patwc_captured_logs'] = array();
 $GLOBALS['patwc_http_requests'] = array();
@@ -426,6 +446,21 @@ try {
     patwc_connection_assert_contains('These look like Test PayArc credentials', $exception->getMessage(), 'ErrorCode 1 Login auth failure should warn when credentials look Test.');
     patwc_connection_assert_missing_secret(array('message' => $exception->getMessage()), 'test-token-secret', 'ErrorCode 1 mismatch warning must not leak API token.');
     patwc_connection_assert_same(2, count($GLOBALS['patwc_http_requests']), 'ErrorCode 1 auth mismatch should probe opposite Login only.');
+}
+
+$service = new PatwcStructuredAuthFailureConnectionService(new Settings(array(
+    'mode' => 'production',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'test-client-secret',
+    'connect_secret_key' => 'test-token-secret',
+)));
+try {
+    $service->connect();
+    throw new RuntimeException('Live-mode connect should probe Test when Login throws a structured auth failure.');
+} catch (RuntimeException $exception) {
+    patwc_connection_assert_contains('These look like Test PayArc credentials', $exception->getMessage(), 'Structured auth failure should warn when credentials look Test.');
+    patwc_connection_assert_same(2, $service->login_calls, 'Structured auth mismatch should probe opposite Login only.');
 }
 
 $GLOBALS['patwc_http_requests'] = array();

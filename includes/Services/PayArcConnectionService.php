@@ -212,10 +212,7 @@ class PayArcConnectionService
 
     private function is_login_authentication_failure(RuntimeException $exception): bool
     {
-        $message = $exception->getMessage();
-
-        return preg_match('/^PayArc request failed\. HTTP status: (401|403)\.$/', $message) === 1
-            || preg_match('/^PayArc Login failed; ErrorCode: (1|401|403); /', $message) === 1;
+        return in_array((int) $exception->getCode(), array(1, 401, 403), true);
     }
 
     private function opposite_mode_accepts_credentials(Settings $settings, string $oppositeMode): bool
@@ -279,7 +276,7 @@ class PayArcConnectionService
         $errorCode = isset($response['ErrorCode']) && is_scalar($response['ErrorCode']) ? (int) $response['ErrorCode'] : 0;
         if ($errorCode !== 0) {
             $message = isset($response['ErrorMessage']) && is_scalar($response['ErrorMessage']) ? (string) $response['ErrorMessage'] : 'PayArc Login failed.';
-            throw new RuntimeException('PayArc Login failed; ErrorCode: ' . $errorCode . '; ErrorMessage: ' . $this->safe_text($message) . '.');
+            throw new RuntimeException('PayArc Login failed; ErrorCode: ' . $errorCode . '; ErrorMessage: ' . $this->safe_text($message) . '.', $errorCode);
         }
 
         return $response;
@@ -480,7 +477,7 @@ class PayArcConnectionService
                 'http_status' => $status,
                 'message' => $message,
             )), null, 'error');
-            throw new RuntimeException($message);
+            throw new RuntimeException($message, $status);
         }
 
         return $decoded;
