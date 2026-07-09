@@ -310,14 +310,9 @@ $emptyRegistryService = patwc_payment_service_make_service(patwc_payment_service
     'connect_access_token' => 'connect-access-token',
     'terminal_registry' => array(),
 )), $emptyRegistryClient);
-try {
-    $emptyRegistryService->start_payment_for_order(new PatwcPaymentServiceOrder(9002));
-} catch (InvalidArgumentException $exception) {
-    patwc_payment_service_assert_same(0, count($emptyRegistryClient->sale_calls), 'Connected settings with an empty terminal registry should be rejected before sale.');
-}
-if (count($emptyRegistryClient->sale_calls) !== 0) {
-    throw new RuntimeException('Connected empty terminal registry should not call sale.');
-}
+$emptyRegistryService->start_payment_for_order(new PatwcPaymentServiceOrder(9002));
+patwc_payment_service_assert_same(1, count($emptyRegistryClient->sale_calls), 'A configured terminal serial number should allow sale even when Terminal Registry is empty.');
+patwc_payment_service_assert_same('1234567890', $emptyRegistryClient->sale_calls[0]['payload']['terminalId'], 'Sale should use the configured terminal serial number as V3 terminalId.');
 
 patwc_payment_service_reset_uuids(array('550e8400-e29b-41d4-a716-446655440000', '550e8400-e29b-41d4-a716-446655440001'));
 $client = new PatwcPaymentServiceFakeClient();
@@ -496,4 +491,3 @@ $processedResult = $processedService->cancel_order_payment($processedOrder);
 patwc_payment_service_assert_same($processedReconciler->result, $processedResult, 'Already-processed cancel should return reconciler result.');
 patwc_payment_service_assert_same(array(array('trace_id' => 'trace-processed-001')), $processedClient->get_calls, 'Already-processed cancel should fetch transaction.');
 patwc_payment_service_assert_same(array(array('order_id' => 130, 'payload' => $processedClient->transaction_response, 'source' => 'cancel_lookup')), $processedReconciler->calls, 'Already-processed cancel should reconcile fetched transaction.');
-

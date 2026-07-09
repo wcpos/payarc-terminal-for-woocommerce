@@ -39,15 +39,6 @@ class TerminalService
             throw new InvalidArgumentException('No PayArc terminal has been discovered. Press Connect PayArc in the gateway settings and select a terminal.');
         }
 
-        $options = $this->settings->terminal_registry_options();
-        if ($this->settings->connected_mode() !== '' && count($options) === 0) {
-            throw new InvalidArgumentException('No PayArc terminals are available for the current PayArc connection. Press Connect PayArc in the gateway settings and select a discovered terminal.');
-        }
-
-        if (count($options) > 0 && !array_key_exists($terminalId, $options)) {
-            throw new InvalidArgumentException('Selected PayArc terminal was not found in the discovered terminal registry. Refresh terminals in the gateway settings.');
-        }
-
         return array('tenantId' => $tenantId, 'terminalId' => $terminalId);
     }
 }

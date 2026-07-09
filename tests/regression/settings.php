@@ -284,7 +284,7 @@ $validationErrors = Gateway::validate_settings(array(
 
 patwc_assert_same(array(
     'PayArc MID must contain at least 12 digits so the tenant ID can be derived when the gateway is enabled.',
-    'Select a discovered PayArc terminal before enabling the gateway.',
+    'Enter the 10-digit PayArc terminal serial number before enabling the gateway.',
     'Tender type must be CREDIT or DEBIT.',
     'Print receipt must be one of 0, 1, 2, or 3.',
 ), $validationErrors, 'Gateway validation errors mismatch.');
@@ -350,7 +350,7 @@ patwc_assert_same('text', $gateway->form_fields['connect_email']['type'], 'Conne
 patwc_assert_same('text', $gateway->form_fields['connect_mid']['type'], 'Connect MID field should be visible.');
 patwc_assert_same('patwc_secret', $gateway->form_fields['connect_client_secret']['type'], 'ClientSecret field should use the custom secret type.');
 patwc_assert_same('patwc_secret', $gateway->form_fields['connect_secret_key']['type'], 'SecretKey/API bearer field should use the custom secret type.');
-patwc_assert_same('select', $gateway->form_fields['default_terminal_id']['type'], 'Default terminal field should be a discovered terminal select.');
+patwc_assert_same('text', $gateway->form_fields['default_terminal_id']['type'], 'Default terminal field should accept a manual terminal serial number.');
 patwc_assert_same('patwc_connection', $gateway->form_fields['connection']['type'], 'Gateway should render a PayArc Connect control panel.');
 
 $expectedHook = 'woocommerce_update_options_payment_gateways_' . Settings::GATEWAY_ID;

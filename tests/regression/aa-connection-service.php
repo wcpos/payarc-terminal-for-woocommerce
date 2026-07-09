@@ -609,7 +609,8 @@ $service = new PayArcConnectionService(new Settings(array(
 });
 $noTerminalResult = $service->connect();
 patwc_connection_assert_same(0, $noTerminalResult['terminal_count'], 'Connect without valid terminals should report zero terminals.');
-patwc_connection_assert_same('', $stored['default_terminal_id'], 'Connect without valid terminals should clear any stale default terminal id.');
+patwc_connection_assert_same('1850528139', $stored['default_terminal_id'], 'Connect without valid terminals should preserve a manually configured terminal serial number.');
+patwc_connection_assert_same('1850528139', $noTerminalResult['default_terminal_id'], 'Connect without valid terminals should return the manually configured terminal serial number.');
 patwc_connection_assert_same(array(), $stored['terminal_registry'], 'Connect without valid terminals should store an empty terminal registry.');
 
 
@@ -667,8 +668,8 @@ $service = new PayArcConnectionService(new Settings(array(
     $stored = array_merge($stored, $updates);
 });
 $emptyRefresh = $service->refresh_terminals();
-patwc_connection_assert_same('', $stored['default_terminal_id'], 'Refresh without valid terminals should clear any stale default terminal id.');
-patwc_connection_assert_same('', $emptyRefresh['default_terminal_id'], 'Refresh response should clear stale default terminal id when no terminals are discovered.');
+patwc_connection_assert_same('1850528139', $stored['default_terminal_id'], 'Refresh without valid terminals should preserve a manually configured terminal serial number.');
+patwc_connection_assert_same('1850528139', $emptyRefresh['default_terminal_id'], 'Refresh response should keep the manually configured terminal serial number when no terminals are discovered.');
 
 
 $GLOBALS['patwc_http_requests'] = array();

@@ -85,9 +85,9 @@ class PayArcConnectionService
         $this->assert_no_in_flight_payment_attempts();
         $this->persist($updates);
 
-        $result = $this->public_result('connected', 'Connected to PayArc. Select a discovered terminal and save settings.', $tenantId, $defaultTerminal, $terminals);
+        $result = $this->public_result('connected', 'Connected to PayArc. Enter or confirm the PayArc terminal serial number and save settings.', $tenantId, $defaultTerminal, $terminals);
         if ($registryWarning !== '') {
-            $result['warning'] = 'Connected with Login terminals only. Terminal Registry lookup failed. Refresh terminals after confirming Merchant API access.';
+            $result['warning'] = 'Connected to PayArc. Terminal Registry lookup failed, but registry data is only reporting metadata; confirm the terminal serial number with PayArc before testing a payment.';
         }
 
         Logger::log('PayArc connection completed', $this->connection_log_context($settings, array(
@@ -416,6 +416,10 @@ class PayArcConnectionService
     private function choose_default_terminal(array $terminals, string $currentDefault): string
     {
         $currentDefault = trim($currentDefault);
+        if (preg_match('/^[0-9]{10}$/', $currentDefault) === 1) {
+            return $currentDefault;
+        }
+
         if ($currentDefault !== '') {
             foreach ($terminals as $terminal) {
                 $terminalId = isset($terminal['terminal_id']) && is_scalar($terminal['terminal_id']) ? trim((string) $terminal['terminal_id']) : '';

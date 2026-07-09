@@ -2,14 +2,14 @@
 
 PayArc Terminal for WooCommerce adds an in-person PayArc PAX terminal payment method to WooCommerce. It is designed for merchants who take payments at a physical terminal and want the WooCommerce order to update after PayArc confirms the terminal result.
 
-The plugin connects your WooCommerce site to PayArc Connect V3, discovers the PAX terminals assigned to your PayArc merchant account, sends sale requests to a selected terminal, and reconciles the order from PayArc callbacks and transaction lookups.
+The plugin connects your WooCommerce site to PayArc Connect V3, sends sale requests to a PayArc-confirmed terminal serial number, and reconciles the order from PayArc callbacks and transaction lookups.
 
 ## What the plugin does
 
 - Adds a **PayArc Terminal** payment gateway in WooCommerce.
 - Supports **Live** and **Test** PayArc environments.
-- Uses **Connect PayArc** in the gateway settings to sign in to PayArc, store a server-side Connect access token, and discover available terminals.
-- Lets you choose a discovered PAX terminal as the default checkout terminal.
+- Uses **Connect PayArc** in the gateway settings to sign in to PayArc and store a server-side Connect access token.
+- Lets you enter the 10-digit PAX terminal serial number PayArc has confirmed for the merchant.
 - Starts in-person terminal payments from the WooCommerce order payment page.
 - Polls PayArc and accepts PayArc callbacks until the terminal transaction reaches a final status.
 - Marks the WooCommerce order paid only after PayArc returns a successful transaction result.
@@ -40,6 +40,7 @@ Ask PayArc or check the matching PayArc dashboard/API section for these values:
 - PayArc `ClientSecret`.
 - PayArc `SecretKey` / Merchant API bearer token.
 - PayArc-provided callback bearer token.
+- PayArc-confirmed 10-digit terminal serial number for the PAX terminal.
 
 Use values from one PayArc environment at a time. If the gateway is set to **Live**, enter Live credentials and use a live terminal. If the gateway is set to **Test**, enter Test credentials and use PayArc's test terminal environment.
 
@@ -53,9 +54,9 @@ Use values from one PayArc environment at a time. If the gateway is set to **Liv
 4. Press Connect PayArc.
    - The plugin calls PayArc Login for the selected mode.
    - It stores the returned Connect access token on your WordPress server.
-   - It runs terminal discovery through PayArc and fills the **Default terminal** dropdown.
+   - It may read Terminal Registry records for display/reporting metadata, but registry records do not connect or activate a terminal.
 5. If the plugin warns that the credentials look like the opposite environment, switch the mode or replace the credentials, then click **Connect PayArc** again.
-6. Select the intended terminal from **Default terminal**.
+6. Enter the 10-digit terminal serial number PayArc has confirmed for this merchant.
 7. Confirm the displayed **Webhook URL** uses public HTTPS. Give this URL to PayArc if PayArc needs to configure callbacks for your merchant account.
 8. Click **Save changes**.
 9. Enable the gateway when you are ready to accept terminal payments.
@@ -87,7 +88,7 @@ The plugin verifies that the returned PayArc transaction belongs to the WooComme
 Live mode can process real payments. Before using it with customers:
 
 - Confirm the gateway is set to **Live** and connected with Live PayArc credentials.
-- Confirm the selected terminal is the intended live PAX terminal.
+- Confirm the terminal serial number is the intended live PAX terminal and PayArc support has validated it for the merchant.
 - Confirm the Webhook URL is public HTTPS and reachable by PayArc.
 - For Test mode, run a low-value test payment first. For Live mode, run a small live transaction first and confirm the order, PayArc dashboard, settlement, and receipts match expectations.
 - Do not change PayArc mode, credentials, terminal selection, or connection state while a terminal payment is in progress. The plugin blocks these changes where possible to protect reconciliation.
@@ -96,17 +97,17 @@ Live mode can process real payments. Before using it with customers:
 
 Use the connection controls in the gateway settings:
 
-- **Refresh Terminals** fetches the current terminal list from PayArc and updates the dropdown.
-- **Disconnect PayArc** clears the stored Connect access token and discovered terminals. Saved credentials are left in place so you can reconnect quickly.
+- **Refresh Terminals** fetches current Terminal Registry records from PayArc for display/reporting context. It does not activate a terminal.
+- **Disconnect PayArc** clears the stored Connect access token and Terminal Registry metadata. Saved credentials and the entered terminal serial number are left in place so you can reconnect quickly.
 - **Connect PayArc** reconnects with the currently entered credentials and selected mode.
 
 ## Troubleshooting
 
-### No terminals appear
+### Terminal Registry is empty
 
+- Terminal Registry records are reporting metadata only and are not required to activate processing.
 - Confirm the PayArc MID, login email, `ClientSecret`, and `SecretKey` are from the selected environment.
-- Click **Connect PayArc** again.
-- If the connection succeeds but no terminals appear, confirm with PayArc that the PAX terminal is assigned to the merchant account and available through PayArc Connect.
+- Ask PayArc to validate the terminal serial number for the merchant account, then enter that 10-digit serial number in gateway settings.
 - Check **WooCommerce → Status → Logs** and choose the `payarc-terminal-for-woocommerce` log source.
 
 ### The plugin says the credentials look like the opposite environment
@@ -115,7 +116,7 @@ The gateway mode and credentials do not match. Switch **Mode** to the environmen
 
 ### Live mode cannot be enabled
 
-Live mode requires a current Live PayArc connection, a selected discovered terminal, and a public HTTPS callback URL. Reconnect PayArc in Live mode, select the terminal, and confirm your WordPress site URL is HTTPS.
+Live mode requires a current Live PayArc connection, a 10-digit PayArc-confirmed terminal serial number, and a public HTTPS callback URL. Reconnect PayArc in Live mode, enter the terminal serial number, and confirm your WordPress site URL is HTTPS.
 
 ### A payment is waiting too long
 
@@ -129,7 +130,7 @@ Live mode requires a current Live PayArc connection, a selected discovered termi
 - PayArc credentials and tokens are stored in WooCommerce gateway settings on the server.
 - Secret fields are not rendered back into the admin form after saving.
 - Terminal sale requests use the PayArc Connect access token returned by PayArc Login.
-- The Merchant API bearer token is used for PayArc Login and terminal discovery.
+- The Merchant API bearer token is used for PayArc Login and optional Terminal Registry reporting metadata.
 - Callback requests must include the configured callback bearer token.
 - Logs and diagnostics are designed to mask identifiers and avoid exposing secrets.
 
