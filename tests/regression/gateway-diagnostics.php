@@ -223,7 +223,7 @@ patwc_gateway_diagnostics_assert_same(array(
     'Click Connect using these credentials to fetch a Connect AccessToken.',
     'Callback bearer token must be configured.',
     'PayArc MID must contain at least 12 digits.',
-    'Connect PayArc and select a discovered terminal.',
+    'Enter the 10-digit PayArc terminal serial number.',
     'Callback URL must be HTTPS.',
     'Print receipt must be one of 0, 1, 2, or 3.',
     'Tender type must be CREDIT or DEBIT.',

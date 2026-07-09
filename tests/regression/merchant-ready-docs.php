@@ -18,7 +18,7 @@ foreach (array('MOCK_CONTRACT_CREATED', 'local checks only', 'does not call PayA
     }
 }
 
-foreach (array('Press Connect', 'PayArc Login', 'terminal discovery', 'low-value test payment') as $required) {
+foreach (array('Press Connect', 'PayArc Login', 'terminal serial number', 'low-value test payment') as $required) {
     if (stripos($readme, $required) === false) {
         throw new RuntimeException('README missing merchant-test-ready setup language: ' . $required);
     }
