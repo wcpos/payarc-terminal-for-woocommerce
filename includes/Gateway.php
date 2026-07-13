@@ -443,14 +443,17 @@ trait GatewayImplementation
         $fieldKey = method_exists($this, 'get_field_key') ? $this->get_field_key($key) : 'woocommerce_' . Settings::GATEWAY_ID . '_' . $key;
         $title = $this->field_text($data, 'title', $key);
         $description = $this->field_text($data, 'description', '');
-        $configured = $this->secret_field_configured($key);
-        $placeholder = $configured ? 'Configured - enter a new value to replace' : 'Not configured';
-        $status = $configured ? 'Configured' : 'Empty';
+        $savedValue = $this->secret_field_saved_value($key);
+        $hasSavedValue = $savedValue !== '';
+        $placeholder = $hasSavedValue ? $this->masked_secret_value($savedValue) : 'Enter value';
+        $status = $hasSavedValue
+            ? 'Saved value: ' . $this->masked_secret_value($savedValue) . '. Leave blank to keep it.'
+            : 'No saved value. Enter a value to save it.';
 
         $html = '<tr valign="top">';
         $html .= '<th scope="row" class="titledesc"><label for="' . $this->escape_attr($fieldKey) . '">' . $this->escape_html($title) . '</label></th>';
         $html .= '<td class="forminp"><input class="input-text regular-input" type="password" autocomplete="new-password" id="' . $this->escape_attr($fieldKey) . '" name="' . $this->escape_attr($fieldKey) . '" value="" placeholder="' . $this->escape_attr($placeholder) . '" />';
-        $html .= '<p class="description">' . $this->escape_html($status . '. Leave blank to keep the existing value. ' . $description) . '</p>';
+        $html .= '<p class="description">' . $this->escape_html($status . ' ' . $description) . '</p>';
         $html .= '</td></tr>';
 
         return $html;
@@ -573,15 +576,34 @@ trait GatewayImplementation
 
     private function secret_field_configured(string $key): bool
     {
-        if ($this->gateway_option($key, '') !== '') {
-            return true;
+        return $this->secret_field_saved_value($key) !== '';
+    }
+
+    private function secret_field_saved_value(string $key): string
+    {
+        $value = $this->gateway_option($key, '');
+        if (is_scalar($value) && trim((string) $value) !== '') {
+            return trim((string) $value);
         }
 
-        if ($key === 'connect_secret_key' && $this->gateway_option('api_bearer_token', '') !== '') {
-            return true;
+        if ($key === 'connect_secret_key') {
+            $legacyValue = $this->gateway_option('api_bearer_token', '');
+            if (is_scalar($legacyValue) && trim((string) $legacyValue) !== '') {
+                return trim((string) $legacyValue);
+            }
         }
 
-        return false;
+        return '';
+    }
+
+    private function masked_secret_value(string $value): string
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return '';
+        }
+
+        return '••••••••' . substr($value, -4);
     }
 
     private function secret_field_label(string $key): string
