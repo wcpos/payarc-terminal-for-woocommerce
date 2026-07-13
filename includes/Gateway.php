@@ -603,6 +603,10 @@ trait GatewayImplementation
             return '';
         }
 
+        if (strlen($value) <= 4) {
+            return str_repeat('•', strlen($value));
+        }
+
         return '••••••••' . substr($value, -4);
     }
 

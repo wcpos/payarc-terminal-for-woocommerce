@@ -554,3 +554,15 @@ $GLOBALS['patwc_admin_errors'] = array();
 patwc_assert_same('callback-secret-token', $gateway->validate_patwc_secret_field('callback_bearer_token', "bad
 secret"), 'Invalid callback token save should preserve the existing secret.');
 patwc_assert_same(array('Callback bearer token cannot contain control characters or newlines.'), $GLOBALS['patwc_admin_errors'], 'Invalid callback token save should report a clear error.');
+
+$GLOBALS['patwc_options'] = array(
+    'woocommerce_' . Settings::GATEWAY_ID . '_settings' => array(
+        'callback_bearer_token' => 'abcd',
+    ),
+);
+$gateway = new Gateway();
+$shortSecretHtml = $gateway->generate_patwc_secret_html('callback_bearer_token', $gateway->form_fields['callback_bearer_token']);
+
+if (strpos($shortSecretHtml, 'abcd') !== false || strpos($shortSecretHtml, 'placeholder="••••"') === false) {
+    throw new RuntimeException('Saved secrets of four or fewer characters should be fully masked. HTML: ' . $shortSecretHtml);
+}
