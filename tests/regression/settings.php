@@ -527,6 +527,24 @@ if (strpos($secretRenderData, 'api-secret-token') !== false || strpos($secretRen
     throw new RuntimeException('Secret field rendering leaked a saved token.');
 }
 
+foreach (array($apiSecretHtml, $callbackSecretHtml) as $secretHtml) {
+    if (strpos($secretHtml, '••••••••oken') === false) {
+        throw new RuntimeException('Saved secret fields should show a masked value ending in the last four characters. HTML: ' . $secretHtml);
+    }
+
+    if (strpos($secretHtml, 'Configured - enter a new value to replace') !== false || strpos($secretHtml, '>Configured.') !== false) {
+        throw new RuntimeException('Saved secret fields should not use the unintuitive Configured placeholder/status copy.');
+    }
+
+    if (strpos($secretHtml, 'value=""') === false) {
+        throw new RuntimeException('Saved secret fields must keep the input value empty so the full secret is never rendered.');
+    }
+}
+
+if (strpos($clientSecretHtml, 'No saved value') === false) {
+    throw new RuntimeException('Empty secret fields should clearly say there is no saved value.');
+}
+
 patwc_assert_same('patwc_secret', $gateway->form_fields['connect_secret_key']['type'], 'SecretKey/API bearer field should use the custom secret type.');
 patwc_assert_same('patwc_secret', $gateway->form_fields['callback_bearer_token']['type'], 'Callback token field should use the custom secret type.');
 patwc_assert_same('api-secret-token', $gateway->validate_patwc_secret_field('connect_secret_key', ''), 'Blank SecretKey save should preserve the existing secret.');
@@ -536,3 +554,15 @@ $GLOBALS['patwc_admin_errors'] = array();
 patwc_assert_same('callback-secret-token', $gateway->validate_patwc_secret_field('callback_bearer_token', "bad
 secret"), 'Invalid callback token save should preserve the existing secret.');
 patwc_assert_same(array('Callback bearer token cannot contain control characters or newlines.'), $GLOBALS['patwc_admin_errors'], 'Invalid callback token save should report a clear error.');
+
+$GLOBALS['patwc_options'] = array(
+    'woocommerce_' . Settings::GATEWAY_ID . '_settings' => array(
+        'callback_bearer_token' => 'abcd',
+    ),
+);
+$gateway = new Gateway();
+$shortSecretHtml = $gateway->generate_patwc_secret_html('callback_bearer_token', $gateway->form_fields['callback_bearer_token']);
+
+if (strpos($shortSecretHtml, 'abcd') !== false || strpos($shortSecretHtml, 'placeholder="••••"') === false) {
+    throw new RuntimeException('Saved secrets of four or fewer characters should be fully masked. HTML: ' . $shortSecretHtml);
+}
