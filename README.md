@@ -9,7 +9,7 @@ The plugin connects your WooCommerce site to PayArc Connect V3, sends sale reque
 - Adds a **PayArc Terminal** payment gateway in WooCommerce.
 - Supports **Live** and **Test** PayArc environments.
 - Uses **Connect PayArc** in the gateway settings to sign in to PayArc and store a server-side Connect access token.
-- Lets you enter the 10-digit PAX terminal serial number PayArc has confirmed for the merchant.
+- Lets you enter the PAX terminal serial number (found on the back of the device, labeled S/N) that PayArc has confirmed for the merchant.
 - Starts in-person terminal payments from the WooCommerce order payment page.
 - Polls PayArc and accepts PayArc callbacks until the terminal transaction reaches a final status.
 - Marks the WooCommerce order paid only after PayArc returns a successful transaction result.
@@ -40,7 +40,7 @@ Ask PayArc or check the matching PayArc dashboard/API section for these values:
 - PayArc `ClientSecret`.
 - PayArc `SecretKey` / Merchant API bearer token.
 - PayArc-provided callback bearer token.
-- PayArc-confirmed 10-digit terminal serial number for the PAX terminal.
+- PayArc-confirmed terminal serial number for the PAX terminal (found on the back of the device, labeled S/N).
 
 Use values from one PayArc environment at a time. If the gateway is set to **Live**, enter Live credentials and use a live terminal. If the gateway is set to **Test**, enter Test credentials and use PayArc's test terminal environment.
 
@@ -56,7 +56,7 @@ Use values from one PayArc environment at a time. If the gateway is set to **Liv
    - It stores the returned Connect access token on your WordPress server.
    - It may read Terminal Registry records for display/reporting metadata, but registry records do not connect or activate a terminal.
 5. If the plugin warns that the credentials look like the opposite environment, switch the mode or replace the credentials, then click **Connect PayArc** again.
-6. Enter the 10-digit terminal serial number PayArc has confirmed for this merchant.
+6. Enter the terminal serial number (found on the back of the device, labeled S/N) that PayArc has confirmed for this merchant.
 7. Confirm the displayed **Webhook URL** uses public HTTPS. Give this URL to PayArc if PayArc needs to configure callbacks for your merchant account.
 8. Click **Save changes**.
 9. Enable the gateway when you are ready to accept terminal payments.
@@ -107,7 +107,7 @@ Use the connection controls in the gateway settings:
 
 - Terminal Registry records are reporting metadata only and are not required to activate processing.
 - Confirm the PayArc MID, login email, `ClientSecret`, and `SecretKey` are from the selected environment.
-- Ask PayArc to validate the terminal serial number for the merchant account, then enter that 10-digit serial number in gateway settings.
+- Ask PayArc to validate the terminal serial number for the merchant account, then enter that serial number in gateway settings.
 - Check **WooCommerce → Status → Logs** and choose the `payarc-terminal-for-woocommerce` log source.
 
 ### The plugin says the credentials look like the opposite environment
@@ -116,7 +116,7 @@ The gateway mode and credentials do not match. Switch **Mode** to the environmen
 
 ### Live mode cannot be enabled
 
-Live mode requires a current Live PayArc connection, a 10-digit PayArc-confirmed terminal serial number, and a public HTTPS callback URL. Reconnect PayArc in Live mode, enter the terminal serial number, and confirm your WordPress site URL is HTTPS.
+Live mode requires a current Live PayArc connection, a PayArc-confirmed terminal serial number, and a public HTTPS callback URL. Reconnect PayArc in Live mode, enter the terminal serial number, and confirm your WordPress site URL is HTTPS.
 
 ### A payment is waiting too long
 
