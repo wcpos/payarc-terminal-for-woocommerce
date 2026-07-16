@@ -204,6 +204,36 @@ $GLOBALS['patwc_http_response_queue'] = array(
                     'device_id' => '00000000000000',
                     'pos_identifier' => '1850528140',
                 ),
+                array(
+                    'object' => 'TerminalRegistry',
+                    'id' => 'alphanumeric',
+                    'terminal' => 'Alphanumeric terminal',
+                    'type' => 'pax_A920',
+                    'code' => 'alphanumeric',
+                    'is_enabled' => true,
+                    'device_id' => '00000000000001',
+                    'pos_identifier' => 'ABC123',
+                ),
+                array(
+                    'object' => 'TerminalRegistry',
+                    'id' => 'short',
+                    'terminal' => 'Short identifier terminal',
+                    'type' => 'pax_A920',
+                    'code' => 'short',
+                    'is_enabled' => true,
+                    'device_id' => '00000000000002',
+                    'pos_identifier' => '42',
+                ),
+                array(
+                    'object' => 'TerminalRegistry',
+                    'id' => 'empty',
+                    'terminal' => 'Missing identifier terminal',
+                    'type' => 'pax_A920',
+                    'code' => 'empty',
+                    'is_enabled' => true,
+                    'device_id' => '00000000000003',
+                    'pos_identifier' => '',
+                ),
             ),
         )),
     ),
@@ -225,8 +255,10 @@ $result = $service->connect();
 
 patwc_connection_assert_same('connected', $result['status'], 'Connect should report connected status.');
 patwc_connection_assert_same('123456789012', $result['tenant_id'], 'Tenant id should derive from last 12 MID digits.');
-patwc_connection_assert_same(1, $result['terminal_count'], 'Only enabled terminals with 10-digit pos identifiers should be counted.');
+patwc_connection_assert_same(3, $result['terminal_count'], 'Enabled terminals with any non-empty pos identifier should be counted.');
 patwc_connection_assert_same('1850528139', $result['terminals'][0]['terminal_id'], 'Terminal id should come from PayArc pos_identifier.');
+patwc_connection_assert_same('ABC123', $result['terminals'][1]['terminal_id'], 'Alphanumeric PayArc pos identifiers should be normalized.');
+patwc_connection_assert_same('42', $result['terminals'][2]['terminal_id'], 'Short PayArc pos identifiers should be normalized.');
 patwc_connection_assert_same('Front Counter A920 (pax_A920) ••••••8139', $result['terminals'][0]['label'], 'Terminal label should be merchant-friendly and masked.');
 patwc_connection_assert_same('connect-access-token', $stored['connect_access_token'], 'Connect access token should be stored server-side.');
 patwc_connection_assert_same(false, array_key_exists('mode', $stored), 'Connect should not switch the active saved mode before WooCommerce settings are saved.');
@@ -603,15 +635,27 @@ $service = new PayArcConnectionService(new Settings(array(
     'connect_mid' => '0000123456789012',
     'connect_client_secret' => 'client-secret',
     'connect_secret_key' => 'merchant-api-token',
-    'default_terminal_id' => '1850528139',
+    'default_terminal_id' => 'ABC123',
 )), static function (array $updates) use (&$stored): void {
     $stored = array_merge($stored, $updates);
 });
 $noTerminalResult = $service->connect();
 patwc_connection_assert_same(0, $noTerminalResult['terminal_count'], 'Connect without valid terminals should report zero terminals.');
-patwc_connection_assert_same('1850528139', $stored['default_terminal_id'], 'Connect without valid terminals should preserve a manually configured terminal serial number.');
-patwc_connection_assert_same('1850528139', $noTerminalResult['default_terminal_id'], 'Connect without valid terminals should return the manually configured terminal serial number.');
+patwc_connection_assert_same('ABC123', $stored['default_terminal_id'], 'Connect without terminals should preserve an alphanumeric manually configured terminal serial number.');
+patwc_connection_assert_same('ABC123', $noTerminalResult['default_terminal_id'], 'Connect without terminals should return the alphanumeric manually configured terminal serial number.');
+patwc_connection_assert_same(true, $noTerminalResult['default_terminal_id_configured'], 'A non-empty alphanumeric terminal serial number should be reported as configured.');
 patwc_connection_assert_same(array(), $stored['terminal_registry'], 'Connect without valid terminals should store an empty terminal registry.');
+
+$stored = array();
+$service = new PayArcConnectionService(new Settings(array(
+    'tenant_id' => 'tenant-alpha',
+    'default_terminal_id' => 'ABC123',
+)), static function (array $updates) use (&$stored): void {
+    $stored = array_merge($stored, $updates);
+});
+$disconnectResult = $service->disconnect();
+patwc_connection_assert_same(true, $disconnectResult['tenant_id_configured'], 'Disconnect should report a non-empty tenant id as configured.');
+patwc_connection_assert_same(false, $disconnectResult['default_terminal_id_configured'], 'Disconnect clears the default terminal, so it must not be reported as configured.');
 
 
 $GLOBALS['patwc_http_requests'] = array();

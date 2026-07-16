@@ -146,7 +146,7 @@ class PayArcConnectionService
             'status' => 'disconnected',
             'message' => 'Disconnected from PayArc. Saved credentials were left in place so the merchant can reconnect quickly.',
             'terminal_count' => 0,
-            'tenant_id_configured' => preg_match('/^[0-9]{12}$/', $this->settings->tenant_id()) === 1,
+            'tenant_id_configured' => $this->settings->tenant_id() !== '',
             'default_terminal_id_configured' => false,
             'terminals' => array(),
         );
@@ -317,7 +317,7 @@ class PayArcConnectionService
             }
 
             $terminalId = $this->field($raw, array('pos_identifier', 'Pos_identifier', 'terminal_id', 'TerminalId'));
-            if (preg_match('/^[0-9]{10}$/', $terminalId) !== 1) {
+            if ($terminalId === '') {
                 continue;
             }
 
@@ -416,17 +416,8 @@ class PayArcConnectionService
     private function choose_default_terminal(array $terminals, string $currentDefault): string
     {
         $currentDefault = trim($currentDefault);
-        if (preg_match('/^[0-9]{10}$/', $currentDefault) === 1) {
-            return $currentDefault;
-        }
-
         if ($currentDefault !== '') {
-            foreach ($terminals as $terminal) {
-                $terminalId = isset($terminal['terminal_id']) && is_scalar($terminal['terminal_id']) ? trim((string) $terminal['terminal_id']) : '';
-                if ($terminalId === $currentDefault) {
-                    return $currentDefault;
-                }
-            }
+            return $currentDefault;
         }
 
         return count($terminals) > 0 ? (string) $terminals[0]['terminal_id'] : '';
@@ -532,9 +523,9 @@ class PayArcConnectionService
             'status' => $status,
             'message' => $message,
             'tenant_id' => $tenantId,
-            'tenant_id_configured' => preg_match('/^[0-9]{12}$/', $tenantId) === 1,
+            'tenant_id_configured' => $tenantId !== '',
             'default_terminal_id' => $defaultTerminal,
-            'default_terminal_id_configured' => preg_match('/^[0-9]{10}$/', $defaultTerminal) === 1,
+            'default_terminal_id_configured' => $defaultTerminal !== '',
             'terminal_count' => count($terminals),
             'terminals' => array_map(static function (array $terminal): array {
                 return array(
