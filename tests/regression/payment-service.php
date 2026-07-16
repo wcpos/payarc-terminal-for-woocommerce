@@ -291,17 +291,36 @@ function patwc_payment_service_reset_uuids(array $uuids = array()): void
 
 patwc_payment_service_reset_uuids(array('attempt-invalid', 'idem-invalid'));
 $invalidClient = new PatwcPaymentServiceFakeClient();
-$invalidService = patwc_payment_service_make_service(patwc_payment_service_settings(array('tenant_id' => 'tenant-bad')), $invalidClient);
+$invalidService = patwc_payment_service_make_service(patwc_payment_service_settings(array('tenant_id' => '')), $invalidClient);
 try {
     $invalidService->start_payment_for_order(new PatwcPaymentServiceOrder(9001));
+    throw new RuntimeException('Missing tenant id should throw InvalidArgumentException.');
 } catch (InvalidArgumentException $exception) {
+    patwc_payment_service_assert_same('PayArc tenant id is missing. Connect PayArc with the merchant MID first.', $exception->getMessage(), 'Missing tenant id message mismatch.');
     patwc_payment_service_assert_same(0, count($invalidClient->sale_calls), 'Invalid terminal settings should be rejected before sale.');
-} catch (Throwable $exception) {
-    throw new RuntimeException('Invalid terminal settings should throw InvalidArgumentException, got ' . get_class($exception) . '.');
 }
 if (count($invalidClient->sale_calls) !== 0) {
     throw new RuntimeException('Invalid terminal settings should not call sale.');
 }
+
+$missingTerminalClient = new PatwcPaymentServiceFakeClient();
+$missingTerminalService = patwc_payment_service_make_service(patwc_payment_service_settings(array('default_terminal_id' => '')), $missingTerminalClient);
+try {
+    $missingTerminalService->start_payment_for_order(new PatwcPaymentServiceOrder(9001));
+    throw new RuntimeException('Missing terminal serial number should throw InvalidArgumentException.');
+} catch (InvalidArgumentException $exception) {
+    patwc_payment_service_assert_same('No PayArc terminal serial number is configured. Enter the terminal serial number in the gateway settings.', $exception->getMessage(), 'Missing terminal serial number message mismatch.');
+    patwc_payment_service_assert_same(0, count($missingTerminalClient->sale_calls), 'Missing terminal serial number should be rejected before sale.');
+}
+
+$flexibleTerminalService = new TerminalService(new Settings(array(
+    'tenant_id' => 'tenant-alpha',
+    'default_terminal_id' => 'ABC123',
+)));
+patwc_payment_service_assert_same(array(
+    'tenantId' => 'tenant-alpha',
+    'terminalId' => 'ABC123',
+), $flexibleTerminalService->validate_default_terminal(), 'Terminal validation should accept any non-empty tenant and terminal identifiers.');
 
 patwc_payment_service_reset_uuids(array('attempt-empty-registry', 'idem-empty-registry'));
 $emptyRegistryClient = new PatwcPaymentServiceFakeClient();

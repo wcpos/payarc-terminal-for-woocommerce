@@ -102,7 +102,7 @@ class Settings
         return $this->connected_mode() === $this->mode()
             && ($connectedFingerprint !== '' ? hash_equals($connectedFingerprint, $this->connection_fingerprint()) : $this->mode() !== 'production')
             && $this->connect_access_token() !== ''
-            && preg_match('/^[0-9]{10}$/', $this->default_terminal_id()) === 1;
+            && $this->default_terminal_id() !== '';
     }
 
     public function connect_email(): string
@@ -159,28 +159,23 @@ class Settings
             return substr($mid, -12);
         }
 
-        $manual = $this->string_setting('tenant_id', '');
-        if (preg_match('/^[0-9]{12}$/', $manual) === 1) {
-            return $manual;
-        }
-
-        return $manual;
+        return $this->string_setting('tenant_id', '');
     }
 
     public function default_terminal_id(): string
     {
         $manual = $this->string_setting('default_terminal_id', '');
-        if (preg_match('/^[0-9]{10}$/', $manual) === 1) {
+        if ($manual !== '') {
             return $manual;
         }
 
         foreach ($this->terminal_registry() as $terminal) {
-            if (!empty($terminal['enabled']) && isset($terminal['terminal_id']) && preg_match('/^[0-9]{10}$/', (string) $terminal['terminal_id']) === 1) {
+            if (!empty($terminal['enabled']) && isset($terminal['terminal_id']) && (string) $terminal['terminal_id'] !== '') {
                 return (string) $terminal['terminal_id'];
             }
         }
 
-        return $manual;
+        return '';
     }
 
     /**
@@ -199,7 +194,7 @@ class Settings
             }
 
             $terminalId = isset($terminal['terminal_id']) && is_scalar($terminal['terminal_id']) ? trim((string) $terminal['terminal_id']) : '';
-            if (preg_match('/^[0-9]{10}$/', $terminalId) !== 1) {
+            if ($terminalId === '') {
                 continue;
             }
 
@@ -281,8 +276,8 @@ class Settings
             'webhook_url' => $this->webhook_url(),
             'connect_email_configured' => $this->connect_email() !== '',
             'connect_mid_configured' => $this->connect_mid() !== '',
-            'tenant_id_configured' => preg_match('/^[0-9]{12}$/', $this->tenant_id()) === 1,
-            'default_terminal_id_configured' => preg_match('/^[0-9]{10}$/', $this->default_terminal_id()) === 1,
+            'tenant_id_configured' => $this->tenant_id() !== '',
+            'default_terminal_id_configured' => $this->default_terminal_id() !== '',
             'terminal_count' => count($this->terminal_registry_options()),
             'tender_type' => $this->tender_type(),
             'print_receipt' => $this->print_receipt(),

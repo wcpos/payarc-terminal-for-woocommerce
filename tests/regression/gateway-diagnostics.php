@@ -199,6 +199,8 @@ patwc_gateway_diagnostics_assert_contains('INVALID_TERMINAL', $html, 'Diagnostic
 patwc_gateway_diagnostics_assert_contains('[REDACTED]', $html, 'Diagnostics table should redact token-looking error fragments.');
 patwc_gateway_diagnostics_assert_contains('data-action="patwc_validate_settings"', $html, 'Validate Settings control should use the existing AJAX action.');
 patwc_gateway_diagnostics_assert_contains('nonce-for-patwc_validate_settings', $html, 'Validate Settings control should include the validate-settings nonce.');
+patwc_gateway_diagnostics_assert_contains('Enter the PayArc terminal serial number.', $html, 'Client-side fallback validation should use the non-format terminal message.');
+patwc_gateway_diagnostics_assert_not_contains('/^[0-9]{10}$/', $html, 'Client-side fallback validation must not impose a 10-digit terminal format.');
 patwc_gateway_diagnostics_assert_not_contains('api-secret-token-should-not-render', $html, 'Diagnostics HTML must not leak API token.');
 patwc_gateway_diagnostics_assert_not_contains('connect-access-token-should-not-render', $html, 'Diagnostics HTML must not leak Connect AccessToken.');
 patwc_gateway_diagnostics_assert_not_contains('callback-secret-token-should-not-render', $html, 'Diagnostics HTML must not leak callback token.');
@@ -210,8 +212,9 @@ $diagnostics = Gateway::local_settings_diagnostics(array(
     'connect_secret_key_configured' => false,
     'connect_access_token_configured' => false,
     'callback_bearer_token_configured' => false,
-    'connect_mid' => 'bad-mid',
-    'default_terminal_id' => '123',
+    'connect_mid' => '',
+    'tenant_id' => '',
+    'default_terminal_id' => '',
     'webhook_url' => 'http://merchant.example/wp-admin/admin-ajax.php?action=patwc_payarc_callback',
     'print_receipt' => '9',
     'tender_type' => 'CASH',
@@ -222,8 +225,8 @@ patwc_gateway_diagnostics_assert_same(array(
     'PayArc SecretKey/API bearer token must be configured.',
     'Click Connect using these credentials to fetch a Connect AccessToken.',
     'Callback bearer token must be configured.',
-    'PayArc MID must contain at least 12 digits.',
-    'Enter the 10-digit PayArc terminal serial number.',
+    'PayArc MID or tenant id must be configured.',
+    'Enter the PayArc terminal serial number.',
     'Callback URL must be HTTPS.',
     'Print receipt must be one of 0, 1, 2, or 3.',
     'Tender type must be CREDIT or DEBIT.',
@@ -235,7 +238,7 @@ if (!is_string($encodedDiagnostics)) {
     throw new RuntimeException('Unable to encode diagnostics result.');
 }
 
-foreach (array('api-secret-token-should-not-render', 'connect-access-token-should-not-render', 'callback-secret-token-should-not-render', 'bad-mid') as $secretOrRawValue) {
+foreach (array('api-secret-token-should-not-render', 'connect-access-token-should-not-render', 'callback-secret-token-should-not-render') as $secretOrRawValue) {
     if (strpos($encodedDiagnostics, $secretOrRawValue) !== false) {
         throw new RuntimeException('Local diagnostics should not echo raw secret or identifier values: ' . $secretOrRawValue);
     }
@@ -245,8 +248,8 @@ $validDiagnostics = Gateway::local_settings_diagnostics(array(
     'connect_secret_key_configured' => true,
     'connect_access_token_configured' => true,
     'callback_bearer_token_configured' => true,
-    'connect_mid' => '0000123456789012',
-    'default_terminal_id' => '9876543210',
+    'tenant_id' => 'tenant-alpha',
+    'default_terminal_id' => 'ABC123',
     'webhook_url' => 'https://merchant.example/wp-admin/admin-ajax.php?action=patwc_payarc_callback',
     'print_receipt' => '0',
     'tender_type' => 'DEBIT',
