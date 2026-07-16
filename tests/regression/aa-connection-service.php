@@ -264,6 +264,13 @@ if (!is_string($encodedLogs)) {
 patwc_connection_assert_contains('PayArc connection attempt started', $encodedLogs, 'Connect should log when a connection attempt starts.');
 patwc_connection_assert_contains('connect_mid_masked', $encodedLogs, 'Connect logs should include masked merchant context.');
 patwc_connection_assert_contains('PayArc connection completed', $encodedLogs, 'Connect should log a successful connection summary.');
+$connectDropWarnings = array_values(array_filter($GLOBALS['patwc_captured_logs'], static function (array $entry): bool {
+    return $entry['message'] === 'PayArc terminal record dropped during normalization';
+}));
+patwc_connection_assert_same(1, count($connectDropWarnings), 'Connect should log a warning for the dropped disabled registry record.');
+patwc_connection_assert_same('warning', $connectDropWarnings[0]['level'], 'Dropped-record log level mismatch during connect.');
+patwc_connection_assert_same('disabled', $connectDropWarnings[0]['context']['drop_reason'], 'Dropped disabled registry record should state the disabled reason.');
+patwc_connection_assert_same('••••••8140', $connectDropWarnings[0]['context']['terminal_id_masked'], 'Dropped-record log should mask the terminal identifier during connect.');
 patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'merchant-api-token', 'Connect logs should redact API bearer token.');
 patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'connect-access-token', 'Connect logs should redact Connect access token.');
 patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'client-secret', 'Connect logs should redact client secret.');
@@ -670,6 +677,63 @@ $service = new PayArcConnectionService(new Settings(array(
 $emptyRefresh = $service->refresh_terminals();
 patwc_connection_assert_same('1850528139', $stored['default_terminal_id'], 'Refresh without valid terminals should preserve a manually configured terminal serial number.');
 patwc_connection_assert_same('1850528139', $emptyRefresh['default_terminal_id'], 'Refresh response should keep the manually configured terminal serial number when no terminals are discovered.');
+
+// Every silently dropped registry record must leave a masked warning naming
+// the drop reason, so support can explain registry_terminal_count vs
+// terminal_count mismatches without raw identifiers ever reaching the logs.
+$GLOBALS['patwc_captured_logs'] = array();
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'data' => array(
+                array(
+                    'terminal' => 'Ghost Terminal',
+                    'type' => 'pax_A920',
+                    'is_enabled' => true,
+                    'pos_identifier' => 'SERIAL-XYZ-987654',
+                ),
+                array(
+                    'terminal' => 'Disabled Terminal',
+                    'type' => 'pax_A920',
+                    'is_enabled' => false,
+                    'pos_identifier' => '1850528142',
+                ),
+                array(
+                    'terminal' => 'Working Terminal',
+                    'type' => 'pax_A920',
+                    'is_enabled' => true,
+                    'pos_identifier' => '1850528139',
+                ),
+            ),
+        )),
+    ),
+);
+$stored = array();
+$service = new PayArcConnectionService(new Settings(array(
+    'mode' => 'test',
+    'connect_mid' => '0000123456789012',
+    'connect_secret_key' => 'merchant-api-token',
+)), static function (array $updates) use (&$stored): void {
+    $stored = array_merge($stored, $updates);
+});
+$droppedRefresh = $service->refresh_terminals();
+patwc_connection_assert_same(1, $droppedRefresh['terminal_count'], 'Only the enabled terminal with a valid identifier should survive normalization.');
+
+$dropWarnings = array_values(array_filter($GLOBALS['patwc_captured_logs'], static function (array $entry): bool {
+    return $entry['message'] === 'PayArc terminal record dropped during normalization';
+}));
+patwc_connection_assert_same(2, count($dropWarnings), 'Each dropped registry record should log exactly one warning.');
+patwc_connection_assert_same('warning', $dropWarnings[0]['level'], 'Dropped-record logs should use the warning level.');
+patwc_connection_assert_same('invalid_identifier', $dropWarnings[0]['context']['drop_reason'], 'Non-10-digit identifier drop should state the invalid_identifier reason.');
+patwc_connection_assert_same(str_repeat('•', 13) . '7654', $dropWarnings[0]['context']['terminal_id_masked'], 'Invalid identifier should be masked in the drop log.');
+patwc_connection_assert_same('disabled', $dropWarnings[1]['context']['drop_reason'], 'Disabled record drop should state the disabled reason.');
+patwc_connection_assert_same('••••••8142', $dropWarnings[1]['context']['terminal_id_masked'], 'Disabled record identifier should be masked in the drop log.');
+patwc_connection_assert_same(true, array_key_exists('connect_mid_masked', $dropWarnings[0]['context']), 'Drop logs should carry the standard connection log context.');
+patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'SERIAL-XYZ-987654', 'Drop logs must not contain the raw invalid identifier.');
+patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], '1850528142', 'Drop logs must not contain the raw disabled terminal identifier.');
+patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'merchant-api-token', 'Drop logs should redact the API bearer token.');
 
 
 $GLOBALS['patwc_http_requests'] = array();

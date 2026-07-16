@@ -55,7 +55,7 @@ class PayArcConnectionService
         }
 
         $loginTerminals = isset($login['Terminals']) && is_array($login['Terminals']) ? $login['Terminals'] : array();
-        $terminals = $this->normalize_terminals(array_merge($loginTerminals, $registry));
+        $terminals = $this->normalize_terminals(array_merge($loginTerminals, $registry), $settings);
         $tokenInfo = isset($login['BearerTokenInfo']) && is_array($login['BearerTokenInfo']) ? $login['BearerTokenInfo'] : array();
         $accessToken = isset($tokenInfo['AccessToken']) && is_scalar($tokenInfo['AccessToken']) ? trim((string) $tokenInfo['AccessToken']) : '';
 
@@ -306,8 +306,9 @@ class PayArcConnectionService
      * @param array<int, mixed> $rawTerminals
      * @return array<int, array<string, mixed>>
      */
-    public function normalize_terminals(array $rawTerminals): array
+    public function normalize_terminals(array $rawTerminals, ?Settings $settings = null): array
     {
+        $settings = $settings === null ? $this->settings : $settings;
         $terminals = array();
         $seen = array();
 
@@ -318,6 +319,7 @@ class PayArcConnectionService
 
             $terminalId = $this->field($raw, array('pos_identifier', 'Pos_identifier', 'terminal_id', 'TerminalId'));
             if (preg_match('/^[0-9]{10}$/', $terminalId) !== 1) {
+                $this->log_dropped_terminal($settings, 'invalid_identifier', $terminalId);
                 continue;
             }
 
@@ -327,6 +329,7 @@ class PayArcConnectionService
 
             $enabled = $this->enabled_field($raw);
             if (!$enabled) {
+                $this->log_dropped_terminal($settings, 'disabled', $terminalId);
                 continue;
             }
 
@@ -580,6 +583,14 @@ class PayArcConnectionService
         }
 
         return true;
+    }
+
+    private function log_dropped_terminal(Settings $settings, string $reason, string $terminalId): void
+    {
+        Logger::log('PayArc terminal record dropped during normalization', $this->connection_log_context($settings, array(
+            'drop_reason' => $reason,
+            'terminal_id_masked' => Settings::mask_identifier($terminalId),
+        )), null, 'warning');
     }
 
     /**
