@@ -101,13 +101,8 @@ trait GatewayImplementation
             'default_terminal_id' => array(
                 'title' => 'Terminal serial number',
                 'type' => 'text',
-                'description' => 'Required for PayArc Connect V3 transactions. Enter the 10-digit terminal serial number PayArc has configured for this merchant. Terminal Registry records are optional reporting metadata and do not connect or activate the terminal.',
+                'description' => 'Required for PayArc Connect V3 transactions. Enter the terminal serial number (found on the back of the device) that PayArc has configured for this merchant. Terminal Registry records are optional reporting metadata and do not connect or activate the terminal.',
                 'default' => $settings->default_terminal_id(),
-                'custom_attributes' => array(
-                    'inputmode' => 'numeric',
-                    'pattern' => '[0-9]{10}',
-                    'maxlength' => '10',
-                ),
             ),
             'tender_type' => array(
                 'title' => 'Tender type',
@@ -189,12 +184,12 @@ trait GatewayImplementation
             $errors[] = 'Callback URL must be HTTPS before enabling Live mode.';
         }
 
-        if ($enabled && preg_match('/^[0-9]{12}$/', $tenantId) !== 1) {
-            $errors[] = 'PayArc MID must contain at least 12 digits so the tenant ID can be derived when the gateway is enabled.';
+        if ($enabled && $tenantId === '') {
+            $errors[] = 'PayArc MID (or tenant id) is required when the gateway is enabled.';
         }
 
-        if ($enabled && preg_match('/^[0-9]{10}$/', $terminalId) !== 1) {
-            $errors[] = 'Enter the 10-digit PayArc terminal serial number before enabling the gateway.';
+        if ($enabled && $terminalId === '') {
+            $errors[] = 'Enter the PayArc terminal serial number before enabling the gateway.';
         }
 
         if (!in_array($tenderType, array('CREDIT', 'DEBIT'), true)) {
@@ -250,17 +245,17 @@ trait GatewayImplementation
         self::append_local_check(
             $checks,
             'tenant_id',
-            preg_match('/^[0-9]{12}$/', $tenantId) === 1,
+            $tenantId !== '',
             'Tenant ID can be derived from the PayArc MID.',
-            'PayArc MID must contain at least 12 digits.'
+            'PayArc MID or tenant id must be configured.'
         );
 
         self::append_local_check(
             $checks,
             'default_terminal_id',
-            preg_match('/^[0-9]{10}$/', self::setting_string($settings, 'default_terminal_id')) === 1,
+            self::setting_string($settings, 'default_terminal_id') !== '',
             'Terminal serial number is configured.',
-            'Enter the 10-digit PayArc terminal serial number.'
+            'Enter the PayArc terminal serial number.'
         );
 
         self::append_local_check(
@@ -522,7 +517,7 @@ trait GatewayImplementation
         $html .= '<ol class="patwc-connection-steps">';
         $html .= '<li>' . $this->escape_html('Enter PayArc login email, merchant MID, ClientSecret, and SecretKey/API bearer token.') . '</li>';
         $html .= '<li>' . $this->escape_html('Click Connect using these credentials.') . '</li>';
-        $html .= '<li>' . $this->escape_html('Enter the 10-digit terminal serial number PayArc confirms for this merchant, then Save changes.') . '</li>';
+        $html .= '<li>' . $this->escape_html('Enter the terminal serial number (found on the back of the device) that PayArc confirms for this merchant, then Save changes.') . '</li>';
         $html .= '</ol>';
         $html .= '<p class="description">' . $this->escape_html('MID means merchant ID, not terminal ID. If PayArc rejects the connection, check WooCommerce > Status > Logs and select the payarc-terminal-for-woocommerce source.') . '</p>';
         $html .= '</div>';
@@ -713,7 +708,7 @@ trait GatewayImplementation
             'function configured(key,flag){return fieldValue(key)!==""||!!config.savedState[flag];}' .
             'function add(errors,condition,message){if(!condition){errors.push(message);}}' .
             'function render(errors){if(errors.length===0){result.textContent="Settings validation passed.";return;}var html="<strong>Settings validation found issues:</strong><ul>";for(var i=0;i<errors.length;i++){html+="<li>"+errors[i].replace(/[&<>]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c];})+"</li>";}result.innerHTML=html+"</ul>";}' .
-            'function localValidate(diagnostics){diagnostics=diagnostics||{};var errors=[];var mid=fieldValue("connect_mid").replace(/\D/g,"");var terminal=fieldValue("default_terminal_id");var secretConfigured=configured("connect_secret_key","connect_secret_key_configured")||!!diagnostics.connect_secret_key_configured;var accessConfigured=!!diagnostics.connect_access_token_configured||!!config.savedState.connect_access_token_configured;var callbackConfigured=configured("callback_bearer_token","callback_bearer_token_configured")||!!diagnostics.callback_bearer_token_configured;add(errors,secretConfigured,"PayArc SecretKey/API bearer token must be configured.");add(errors,accessConfigured,"Press Connect PayArc to fetch a Connect AccessToken.");add(errors,callbackConfigured,"Callback bearer token must be configured.");add(errors,mid.length>=12,"PayArc MID must contain at least 12 digits.");add(errors,/^[0-9]{10}$/.test(terminal),"Enter the 10-digit PayArc terminal serial number.");add(errors,/^https:\/\//i.test(fieldValue("webhook_url")),"Callback URL must be HTTPS.");add(errors,["0","1","2","3"].indexOf(fieldValue("print_receipt"))!==-1,"Print receipt must be one of 0, 1, 2, or 3.");add(errors,["CREDIT","DEBIT"].indexOf(fieldValue("tender_type").toUpperCase())!==-1,"Tender type must be CREDIT or DEBIT.");render(errors);}' .
+            'function localValidate(diagnostics){diagnostics=diagnostics||{};var errors=[];var mid=fieldValue("connect_mid").replace(/\D/g,"");var terminal=fieldValue("default_terminal_id");var secretConfigured=configured("connect_secret_key","connect_secret_key_configured")||!!diagnostics.connect_secret_key_configured;var accessConfigured=!!diagnostics.connect_access_token_configured||!!config.savedState.connect_access_token_configured;var callbackConfigured=configured("callback_bearer_token","callback_bearer_token_configured")||!!diagnostics.callback_bearer_token_configured;var tenantConfigured=mid.length>=12||!!diagnostics.tenant_id_configured;add(errors,secretConfigured,"PayArc SecretKey/API bearer token must be configured.");add(errors,accessConfigured,"Press Connect PayArc to fetch a Connect AccessToken.");add(errors,callbackConfigured,"Callback bearer token must be configured.");add(errors,tenantConfigured,"PayArc MID or tenant id must be configured.");add(errors,terminal!=="","Enter the PayArc terminal serial number.");add(errors,/^https:\/\//i.test(fieldValue("webhook_url")),"Callback URL must be HTTPS.");add(errors,["0","1","2","3"].indexOf(fieldValue("print_receipt"))!==-1,"Print receipt must be one of 0, 1, 2, or 3.");add(errors,["CREDIT","DEBIT"].indexOf(fieldValue("tender_type").toUpperCase())!==-1,"Tender type must be CREDIT or DEBIT.");render(errors);}' .
             'button.addEventListener("click",function(){var action=button.getAttribute("data-action")||"patwc_validate_settings";var nonce=button.getAttribute("data-nonce")||"";var ajaxUrl=button.getAttribute("data-ajax-url")||"admin-ajax.php";result.textContent="Checking saved settings...";if(!window.fetch||!window.FormData){localValidate({});return;}var data=new FormData();data.append("action",action);data.append("_ajax_nonce",nonce);window.fetch(ajaxUrl,{method:"POST",credentials:"same-origin",body:data}).then(function(response){return response.json();}).then(function(body){localValidate(body&&body.diagnostics?body.diagnostics:{});}).catch(function(){localValidate({});});});' .
             '})(' . $encoded . ');</script>';
     }
@@ -1016,12 +1011,7 @@ trait GatewayImplementation
             return substr($mid, -12);
         }
 
-        $manual = self::setting_string($settings, 'tenant_id');
-        if (preg_match('/^[0-9]{12}$/', $manual) === 1) {
-            return $manual;
-        }
-
-        return $manual;
+        return self::setting_string($settings, 'tenant_id');
     }
 
     /**

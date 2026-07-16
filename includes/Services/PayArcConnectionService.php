@@ -55,7 +55,7 @@ class PayArcConnectionService
         }
 
         $loginTerminals = isset($login['Terminals']) && is_array($login['Terminals']) ? $login['Terminals'] : array();
-        $terminals = $this->normalize_terminals(array_merge($loginTerminals, $registry));
+        $terminals = $this->normalize_terminals(array_merge($loginTerminals, $registry), $settings);
         $tokenInfo = isset($login['BearerTokenInfo']) && is_array($login['BearerTokenInfo']) ? $login['BearerTokenInfo'] : array();
         $accessToken = isset($tokenInfo['AccessToken']) && is_scalar($tokenInfo['AccessToken']) ? trim((string) $tokenInfo['AccessToken']) : '';
 
@@ -95,6 +95,7 @@ class PayArcConnectionService
             'default_terminal_id_masked' => Settings::mask_identifier($defaultTerminal),
             'terminal_count' => count($terminals),
             'terminal_registry_warning' => $registryWarning !== '',
+            'default_terminal_in_fetched_list' => $this->terminal_in_list($terminals, $defaultTerminal),
         )));
 
         return $result;
@@ -120,6 +121,7 @@ class PayArcConnectionService
         Logger::log('PayArc terminal refresh completed', $this->connection_log_context($this->settings, array(
             'default_terminal_id_masked' => Settings::mask_identifier($defaultTerminal),
             'terminal_count' => count($terminals),
+            'default_terminal_in_fetched_list' => $this->terminal_in_list($terminals, $defaultTerminal),
         )));
 
         return $this->public_result('connected', 'PayArc terminals refreshed.', $this->settings->tenant_id(), $defaultTerminal, $terminals);
@@ -146,7 +148,7 @@ class PayArcConnectionService
             'status' => 'disconnected',
             'message' => 'Disconnected from PayArc. Saved credentials were left in place so the merchant can reconnect quickly.',
             'terminal_count' => 0,
-            'tenant_id_configured' => preg_match('/^[0-9]{12}$/', $this->settings->tenant_id()) === 1,
+            'tenant_id_configured' => $this->settings->tenant_id() !== '',
             'default_terminal_id_configured' => false,
             'terminals' => array(),
         );
@@ -306,8 +308,9 @@ class PayArcConnectionService
      * @param array<int, mixed> $rawTerminals
      * @return array<int, array<string, mixed>>
      */
-    public function normalize_terminals(array $rawTerminals): array
+    public function normalize_terminals(array $rawTerminals, ?Settings $settings = null): array
     {
+        $settings = $settings === null ? $this->settings : $settings;
         $terminals = array();
         $seen = array();
 
@@ -317,7 +320,8 @@ class PayArcConnectionService
             }
 
             $terminalId = $this->field($raw, array('pos_identifier', 'Pos_identifier', 'terminal_id', 'TerminalId'));
-            if (preg_match('/^[0-9]{10}$/', $terminalId) !== 1) {
+            if ($terminalId === '') {
+                $this->log_dropped_terminal($settings, 'missing_identifier', $terminalId);
                 continue;
             }
 
@@ -327,6 +331,7 @@ class PayArcConnectionService
 
             $enabled = $this->enabled_field($raw);
             if (!$enabled) {
+                $this->log_dropped_terminal($settings, 'disabled', $terminalId);
                 continue;
             }
 
@@ -416,17 +421,8 @@ class PayArcConnectionService
     private function choose_default_terminal(array $terminals, string $currentDefault): string
     {
         $currentDefault = trim($currentDefault);
-        if (preg_match('/^[0-9]{10}$/', $currentDefault) === 1) {
-            return $currentDefault;
-        }
-
         if ($currentDefault !== '') {
-            foreach ($terminals as $terminal) {
-                $terminalId = isset($terminal['terminal_id']) && is_scalar($terminal['terminal_id']) ? trim((string) $terminal['terminal_id']) : '';
-                if ($terminalId === $currentDefault) {
-                    return $currentDefault;
-                }
-            }
+            return $currentDefault;
         }
 
         return count($terminals) > 0 ? (string) $terminals[0]['terminal_id'] : '';
@@ -532,9 +528,9 @@ class PayArcConnectionService
             'status' => $status,
             'message' => $message,
             'tenant_id' => $tenantId,
-            'tenant_id_configured' => preg_match('/^[0-9]{12}$/', $tenantId) === 1,
+            'tenant_id_configured' => $tenantId !== '',
             'default_terminal_id' => $defaultTerminal,
-            'default_terminal_id_configured' => preg_match('/^[0-9]{10}$/', $defaultTerminal) === 1,
+            'default_terminal_id_configured' => $defaultTerminal !== '',
             'terminal_count' => count($terminals),
             'terminals' => array_map(static function (array $terminal): array {
                 return array(
@@ -580,6 +576,36 @@ class PayArcConnectionService
         }
 
         return true;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $terminals
+     */
+    private function terminal_in_list(array $terminals, string $terminalId): bool
+    {
+        if ($terminalId === '') {
+            return false;
+        }
+
+        foreach ($terminals as $terminal) {
+            if (isset($terminal['terminal_id']) && is_scalar($terminal['terminal_id']) && trim((string) $terminal['terminal_id']) === $terminalId) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function log_dropped_terminal(Settings $settings, string $reason, string $terminalId): void
+    {
+        try {
+            Logger::log('PayArc terminal record dropped during normalization', $this->connection_log_context($settings, array(
+                'drop_reason' => $reason,
+                'terminal_id_masked' => Settings::mask_identifier($terminalId),
+            )), null, 'warning');
+        } catch (\Throwable $exception) {
+            // Diagnostic logging must not interrupt terminal discovery.
+        }
     }
 
     /**

@@ -193,10 +193,10 @@ $testConnected = new Settings(array(
     'mode' => 'test',
     'connected_mode' => 'test',
     'connect_access_token' => 'token',
-    'default_terminal_id' => '1234567890',
+    'default_terminal_id' => 'ABC123',
 ));
 patwc_assert_same('test', $testConnected->connected_mode(), 'Connected mode getter should return test.');
-patwc_assert_same(true, $testConnected->is_connected_for_current_mode(), 'Matching test connection should be active.');
+patwc_assert_same(true, $testConnected->is_connected_for_current_mode(), 'Matching test connection with an alphanumeric terminal id should be active.');
 
 $staleConnected = new Settings(array(
     'mode' => 'production',
@@ -218,8 +218,8 @@ $GLOBALS['patwc_options'] = array(
         'mode' => 'test',
         'api_bearer_token' => 'api-secret-token',
         'callback_bearer_token' => 'callback-secret-token',
-        'tenant_id' => '123456789012',
-        'default_terminal_id' => '1234567890',
+        'tenant_id' => 'tenant-alpha',
+        'default_terminal_id' => 'ABC123',
         'tender_type' => 'DEBIT',
         'print_receipt' => '2',
     ),
@@ -229,8 +229,8 @@ $settings = new Settings();
 
 patwc_assert_same('api-secret-token', $settings->api_bearer_token(), 'API bearer token getter should return raw server-side value.');
 patwc_assert_same('callback-secret-token', $settings->callback_bearer_token(), 'Callback bearer token getter should return raw server-side value.');
-patwc_assert_same('123456789012', $settings->tenant_id(), 'Tenant id mismatch.');
-patwc_assert_same('1234567890', $settings->default_terminal_id(), 'Default terminal id mismatch.');
+patwc_assert_same('tenant-alpha', $settings->tenant_id(), 'Non-numeric tenant id mismatch.');
+patwc_assert_same('ABC123', $settings->default_terminal_id(), 'Alphanumeric default terminal id mismatch.');
 patwc_assert_same('DEBIT', $settings->tender_type(), 'Tender type mismatch.');
 patwc_assert_same(2, $settings->print_receipt(), 'Print receipt mismatch.');
 
@@ -243,19 +243,34 @@ $merchantSettings = new Settings(array(
     'connect_client_secret' => 'client-secret',
     'connect_secret_key' => 'merchant-api-token',
     'connect_access_token' => 'connect-access-token',
-    'terminal_registry' => array(array(
-        'terminal_id' => '1850528139',
-        'label' => 'Front Counter A920 (pax_A920) ••••••8139',
-        'enabled' => true,
-    )),
+    'terminal_registry' => array(
+        array(
+            'terminal_id' => 'ABC123',
+            'label' => 'Front Counter A920 (pax_A920) ••C123',
+            'enabled' => true,
+        ),
+        array(
+            'terminal_id' => '42',
+            'label' => 'Back Counter A920 (pax_A920) ••',
+            'enabled' => true,
+        ),
+        array(
+            'terminal_id' => '',
+            'label' => 'Missing identifier',
+            'enabled' => true,
+        ),
+    ),
 ));
 patwc_assert_same('merchant@example.com', $merchantSettings->connect_email(), 'Connect email getter mismatch.');
 patwc_assert_same('0000123456789012', $merchantSettings->connect_mid(), 'Connect MID getter mismatch.');
 patwc_assert_same('merchant-api-token', $merchantSettings->connect_secret_key(), 'Merchant API token getter mismatch.');
 patwc_assert_same('connect-access-token', $merchantSettings->connect_access_token(), 'Connect access token getter mismatch.');
 patwc_assert_same('123456789012', $merchantSettings->tenant_id(), 'Tenant id should derive from last 12 MID digits.');
-patwc_assert_same('1850528139', $merchantSettings->default_terminal_id(), 'Default terminal id should derive from discovered registry when no manual default is stored.');
-patwc_assert_same(array('1850528139' => 'Front Counter A920 (pax_A920) ••••••8139'), $merchantSettings->terminal_registry_options(), 'Terminal registry options mismatch.');
+patwc_assert_same('ABC123', $merchantSettings->default_terminal_id(), 'Default terminal id should derive from the first enabled non-empty registry identifier.');
+patwc_assert_same(array(
+    'ABC123' => 'Front Counter A920 (pax_A920) ••C123',
+    '42' => 'Back Counter A920 (pax_A920) ••',
+), $merchantSettings->terminal_registry_options(), 'Terminal registry options should accept alphanumeric and short identifiers while skipping empty identifiers.');
 $fingerprint = $merchantSettings->connection_fingerprint();
 patwc_assert_same(64, strlen($fingerprint), 'Connection fingerprint should be a SHA-256 HMAC hex string.');
 patwc_assert_same($fingerprint, Settings::connection_fingerprint_for($merchantSettings->all()), 'Static fingerprint helper should match Settings fingerprint.');
@@ -269,6 +284,8 @@ patwc_assert_same('123456789012', $staleTenantSettings->tenant_id(), 'Connect MI
 $diagnostics = $settings->diagnostics();
 patwc_assert_missing_secret($diagnostics, 'api-secret-token');
 patwc_assert_missing_secret($diagnostics, 'callback-secret-token');
+patwc_assert_same(true, $diagnostics['tenant_id_configured'], 'A non-empty non-numeric tenant id should be reported as configured.');
+patwc_assert_same(true, $diagnostics['default_terminal_id_configured'], 'A non-empty alphanumeric terminal id should be reported as configured.');
 
 if (array_key_exists('api_bearer_token', $diagnostics) || array_key_exists('callback_bearer_token', $diagnostics)) {
     throw new RuntimeException('Diagnostics must not include token keys.');
@@ -276,26 +293,26 @@ if (array_key_exists('api_bearer_token', $diagnostics) || array_key_exists('call
 
 $validationErrors = Gateway::validate_settings(array(
     'enabled' => 'yes',
-    'tenant_id' => 'not-12-digits',
-    'default_terminal_id' => '123',
+    'tenant_id' => '',
+    'default_terminal_id' => '',
     'tender_type' => 'CASH',
     'print_receipt' => '9',
 ));
 
 patwc_assert_same(array(
-    'PayArc MID must contain at least 12 digits so the tenant ID can be derived when the gateway is enabled.',
-    'Enter the 10-digit PayArc terminal serial number before enabling the gateway.',
+    'PayArc MID (or tenant id) is required when the gateway is enabled.',
+    'Enter the PayArc terminal serial number before enabling the gateway.',
     'Tender type must be CREDIT or DEBIT.',
     'Print receipt must be one of 0, 1, 2, or 3.',
 ), $validationErrors, 'Gateway validation errors mismatch.');
 
 patwc_assert_same(array(), Gateway::validate_settings(array(
     'enabled' => 'yes',
-    'connect_mid' => '0000123456789012',
-    'default_terminal_id' => '1234567890',
+    'tenant_id' => 'tenant-alpha',
+    'default_terminal_id' => 'ABC123',
     'tender_type' => 'CREDIT',
     'print_receipt' => '0',
-)), 'Valid gateway settings should not return errors.');
+)), 'Non-empty tenant and terminal identifiers should not return format errors.');
 
 $liveValidationSettings = array(
     'enabled' => 'yes',
@@ -351,6 +368,8 @@ patwc_assert_same('text', $gateway->form_fields['connect_mid']['type'], 'Connect
 patwc_assert_same('patwc_secret', $gateway->form_fields['connect_client_secret']['type'], 'ClientSecret field should use the custom secret type.');
 patwc_assert_same('patwc_secret', $gateway->form_fields['connect_secret_key']['type'], 'SecretKey/API bearer field should use the custom secret type.');
 patwc_assert_same('text', $gateway->form_fields['default_terminal_id']['type'], 'Default terminal field should accept a manual terminal serial number.');
+patwc_assert_same(false, isset($gateway->form_fields['default_terminal_id']['custom_attributes']), 'Default terminal field should not impose numeric, length, or pattern restrictions.');
+patwc_assert_same(true, strpos($gateway->form_fields['default_terminal_id']['description'], 'terminal serial number (found on the back of the device)') !== false, 'Default terminal field should explain where to find the unrestricted terminal serial number.');
 patwc_assert_same('patwc_connection', $gateway->form_fields['connection']['type'], 'Gateway should render a PayArc Connect control panel.');
 
 $expectedHook = 'woocommerce_update_options_payment_gateways_' . Settings::GATEWAY_ID;
