@@ -587,10 +587,14 @@ class PayArcConnectionService
 
     private function log_dropped_terminal(Settings $settings, string $reason, string $terminalId): void
     {
-        Logger::log('PayArc terminal record dropped during normalization', $this->connection_log_context($settings, array(
-            'drop_reason' => $reason,
-            'terminal_id_masked' => Settings::mask_identifier($terminalId),
-        )), null, 'warning');
+        try {
+            Logger::log('PayArc terminal record dropped during normalization', $this->connection_log_context($settings, array(
+                'drop_reason' => $reason,
+                'terminal_id_masked' => Settings::mask_identifier($terminalId),
+            )), null, 'warning');
+        } catch (\Throwable $exception) {
+            // Diagnostic logging must not interrupt terminal discovery.
+        }
     }
 
     /**
