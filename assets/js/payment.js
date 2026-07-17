@@ -294,12 +294,12 @@
     }
 
     $(function () {
-        startButton().on('click', function (event) {
+        $(document).on('click', '#patwc-start-payment', function (event) {
             event.preventDefault();
             startPayment();
         });
 
-        cancelButton().on('click', function (event) {
+        $(document).on('click', '#patwc-cancel-payment', function (event) {
             event.preventDefault();
             cancelPayment();
         });
