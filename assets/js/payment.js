@@ -14,8 +14,12 @@
         retry: 'Payment was not approved. Please check the terminal and try again.',
         canceling: 'Cancel requested. Waiting for final terminal status...',
         timeout: 'Payment timed out while waiting for the terminal. Check the terminal before retrying.',
-        error: 'Unable to contact the payment service. Please try again.'
+        error: 'Unable to contact the payment service. Please try again.',
+        notAuthorized: 'Payment is unavailable: this session is not authorized for this order. Refresh the page or reopen the order, then try again.',
+        showLog: 'Show activity',
+        hideLog: 'Hide activity'
     }, config.strings || {});
+    var maxLogEntries = 200;
 
     function panel() {
         return $('#patwc-payment-panel');
@@ -46,6 +50,16 @@
         appendLog(message);
     }
 
+    function logTimestamp() {
+        var now = new Date();
+
+        function pad(value) {
+            return (value < 10 ? '0' : '') + value;
+        }
+
+        return pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
+    }
+
     function appendLog(message) {
         var $log = logContainer();
 
@@ -55,8 +69,55 @@
 
         $('<div/>', {
             'class': 'patwc-payment-log__entry',
-            text: message
+            text: '[' + logTimestamp() + '] ' + message
         }).appendTo($log);
+
+        var $entries = $log.children();
+        if ($entries.length > maxLogEntries) {
+            $entries.slice(1, $entries.length - maxLogEntries + 1).remove();
+        }
+
+        if ($log[0]) {
+            $log[0].scrollTop = $log[0].scrollHeight;
+        }
+    }
+
+    function bodyMessage(body) {
+        if (!body || typeof body !== 'object') {
+            return '';
+        }
+
+        if (typeof body.message === 'string' && $.trim(body.message) !== '') {
+            return $.trim(body.message);
+        }
+
+        if (body.data && typeof body.data === 'object' && typeof body.data.message === 'string') {
+            return $.trim(body.data.message);
+        }
+
+        return '';
+    }
+
+    function failMessage(xhr) {
+        var message = bodyMessage(xhr && xhr.responseJSON);
+
+        if (!message && xhr && typeof xhr.responseText === 'string' && xhr.responseText !== '') {
+            try {
+                message = bodyMessage(JSON.parse(xhr.responseText));
+            } catch (parseError) {
+                message = '';
+            }
+        }
+
+        if (!message) {
+            message = strings.error;
+        }
+
+        if (xhr && xhr.status) {
+            return message + ' (HTTP ' + xhr.status + ')';
+        }
+
+        return message;
     }
 
     function ajaxData(action) {
@@ -118,7 +179,7 @@
             return;
         }
 
-        appendLog('Payment approved, but the order form could not be found. Please refresh the page.');
+        setStatus('Payment approved, but the order form could not be found. Please refresh the page.');
     }
 
     function finishAsRetry(message) {
@@ -168,8 +229,8 @@
                         schedulePoll();
                     }
                 })
-                .fail(function () {
-                    finishAsRetry(strings.error);
+                .fail(function (xhr) {
+                    finishAsRetry(failMessage(xhr));
                 });
         }, pollInterval);
     }
@@ -189,8 +250,8 @@
                     schedulePoll();
                 }
             })
-            .fail(function () {
-                finishAsRetry(strings.error);
+            .fail(function (xhr) {
+                finishAsRetry(failMessage(xhr));
             });
     }
 
@@ -206,21 +267,55 @@
                     schedulePoll();
                 }
             })
-            .fail(function () {
+            .fail(function (xhr) {
                 cancelButton().prop('disabled', false);
-                setStatus(strings.error);
+                setStatus(failMessage(xhr));
             });
     }
 
+    function toggleLog() {
+        var $log = logContainer();
+        var $toggle = $('#patwc-toggle-payment-log');
+        var $clear = $('#patwc-clear-payment-log');
+        var hidden = $log.is('[hidden]');
+
+        if (hidden) {
+            $log.removeAttr('hidden');
+            $toggle.text(strings.hideLog).attr('aria-expanded', 'true');
+            $clear.removeAttr('hidden');
+            if ($log[0]) {
+                $log[0].scrollTop = $log[0].scrollHeight;
+            }
+        } else {
+            $log.attr('hidden', 'hidden');
+            $toggle.text(strings.showLog).attr('aria-expanded', 'false');
+            $clear.attr('hidden', 'hidden');
+        }
+    }
+
     $(function () {
-        startButton().on('click', function (event) {
+        $(document).on('click', '#patwc-start-payment', function (event) {
             event.preventDefault();
             startPayment();
         });
 
-        cancelButton().on('click', function (event) {
+        $(document).on('click', '#patwc-cancel-payment', function (event) {
             event.preventDefault();
             cancelPayment();
         });
+
+        $(document).on('click', '#patwc-toggle-payment-log', function (event) {
+            event.preventDefault();
+            toggleLog();
+        });
+
+        $(document).on('click', '#patwc-clear-payment-log', function (event) {
+            event.preventDefault();
+            logContainer().empty();
+        });
+
+        if (config.authorized === false) {
+            appendLog(strings.notAuthorized);
+        }
     });
 })(jQuery);

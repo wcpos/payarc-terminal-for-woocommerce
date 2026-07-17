@@ -377,12 +377,24 @@ trait GatewayImplementation
         echo '<span class="patwc-payment-panel__order">' . $this->escape_html('Order #' . (string) $orderId) . '</span>';
         echo '</div>';
         echo '<p class="patwc-payment-panel__description">' . $this->escape_html('Start the in-person terminal payment, then wait for the terminal result before completing the order.') . '</p>';
-        echo '<div id="patwc-payment-status" class="patwc-payment-status" role="status" aria-live="polite">' . $this->escape_html('Ready to start payment.') . '</div>';
+        $initialStatus = $authorized
+            ? 'Ready to start payment.'
+            : 'Payment is unavailable: this session is not authorized for this order. Refresh the page or reopen the order, then try again.';
+        echo '<div id="patwc-payment-status" class="patwc-payment-status' . (!$authorized ? ' patwc-payment-status--blocked' : '') . '" role="status" aria-live="polite">' . $this->escape_html($initialStatus) . '</div>';
         echo '<div class="patwc-payment-actions">';
         echo '<button type="button" id="patwc-start-payment" class="button alt patwc-start-payment"' . (!$authorized ? ' disabled="disabled"' : '') . '>' . $this->escape_html('Start Payment') . '</button>';
         echo '<button type="button" id="patwc-cancel-payment" class="button patwc-cancel-payment" hidden="hidden">' . $this->escape_html('Cancel Payment') . '</button>';
         echo '</div>';
-        echo '<div id="patwc-payment-log" class="patwc-payment-log" aria-live="polite" aria-label="' . $this->escape_attr('Payment log') . '"></div>';
+        echo '<div class="patwc-payment-log-section">';
+        echo '<div class="patwc-payment-log-section__header">';
+        echo '<span class="patwc-payment-log-section__title">' . $this->escape_html('Payment activity') . '</span>';
+        echo '<span class="patwc-payment-log-section__buttons">';
+        echo '<button type="button" id="patwc-toggle-payment-log" class="button-link patwc-toggle-payment-log" aria-expanded="false" aria-controls="patwc-payment-log">' . $this->escape_html('Show activity') . '</button>';
+        echo '<button type="button" id="patwc-clear-payment-log" class="button-link patwc-clear-payment-log" hidden="hidden">' . $this->escape_html('Clear') . '</button>';
+        echo '</span>';
+        echo '</div>';
+        echo '<div id="patwc-payment-log" class="patwc-payment-log" hidden="hidden" aria-live="polite" aria-label="' . $this->escape_attr('Payment activity log') . '"></div>';
+        echo '</div>';
         echo '</div>';
     }
 
@@ -852,6 +864,7 @@ trait GatewayImplementation
                 'nonce' => function_exists('wp_create_nonce') ? wp_create_nonce('patwc_payment') : '',
                 'orderId' => $this->order_id($order),
                 'orderToken' => $authorized && class_exists(__NAMESPACE__ . '\\AjaxHandler') ? AjaxHandler::order_token_for($order) : '',
+                'authorized' => $authorized,
                 'pollInterval' => 1500,
                 'timeoutMs' => 300000,
                 'strings' => array(
@@ -863,6 +876,9 @@ trait GatewayImplementation
                     'canceling' => 'Cancel requested. Waiting for final terminal status...',
                     'timeout' => 'Payment timed out while waiting for the terminal. Check the terminal before retrying.',
                     'error' => 'Unable to contact the payment service. Please try again.',
+                    'notAuthorized' => 'Payment is unavailable: this session is not authorized for this order. Refresh the page or reopen the order, then try again.',
+                    'showLog' => 'Show activity',
+                    'hideLog' => 'Hide activity',
                 ),
             ));
         }
