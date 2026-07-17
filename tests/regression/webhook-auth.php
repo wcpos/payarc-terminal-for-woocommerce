@@ -199,6 +199,14 @@ patwc_webhook_assert_same(401, $nonBearer['status_code'], 'Non-bearer Authorizat
 
 $wrongBearer = $handler->handle_request('{"traceId":"trace-webhook-1"}', array('HTTP_AUTHORIZATION' => 'Bearer wrong-token', 'REMOTE_ADDR' => $clientAddress));
 patwc_webhook_assert_same(401, $wrongBearer['status_code'], 'Wrong bearer token should return 401.');
+$rejectedLogs = patwc_webhook_logs('PayArc callback rejected');
+$rejectionReasons = array_map(static function (array $entry): string {
+    return (string) $entry['context']['reason'];
+}, $rejectedLogs);
+patwc_webhook_assert_same(true, in_array('callback_token_not_configured', $rejectionReasons, true), 'Callback rejection log should identify an unconfigured expected token.');
+patwc_webhook_assert_same(true, in_array('missing_authorization_header', $rejectionReasons, true), 'Callback rejection log should identify a missing Authorization header.');
+patwc_webhook_assert_same(true, in_array('malformed_authorization_header', $rejectionReasons, true), 'Callback rejection log should identify malformed Authorization.');
+patwc_webhook_assert_same(true, in_array('token_mismatch', $rejectionReasons, true), 'Callback rejection log should identify a token mismatch.');
 patwc_webhook_assert_logs_hide('received-token', 'Callback rejection logs must not contain a received bearer token.');
 patwc_webhook_assert_logs_hide('wrong-token', 'Callback mismatch logs must not contain the mismatched bearer token.');
 patwc_webhook_assert_logs_hide('expected-token', 'Callback logs must not contain the configured bearer token.');
@@ -207,7 +215,7 @@ $fifthRejection = $handler->handle_request('{"traceId":"trace-webhook-1"}', arra
 $suppressedRejection = $handler->handle_request('{"traceId":"trace-webhook-1"}', array('REMOTE_ADDR' => $clientAddress));
 patwc_webhook_assert_same(401, $fifthRejection['status_code'], 'Fifth callback rejection should still return 401.');
 patwc_webhook_assert_same(401, $suppressedRejection['status_code'], 'Suppressed callback rejection should still return 401.');
-patwc_webhook_assert_same(0, count(patwc_webhook_logs('PayArc callback rejected')), 'Unauthenticated callback rejections should not write warning logs.');
+patwc_webhook_assert_same(5, count(patwc_webhook_logs('PayArc callback rejected')), 'Callback rejection warnings should be limited to five per client address per minute.');
 
 $invalidJson = $handler->handle_request('{invalid json', array('HTTP_AUTHORIZATION' => 'Bearer expected-token'));
 patwc_webhook_assert_same(400, $invalidJson['status_code'], 'Valid bearer with invalid JSON should return 400.');
