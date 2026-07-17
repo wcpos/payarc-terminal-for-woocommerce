@@ -218,6 +218,17 @@ class AjaxHandler
                 $body = $this->payment_service->cancel_order_payment($order);
             }
         } catch (Throwable $exception) {
+            try {
+                Logger::log('PayArc payment action failed', array(
+                    'action' => $action,
+                    'order_id' => $orderId,
+                    'exception_class' => get_class($exception),
+                    'message' => Logger::redact_untrusted_text($exception->getMessage()),
+                ), null, 'error');
+            } catch (Throwable $loggingException) {
+                // Diagnostic logging must not interrupt the error response.
+            }
+
             return $this->maybe_emit($this->error_response(500, 'Unable to process payment request.'), $emit);
         }
 

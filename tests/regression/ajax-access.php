@@ -436,13 +436,23 @@ try {
     $throwingService = new class extends PatwcAjaxFakePaymentService {
         public function start_payment_for_order($order, string $terminal_id = ''): array
         {
-            throw new RuntimeException('secret-token leaked');
+            throw new RuntimeException('Payment failed access_token fixture-ajax-access-token.');
         }
     };
     $throwingHandler = patwc_ajax_handler($throwingService, $orders);
     $exceptionResponse = $throwingHandler->handle_start(array('order_id' => '1001', '_ajax_nonce' => 'valid-payment-nonce'));
     patwc_ajax_assert_same(500, $exceptionResponse['status_code'], 'Exceptions should return 500.');
     patwc_ajax_assert_same('Unable to process payment request.', $exceptionResponse['body']['message'], 'Exceptions should not leak raw messages.');
+    $encodedPaymentLogs = json_encode($GLOBALS['patwc_captured_logs']);
+    if (!is_string($encodedPaymentLogs)) {
+        throw new RuntimeException('Unable to encode payment action failure logs.');
+    }
+    patwc_ajax_assert_contains('PayArc payment action failed', $encodedPaymentLogs, 'Payment action failures should be written to WooCommerce logs.');
+    patwc_ajax_assert_contains('"action":"start"', $encodedPaymentLogs, 'Payment action failure logs should include the action.');
+    patwc_ajax_assert_contains('"order_id":1001', $encodedPaymentLogs, 'Payment action failure logs should include the order id.');
+    patwc_ajax_assert_contains('"exception_class":"RuntimeException"', $encodedPaymentLogs, 'Payment action failure logs should include the exception class.');
+    patwc_ajax_assert_contains('access_token=[REDACTED]', $encodedPaymentLogs, 'Payment action failure logs should redact untrusted exception text.');
+    patwc_ajax_assert_true(strpos($encodedPaymentLogs, 'fixture-ajax-access-token') === false, 'Payment action failure logs should not include access tokens.');
 } finally {
     // no-op; keeps the exception regression close to the handler contract.
 }

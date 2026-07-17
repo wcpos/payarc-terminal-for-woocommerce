@@ -16,6 +16,7 @@ use WCPOS\WooCommercePOS\PayArcTerminal\WebhookHandler;
 $root = dirname(__DIR__, 2);
 foreach (array(
     $root . '/includes/Settings.php',
+    $root . '/includes/Logger.php',
     $root . '/includes/PaymentAttempt.php',
     $root . '/includes/PaymentLock.php',
     $root . '/includes/Services/TerminalService.php',
@@ -137,7 +138,7 @@ function patwc_webhook_assert_same($expected, $actual, string $message): void
     }
 }
 
-function patwc_webhook_handler(PatwcWebhookAuthFakeClient $client, PatwcWebhookAuthFakeReconciler $reconciler, PatwcWebhookAuthOrder $order): WebhookHandler
+function patwc_webhook_handler(PatwcWebhookAuthFakeClient $client, PatwcWebhookAuthFakeReconciler $reconciler, PatwcWebhookAuthOrder $order, string $callbackToken = 'expected-token'): WebhookHandler
 {
     $locator = function (array $criteria) use ($order) {
         if (isset($criteria['order_id']) && (string) $criteria['order_id'] === (string) $order->get_id()) {
@@ -155,7 +156,27 @@ function patwc_webhook_handler(PatwcWebhookAuthFakeClient $client, PatwcWebhookA
         return null;
     };
 
-    return new WebhookHandler(new Settings(array('callback_bearer_token' => 'expected-token')), $client, $reconciler, $locator);
+    return new WebhookHandler(new Settings(array('callback_bearer_token' => $callbackToken)), $client, $reconciler, $locator);
+}
+
+/**
+ * @return array<int, array<string, mixed>>
+ */
+function patwc_webhook_logs(string $message): array
+{
+    return array_values(array_filter($GLOBALS['patwc_captured_logs'], static function (array $entry) use ($message): bool {
+        return $entry['message'] === $message;
+    }));
+}
+
+function patwc_webhook_assert_logs_hide(string $secret, string $message): void
+{
+    $encoded = json_encode($GLOBALS['patwc_captured_logs']);
+    if (!is_string($encoded)) {
+        throw new RuntimeException('Unable to encode captured webhook logs.');
+    }
+
+    patwc_webhook_assert_same(false, $secret !== '' && strpos($encoded, $secret) !== false, $message);
 }
 
 $order = new PatwcWebhookAuthOrder(2001);
@@ -163,6 +184,11 @@ PaymentAttempt::record_new($order, array('status' => 'processing', 'trace_id' =>
 $client = new PatwcWebhookAuthFakeClient();
 $reconciler = new PatwcWebhookAuthFakeReconciler();
 $handler = patwc_webhook_handler($client, $reconciler, $order);
+$GLOBALS['patwc_captured_logs'] = array();
+
+$unconfiguredHandler = patwc_webhook_handler($client, $reconciler, $order, '');
+$unconfigured = $unconfiguredHandler->handle_request('{"traceId":"trace-webhook-1"}', array('HTTP_AUTHORIZATION' => 'Bearer received-token'));
+patwc_webhook_assert_same(401, $unconfigured['status_code'], 'Unconfigured callback token should return 401.');
 
 $missingAuth = $handler->handle_request('{"traceId":"trace-webhook-1"}', array());
 patwc_webhook_assert_same(401, $missingAuth['status_code'], 'Missing Authorization should return 401.');
@@ -172,18 +198,37 @@ patwc_webhook_assert_same(401, $nonBearer['status_code'], 'Non-bearer Authorizat
 
 $wrongBearer = $handler->handle_request('{"traceId":"trace-webhook-1"}', array('HTTP_AUTHORIZATION' => 'Bearer wrong-token'));
 patwc_webhook_assert_same(401, $wrongBearer['status_code'], 'Wrong bearer token should return 401.');
+$rejectedLogs = patwc_webhook_logs('PayArc callback rejected');
+$rejectionReasons = array_map(static function (array $entry): string {
+    return (string) $entry['context']['reason'];
+}, $rejectedLogs);
+patwc_webhook_assert_same(true, in_array('callback_token_not_configured', $rejectionReasons, true), 'Callback rejection log should identify an unconfigured expected token.');
+patwc_webhook_assert_same(true, in_array('missing_authorization_header', $rejectionReasons, true), 'Callback rejection log should identify a missing Authorization header.');
+patwc_webhook_assert_same(true, in_array('malformed_authorization_header', $rejectionReasons, true), 'Callback rejection log should identify malformed Authorization.');
+patwc_webhook_assert_same(true, in_array('token_mismatch', $rejectionReasons, true), 'Callback rejection log should identify a token mismatch.');
+patwc_webhook_assert_logs_hide('received-token', 'Callback rejection logs must not contain a received bearer token.');
+patwc_webhook_assert_logs_hide('wrong-token', 'Callback mismatch logs must not contain the mismatched bearer token.');
+patwc_webhook_assert_logs_hide('expected-token', 'Callback logs must not contain the configured bearer token.');
 
 $invalidJson = $handler->handle_request('{invalid json', array('HTTP_AUTHORIZATION' => 'Bearer expected-token'));
 patwc_webhook_assert_same(400, $invalidJson['status_code'], 'Valid bearer with invalid JSON should return 400.');
 
 $valid = $handler->handle_request(json_encode(array(
     'traceId' => 'trace-webhook-1',
+    'transactionId' => 'txn-webhook-1',
     'status' => 'SUCCESS',
     'metadata' => array('order_id' => '2001'),
 )), array('HTTP_AUTHORIZATION' => 'Bearer expected-token'));
 patwc_webhook_assert_same(200, $valid['status_code'], 'Valid final callback with trace id should return 200.');
 patwc_webhook_assert_same(array('trace-webhook-1'), $client->get_calls, 'Valid trace callback should fetch authoritative transaction by trace id.');
 patwc_webhook_assert_same(array(array('order_id' => 2001, 'payload' => $client->transaction_response, 'source' => 'webhook')), $reconciler->calls, 'Valid trace callback should reconcile fetched transaction payload.');
+$acceptedLogs = patwc_webhook_logs('PayArc callback accepted');
+patwc_webhook_assert_same(1, count($acceptedLogs), 'Valid callback should emit one accepted log.');
+patwc_webhook_assert_same('info', $acceptedLogs[0]['level'], 'Accepted callback log should use info level.');
+patwc_webhook_assert_same(Settings::mask_identifier('trace-webhook-1'), $acceptedLogs[0]['context']['trace_id_masked'], 'Accepted callback log should mask trace id.');
+patwc_webhook_assert_same('txn-webhook-1', $acceptedLogs[0]['context']['transaction_id'], 'Accepted callback log should include transaction id when provided.');
+patwc_webhook_assert_logs_hide('trace-webhook-1', 'Accepted callback logs must not contain raw trace ids.');
+patwc_webhook_assert_logs_hide('expected-token', 'Accepted callback logs must not contain the configured bearer token.');
 
 $noTraceOrder = new PatwcWebhookAuthOrder(2002);
 PaymentAttempt::record_new($noTraceOrder, array('status' => 'processing', 'transaction_id' => 'txn-no-trace'));

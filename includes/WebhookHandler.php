@@ -74,7 +74,10 @@ class WebhookHandler
      */
     public function handle_request(string $rawBody, array $server = array()): array
     {
-        if (!$this->is_authorized($server)) {
+        $authorizationFailure = $this->authorization_failure_reason($server);
+        if ($authorizationFailure !== '') {
+            $this->log('PayArc callback rejected', array('reason' => $authorizationFailure), 'warning');
+
             return $this->response(401, array('error' => 'unauthorized'));
         }
 
@@ -85,6 +88,10 @@ class WebhookHandler
 
         $traceId = $this->extract_scalar($payload, 'traceId');
         $transactionId = $this->extract_scalar($payload, 'transactionId');
+        $this->log('PayArc callback accepted', array(
+            'trace_id_masked' => Settings::mask_identifier($traceId),
+            'transaction_id' => $transactionId,
+        ));
         $order = $this->locate_order($payload, $traceId, $transactionId);
         if (!is_object($order)) {
             return $this->response(404, array('error' => 'order_not_found'));
@@ -148,32 +155,32 @@ class WebhookHandler
     /**
      * @param array<string, mixed> $server
      */
-    private function is_authorized(array $server): bool
+    private function authorization_failure_reason(array $server): string
     {
         $expected = $this->settings->callback_bearer_token();
         if ($expected === '') {
-            return false;
+            return 'callback_token_not_configured';
         }
 
         $authorization = $this->authorization_header($server);
         if ($authorization === '') {
-            return false;
+            return 'missing_authorization_header';
         }
 
         if (preg_match('/^Bearer\s+(.+)$/i', $authorization, $matches) !== 1) {
-            return false;
+            return 'malformed_authorization_header';
         }
 
         $actual = trim($matches[1]);
         if ($actual === '') {
-            return false;
+            return 'malformed_authorization_header';
         }
 
         if (function_exists('hash_equals')) {
-            return hash_equals($expected, $actual);
+            return hash_equals($expected, $actual) ? '' : 'token_mismatch';
         }
 
-        return $expected === $actual;
+        return $expected === $actual ? '' : 'token_mismatch';
     }
 
     /**
@@ -272,6 +279,18 @@ class WebhookHandler
     private function extract_scalar(array $payload, string $key): string
     {
         return isset($payload[$key]) && is_scalar($payload[$key]) ? trim((string) $payload[$key]) : '';
+    }
+
+    /**
+     * @param array<string, mixed> $context
+     */
+    private function log(string $message, array $context, string $level = 'info'): void
+    {
+        try {
+            Logger::log($message, $context, null, $level);
+        } catch (Throwable $exception) {
+            // Diagnostic logging must not interrupt callback processing.
+        }
     }
 
     /**

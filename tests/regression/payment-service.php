@@ -16,6 +16,7 @@ use WCPOS\WooCommercePOS\PayArcTerminal\Utils\PayArcIds;
 $root = dirname(__DIR__, 2);
 foreach (array(
     $root . '/includes/Settings.php',
+    $root . '/includes/Logger.php',
     $root . '/includes/PaymentAttempt.php',
     $root . '/includes/PaymentLock.php',
     $root . '/includes/Utils/Money.php',
@@ -171,6 +172,9 @@ class PatwcPaymentServiceFakeClient
     /** @var array<string, mixed> */
     public $sale_response = array('traceId' => 'trace-sync-001', 'response' => array('status' => 'ACCEPTED'));
 
+    /** @var Throwable|null */
+    public $sale_exception = null;
+
     /** @var array<string, mixed> */
     public $transaction_response = array('traceId' => 'trace-sync-001', 'status' => 'APPROVED');
 
@@ -193,6 +197,10 @@ class PatwcPaymentServiceFakeClient
 
         if ($this->sale_callback !== null) {
             call_user_func($this->sale_callback, $payload, $idempotency_key);
+        }
+
+        if ($this->sale_exception instanceof Throwable) {
+            throw $this->sale_exception;
         }
 
         return $this->sale_response;
@@ -266,6 +274,26 @@ function patwc_payment_service_assert_false($actual, string $message): void
     patwc_payment_service_assert_same(false, $actual, $message);
 }
 
+/**
+ * @return array<int, array<string, mixed>>
+ */
+function patwc_payment_service_logs(string $message): array
+{
+    return array_values(array_filter($GLOBALS['patwc_captured_logs'], static function (array $entry) use ($message): bool {
+        return $entry['message'] === $message;
+    }));
+}
+
+function patwc_payment_service_assert_logs_hide(string $secret, string $message): void
+{
+    $encoded = json_encode($GLOBALS['patwc_captured_logs']);
+    if (!is_string($encoded)) {
+        throw new RuntimeException('Unable to encode captured payment logs.');
+    }
+
+    patwc_payment_service_assert_false($secret !== '' && strpos($encoded, $secret) !== false, $message);
+}
+
 function patwc_payment_service_settings(array $overrides = array()): Settings
 {
     return new Settings(array_merge(array(
@@ -334,6 +362,7 @@ patwc_payment_service_assert_same(1, count($emptyRegistryClient->sale_calls), 'A
 patwc_payment_service_assert_same('1234567890', $emptyRegistryClient->sale_calls[0]['payload']['terminalId'], 'Sale should use the configured terminal serial number as V3 terminalId.');
 
 patwc_payment_service_reset_uuids(array('550e8400-e29b-41d4-a716-446655440000', '550e8400-e29b-41d4-a716-446655440001'));
+$GLOBALS['patwc_captured_logs'] = array();
 $client = new PatwcPaymentServiceFakeClient();
 $client->sale_callback = function () use (&$client): void {
     patwc_payment_service_assert_true(PaymentAttempt::has_in_flight_attempts(), 'Payment attempt should be marked in-flight before the external PayArc sale call starts.');
@@ -363,6 +392,42 @@ patwc_payment_service_assert_same($client->sale_response, $started['sale_respons
 patwc_payment_service_assert_same($expectedTransactionId, $order->meta[PaymentAttempt::META_CURRENT_TRANSACTION_ID], 'Current transaction id meta should be stored.');
 patwc_payment_service_assert_same('trace-sync-001', $order->meta[PaymentAttempt::META_CURRENT_TRACE_ID], 'Current trace id meta should be stored.');
 patwc_payment_service_assert_same($started, PaymentAttempt::current($order), 'Current attempt should be stored.');
+$saleStartedLogs = patwc_payment_service_logs('PayArc sale started');
+$saleAcceptedLogs = patwc_payment_service_logs('PayArc sale accepted');
+patwc_payment_service_assert_same(1, count($saleStartedLogs), 'Sale should emit one started log.');
+patwc_payment_service_assert_same('info', $saleStartedLogs[0]['level'], 'Sale started log should use info level.');
+patwc_payment_service_assert_same(123, $saleStartedLogs[0]['context']['order_id'], 'Sale started log should include order id.');
+patwc_payment_service_assert_same('test', $saleStartedLogs[0]['context']['mode'], 'Sale started log should include mode.');
+patwc_payment_service_assert_same(Settings::mask_identifier('1234567890'), $saleStartedLogs[0]['context']['terminal_id_masked'], 'Sale started log should mask terminal id.');
+patwc_payment_service_assert_same('DEBIT', $saleStartedLogs[0]['context']['tender_type'], 'Sale started log should include tender type.');
+patwc_payment_service_assert_same(1023, $saleStartedLogs[0]['context']['amount_total'], 'Sale started log should include minor-unit amount total.');
+patwc_payment_service_assert_same('USD', $saleStartedLogs[0]['context']['currency'], 'Sale started log should include currency.');
+patwc_payment_service_assert_same($expectedTransactionId, $saleStartedLogs[0]['context']['transaction_id'], 'Sale started log should include client transaction id.');
+patwc_payment_service_assert_same(true, $saleStartedLogs[0]['context']['has_callback_url'], 'Sale started log should report callback URL presence.');
+patwc_payment_service_assert_same(1, count($saleAcceptedLogs), 'Sale should emit one accepted log.');
+patwc_payment_service_assert_same(true, $saleAcceptedLogs[0]['context']['trace_id_returned'], 'Sale accepted log should report a returned trace id.');
+patwc_payment_service_assert_same(Settings::mask_identifier('trace-sync-001'), $saleAcceptedLogs[0]['context']['trace_id_masked'], 'Sale accepted log should mask trace id.');
+patwc_payment_service_assert_logs_hide('1234567890', 'Sale logs must not contain the raw terminal id.');
+patwc_payment_service_assert_logs_hide('trace-sync-001', 'Sale logs must not contain the raw trace id.');
+
+patwc_payment_service_reset_uuids(array('attempt-sale-failure', 'idem-sale-failure'));
+$GLOBALS['patwc_captured_logs'] = array();
+$saleFailureClient = new PatwcPaymentServiceFakeClient();
+$saleFailureClient->sale_exception = new RuntimeException('PayArc rejected access_token fixture-access-token.');
+$saleFailureService = patwc_payment_service_make_service(patwc_payment_service_settings(array('connect_access_token' => 'fixture-access-token')), $saleFailureClient);
+try {
+    $saleFailureService->start_payment_for_order(new PatwcPaymentServiceOrder(136));
+    throw new RuntimeException('Sale failure should be rethrown.');
+} catch (RuntimeException $exception) {
+    patwc_payment_service_assert_same('PayArc rejected access_token fixture-access-token.', $exception->getMessage(), 'Sale failure should be rethrown unchanged.');
+}
+$saleFailureLogs = patwc_payment_service_logs('PayArc sale request failed');
+patwc_payment_service_assert_same(1, count($saleFailureLogs), 'Sale failure should emit one error log.');
+patwc_payment_service_assert_same('error', $saleFailureLogs[0]['level'], 'Sale failure log should use error level.');
+patwc_payment_service_assert_same(RuntimeException::class, $saleFailureLogs[0]['context']['exception_class'], 'Sale failure log should include exception class.');
+patwc_payment_service_assert_same('PayArc rejected access_token=[REDACTED]', $saleFailureLogs[0]['context']['message'], 'Sale failure log should redact untrusted exception text.');
+patwc_payment_service_assert_logs_hide('fixture-access-token', 'Sale failure logs must not contain access tokens.');
+patwc_payment_service_assert_logs_hide('1234567890', 'Sale failure logs must not contain the raw terminal id.');
 
 $paidClient = new PatwcPaymentServiceFakeClient();
 $paidService = patwc_payment_service_make_service(patwc_payment_service_settings(), $paidClient);
@@ -399,6 +464,11 @@ $pollResult = $pollService->poll_order($pollOrder);
 patwc_payment_service_assert_same($reconciler->result, $pollResult, 'Poll should return reconciler result.');
 patwc_payment_service_assert_same(array(array('trace_id' => 'trace-poll-001')), $pollClient->get_calls, 'Poll should fetch transaction by trace id.');
 patwc_payment_service_assert_same(array(array('order_id' => 127, 'payload' => $pollClient->transaction_response, 'source' => 'poll')), $reconciler->calls, 'Poll should pass lookup payload to reconciler.');
+$resolvedLogs = patwc_payment_service_logs('PayArc payment attempt resolved');
+patwc_payment_service_assert_same(1, count($resolvedLogs), 'A poll resolving an attempt should emit one resolution log.');
+patwc_payment_service_assert_same('success', $resolvedLogs[0]['context']['status'], 'Resolution log should include final status.');
+patwc_payment_service_assert_same(Settings::mask_identifier('trace-poll-001'), $resolvedLogs[0]['context']['trace_id_masked'], 'Resolution log should mask trace id.');
+patwc_payment_service_assert_logs_hide('trace-poll-001', 'Resolution logs must not contain the raw trace id.');
 $throttled = $pollService->poll_order($pollOrder);
 patwc_payment_service_assert_same('processing', $throttled['status'], 'Immediate second poll should return local non-final status.');
 patwc_payment_service_assert_true($throttled['continue_polling'], 'Immediate second poll should continue polling.');
@@ -417,6 +487,7 @@ patwc_payment_service_assert_true(strpos($cancelNoTrace['message'], 'PayArc did 
 patwc_payment_service_assert_same(0, count($cancelNoTraceClient->cancel_calls), 'Cancel without trace should not call PayArc cancel.');
 
 patwc_payment_service_reset_uuids(array('550e8400-e29b-41d4-a716-446655440099'));
+$GLOBALS['patwc_captured_logs'] = array();
 $cancelClient = new PatwcPaymentServiceFakeClient();
 $cancelService = patwc_payment_service_make_service(patwc_payment_service_settings(), $cancelClient);
 $cancelOrder = new PatwcPaymentServiceOrder(129);
@@ -431,6 +502,31 @@ patwc_payment_service_assert_same(array(array(
 patwc_payment_service_assert_same('cancel_requested', PaymentAttempt::current($cancelOrder)['status'], 'Cancel should update current attempt status.');
 
 patwc_payment_service_assert_true(isset($cancelResult['continue_polling']) && $cancelResult['continue_polling'] === true, 'Accepted cancel should tell UI to continue polling.');
+$cancelRequestedLogs = patwc_payment_service_logs('PayArc cancel requested');
+patwc_payment_service_assert_same(1, count($cancelRequestedLogs), 'Cancel should emit one requested log.');
+patwc_payment_service_assert_same(129, $cancelRequestedLogs[0]['context']['order_id'], 'Cancel requested log should include order id.');
+patwc_payment_service_assert_same(Settings::mask_identifier('trace-cancel-001'), $cancelRequestedLogs[0]['context']['trace_id_masked'], 'Cancel requested log should mask trace id.');
+patwc_payment_service_assert_logs_hide('trace-cancel-001', 'Cancel requested logs must not contain raw trace ids.');
+
+patwc_payment_service_reset_uuids(array('idem-cancel-failure'));
+$GLOBALS['patwc_captured_logs'] = array();
+$cancelFailureClient = new PatwcPaymentServiceFakeClient();
+$cancelFailureClient->cancel_response = new RuntimeException('Cancel rejected token fixture-cancel-token.');
+$cancelFailureService = patwc_payment_service_make_service(patwc_payment_service_settings(), $cancelFailureClient);
+$cancelFailureOrder = new PatwcPaymentServiceOrder(137);
+PaymentAttempt::record_new($cancelFailureOrder, array('status' => 'processing', 'trace_id' => 'trace-cancel-failure', 'transaction_id' => 'txn-cancel-failure', 'terminal_id' => '1234567890'));
+try {
+    $cancelFailureService->cancel_order_payment($cancelFailureOrder);
+    throw new RuntimeException('Cancel failure should be rethrown.');
+} catch (RuntimeException $exception) {
+    patwc_payment_service_assert_same('Cancel rejected token fixture-cancel-token.', $exception->getMessage(), 'Cancel failure should be rethrown unchanged.');
+}
+$cancelFailureLogs = patwc_payment_service_logs('PayArc cancel request failed');
+patwc_payment_service_assert_same(1, count($cancelFailureLogs), 'Cancel failure should emit one error log.');
+patwc_payment_service_assert_same(RuntimeException::class, $cancelFailureLogs[0]['context']['exception_class'], 'Cancel failure log should include exception class.');
+patwc_payment_service_assert_same('Cancel rejected token=[REDACTED]', $cancelFailureLogs[0]['context']['message'], 'Cancel failure log should redact untrusted exception text.');
+patwc_payment_service_assert_logs_hide('fixture-cancel-token', 'Cancel failure logs must not contain access tokens.');
+patwc_payment_service_assert_logs_hide('trace-cancel-failure', 'Cancel failure logs must not contain raw trace ids.');
 
 patwc_payment_service_reset_uuids(array('550e8400-e29b-41d4-a716-446655440101', '550e8400-e29b-41d4-a716-446655440102'));
 $restartAfterCancelClient = new PatwcPaymentServiceFakeClient();
