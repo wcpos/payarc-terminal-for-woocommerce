@@ -304,12 +304,12 @@
             cancelPayment();
         });
 
-        $('#patwc-toggle-payment-log').on('click', function (event) {
+        $(document).on('click', '#patwc-toggle-payment-log', function (event) {
             event.preventDefault();
             toggleLog();
         });
 
-        $('#patwc-clear-payment-log').on('click', function (event) {
+        $(document).on('click', '#patwc-clear-payment-log', function (event) {
             event.preventDefault();
             logContainer().empty();
         });
