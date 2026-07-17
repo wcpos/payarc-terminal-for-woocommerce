@@ -194,6 +194,12 @@ class PatwcAjaxFakeConnectionService
         'default_terminal_id_configured' => true,
         'terminal_count' => 1,
         'terminals' => array(array('terminal_id' => '1850528139', 'label' => 'Front Counter ••••••8139')),
+        'unidentified_terminal_count' => 1,
+        'unidentified_terminals' => array(
+            array('label' => 'Back Counter (pax_A920) Not configured', 'device_id' => '00000000004299'),
+            array('label' => ''),
+            'not-an-array',
+        ),
     );
 
     /** @var Throwable|null */
@@ -467,6 +473,8 @@ $connect = $handler->handle_connect_payarc(array(
 patwc_ajax_assert_same(200, $connect['status_code'], 'Manager should connect PayArc settings.');
 patwc_ajax_assert_same('connected', $connect['body']['status'], 'Connect endpoint should return connected status.');
 patwc_ajax_assert_same(1, $connect['body']['terminal_count'], 'Connect endpoint should expose sanitized terminal count.');
+patwc_ajax_assert_same(1, $connect['body']['unidentified_terminal_count'], 'Connect endpoint should expose the unidentified terminal count.');
+patwc_ajax_assert_same(array(array('label' => 'Back Counter (pax_A920) Not configured')), $connect['body']['unidentified_terminals'], 'Connect endpoint should expose unidentified terminals as label-only entries and drop malformed records.');
 patwc_ajax_assert_same(array(array(
     'connect_email' => 'merchant@example.com',
     'connect_mid' => '0000123456789012',

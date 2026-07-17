@@ -34,7 +34,37 @@
     return message;
   }
 
-  function updateTerminalSelect(terminals, defaultTerminalId) {
+  function updateUnidentifiedTerminals(input, terminals) {
+    var listId = prefix + 'unidentified_terminals';
+    var existing = document.getElementById(listId);
+    if (existing && existing.parentNode) {
+      existing.parentNode.removeChild(existing);
+    }
+
+    if (!Array.isArray(terminals)) {
+      return;
+    }
+
+    var list = document.createElement('ul');
+    list.id = listId;
+    list.className = 'description patwc-unidentified-terminals';
+    list.setAttribute('aria-label', 'PayArc terminals without a POS identifier');
+    terminals.forEach(function (terminal) {
+      if (!terminal || !terminal.label) {
+        return;
+      }
+
+      var item = document.createElement('li');
+      item.textContent = terminal.label;
+      list.appendChild(item);
+    });
+
+    if (list.firstChild) {
+      input.insertAdjacentElement('afterend', list);
+    }
+  }
+
+  function updateTerminalSelect(terminals, defaultTerminalId, unidentifiedTerminals) {
     var select = field('default_terminal_id');
     if (!select || !Array.isArray(terminals)) {
       return;
@@ -49,7 +79,6 @@
       empty.value = '';
       empty.textContent = 'No PayArc terminals discovered';
       select.appendChild(empty);
-      return;
     }
 
     terminals.forEach(function (terminal) {
@@ -65,6 +94,8 @@
       }
       select.appendChild(option);
     });
+
+    updateUnidentifiedTerminals(select, unidentifiedTerminals);
   }
 
   function connectionPayload(button) {
@@ -109,7 +140,7 @@
         return;
       }
 
-      updateTerminalSelect(body.terminals || [], body.default_terminal_id || '');
+      updateTerminalSelect(body.terminals || [], body.default_terminal_id || '', body.unidentified_terminals || []);
       var message = body.message || 'PayArc connection updated.';
       if (body.terminal_count !== undefined) {
         message += ' Terminals discovered: ' + body.terminal_count + '.';

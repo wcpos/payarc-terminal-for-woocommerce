@@ -312,6 +312,21 @@ class AjaxHandler
                 }
             }
         }
+        if (array_key_exists('unidentified_terminal_count', $body)) {
+            $public['unidentified_terminal_count'] = (int) $body['unidentified_terminal_count'];
+        }
+        $public['unidentified_terminals'] = array();
+        if (isset($body['unidentified_terminals']) && is_array($body['unidentified_terminals'])) {
+            foreach ($body['unidentified_terminals'] as $terminal) {
+                if (!is_array($terminal)) {
+                    continue;
+                }
+                $label = isset($terminal['label']) && is_scalar($terminal['label']) ? trim((string) $terminal['label']) : '';
+                if ($label !== '') {
+                    $public['unidentified_terminals'][] = array('label' => $label);
+                }
+            }
+        }
 
         return $public;
     }
