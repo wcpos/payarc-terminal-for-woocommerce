@@ -34,7 +34,7 @@
     return message;
   }
 
-  function updateTerminalSelect(terminals, defaultTerminalId) {
+  function updateTerminalSelect(terminals, defaultTerminalId, unidentifiedTerminals) {
     var select = field('default_terminal_id');
     if (!select || !Array.isArray(terminals)) {
       return;
@@ -49,7 +49,6 @@
       empty.value = '';
       empty.textContent = 'No PayArc terminals discovered';
       select.appendChild(empty);
-      return;
     }
 
     terminals.forEach(function (terminal) {
@@ -65,6 +64,20 @@
       }
       select.appendChild(option);
     });
+
+    if (Array.isArray(unidentifiedTerminals)) {
+      unidentifiedTerminals.forEach(function (terminal) {
+        if (!terminal || !terminal.label) {
+          return;
+        }
+
+        var option = document.createElement('option');
+        option.value = '';
+        option.disabled = true;
+        option.textContent = terminal.label;
+        select.appendChild(option);
+      });
+    }
   }
 
   function connectionPayload(button) {
@@ -109,7 +122,7 @@
         return;
       }
 
-      updateTerminalSelect(body.terminals || [], body.default_terminal_id || '');
+      updateTerminalSelect(body.terminals || [], body.default_terminal_id || '', body.unidentified_terminals || []);
       var message = body.message || 'PayArc connection updated.';
       if (body.terminal_count !== undefined) {
         message += ' Terminals discovered: ' + body.terminal_count + '.';

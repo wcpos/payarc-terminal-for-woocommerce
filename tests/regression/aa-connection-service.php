@@ -260,6 +260,11 @@ patwc_connection_assert_same('1850528139', $result['terminals'][0]['terminal_id'
 patwc_connection_assert_same('ABC123', $result['terminals'][1]['terminal_id'], 'Alphanumeric PayArc pos identifiers should be normalized.');
 patwc_connection_assert_same('42', $result['terminals'][2]['terminal_id'], 'Short PayArc pos identifiers should be normalized.');
 patwc_connection_assert_same('Front Counter A920 (pax_A920) ••••••8139', $result['terminals'][0]['label'], 'Terminal label should be merchant-friendly and masked.');
+patwc_connection_assert_same(1, $result['unidentified_terminal_count'], 'Registry record without a POS identifier should be surfaced as an informational count.');
+patwc_connection_assert_same(array(array('label' => 'Missing identifier terminal (pax_A920) Not configured')), $result['unidentified_terminals'], 'Unidentified terminals should expose only a name/type label with the masked placeholder.');
+patwc_connection_assert_contains('PayArc reports 1 terminal(s) without a POS identifier assigned. Ask PayArc support to provision the terminal for PayArc Connect, or enter the PayArc-confirmed terminal serial number manually.', $result['message'], 'Connect message should explain terminals missing a POS identifier.');
+patwc_connection_assert_missing_secret($result, '00000000000003', 'Connect result must not expose the raw device id of an unidentified terminal.');
+patwc_connection_assert_same(3, count($stored['terminal_registry']), 'Unidentified terminals must not be stored in the selectable terminal registry.');
 patwc_connection_assert_same('connect-access-token', $stored['connect_access_token'], 'Connect access token should be stored server-side.');
 patwc_connection_assert_same(false, array_key_exists('mode', $stored), 'Connect should not switch the active saved mode before WooCommerce settings are saved.');
 patwc_connection_assert_same('test', $stored['connected_mode'], 'Successful test connection should store connected mode.');
@@ -358,6 +363,11 @@ patwc_connection_assert_same('https://payarcconnectapi.curvpos.com/Login', $GLOB
 patwc_connection_assert_same('https://api.payarc.net/v1/terminalregistries', $GLOBALS['patwc_http_requests'][1]['url'], 'Live terminal registry URL mismatch.');
 patwc_connection_assert_missing_secret($liveResult, 'live-merchant-api-token', 'Live connect result should not expose API bearer token.');
 patwc_connection_assert_missing_secret($liveResult, 'live-client-secret', 'Live connect result should not expose client secret.');
+patwc_connection_assert_same(0, $liveResult['unidentified_terminal_count'], 'Connect without unidentified records should report a zero unidentified count.');
+patwc_connection_assert_same(array(), $liveResult['unidentified_terminals'], 'Connect without unidentified records should return an empty unidentified list.');
+if (strpos($liveResult['message'], 'without a POS identifier') !== false) {
+    throw new RuntimeException('Connect message should omit the unidentified-terminal notice when every record has a POS identifier.');
+}
 
 $GLOBALS['patwc_http_requests'] = array();
 $GLOBALS['patwc_http_response_queue'] = array(
@@ -778,6 +788,9 @@ $service = new PayArcConnectionService(new Settings(array(
 });
 $droppedRefresh = $service->refresh_terminals();
 patwc_connection_assert_same(2, $droppedRefresh['terminal_count'], 'Enabled terminals with any non-empty identifier should survive normalization.');
+patwc_connection_assert_same(1, $droppedRefresh['unidentified_terminal_count'], 'Refresh should surface the unidentified terminal count.');
+patwc_connection_assert_same('Unidentified Terminal (pax_A920) Not configured', $droppedRefresh['unidentified_terminals'][0]['label'], 'Refresh should expose the unidentified terminal name/type label.');
+patwc_connection_assert_contains('PayArc reports 1 terminal(s) without a POS identifier assigned. Ask PayArc support to provision the terminal for PayArc Connect, or enter the PayArc-confirmed terminal serial number manually.', $droppedRefresh['message'], 'Refresh message should explain terminals missing a POS identifier.');
 
 $dropWarnings = array_values(array_filter($GLOBALS['patwc_captured_logs'], static function (array $entry): bool {
     return $entry['message'] === 'PayArc terminal record dropped during normalization';
@@ -797,6 +810,81 @@ $droppedRefreshCompleted = array_values(array_filter($GLOBALS['patwc_captured_lo
 }));
 patwc_connection_assert_same(1, count($droppedRefreshCompleted), 'Refresh should log exactly one completion summary for the dropped-records scenario.');
 patwc_connection_assert_same(true, $droppedRefreshCompleted[0]['context']['default_terminal_in_fetched_list'], 'Refresh log should confirm when the chosen terminal is among the fetched terminals.');
+
+// PayArc can report the same unprovisioned terminal via Login and the
+// registry. The informational list must dedupe it while the per-record drop
+// warnings stay one-per-raw-record.
+$GLOBALS['patwc_captured_logs'] = array();
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'ErrorCode' => 0,
+            'Terminals' => array(array(
+                'Terminal' => 'Waiting Terminal',
+                'Type' => 'pax_A920',
+                'Is_enabled' => true,
+                'Device_id' => '00000000009001',
+                'Pos_identifier' => '',
+            )),
+            'BearerTokenInfo' => array(
+                'AccessToken' => 'unprovisioned-connect-token',
+                'ExpiresIn' => 3600,
+            ),
+        )),
+    ),
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'data' => array(
+                array(
+                    'terminal' => 'Waiting Terminal',
+                    'type' => 'pax_A920',
+                    'is_enabled' => true,
+                    'device_id' => '00000000009001',
+                    'pos_identifier' => '',
+                ),
+                array(
+                    'terminal' => 'Second Waiting Terminal',
+                    'type' => 'pax_A920',
+                    'is_enabled' => true,
+                    'device_id' => '00000000009002',
+                    'pos_identifier' => '',
+                ),
+            ),
+        )),
+    ),
+);
+$stored = array();
+$service = new PayArcConnectionService(new Settings(array(
+    'mode' => 'test',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'client-secret',
+    'connect_secret_key' => 'merchant-api-token',
+)), static function (array $updates) use (&$stored): void {
+    $stored = array_merge($stored, $updates);
+});
+$unprovisionedResult = $service->connect();
+patwc_connection_assert_same(0, $unprovisionedResult['terminal_count'], 'Connect with only unprovisioned terminals should report zero selectable terminals.');
+patwc_connection_assert_same(2, $unprovisionedResult['unidentified_terminal_count'], 'The same unprovisioned terminal reported by Login and the registry should count once.');
+patwc_connection_assert_same(array(
+    array('label' => 'Waiting Terminal (pax_A920) Not configured'),
+    array('label' => 'Second Waiting Terminal (pax_A920) Not configured'),
+), $unprovisionedResult['unidentified_terminals'], 'Unidentified terminal labels should carry name/type with the masked placeholder only.');
+patwc_connection_assert_contains('PayArc reports 2 terminal(s) without a POS identifier assigned. Ask PayArc support to provision the terminal for PayArc Connect, or enter the PayArc-confirmed terminal serial number manually.', $unprovisionedResult['message'], 'Connect message should name the unprovisioned terminal count and the next steps.');
+patwc_connection_assert_missing_secret($unprovisionedResult, '00000000009001', 'Unidentified terminal entries must not expose raw device ids.');
+patwc_connection_assert_missing_secret($unprovisionedResult, '00000000009002', 'Deduped unidentified terminal entries must not expose raw device ids.');
+patwc_connection_assert_same(array(), $stored['terminal_registry'], 'Unprovisioned terminals must not be persisted as selectable registry entries.');
+$unprovisionedDropWarnings = array_values(array_filter($GLOBALS['patwc_captured_logs'], static function (array $entry): bool {
+    return $entry['message'] === 'PayArc terminal record dropped during normalization';
+}));
+patwc_connection_assert_same(3, count($unprovisionedDropWarnings), 'Each raw unprovisioned record should keep its own masked drop warning.');
+foreach ($unprovisionedDropWarnings as $warning) {
+    patwc_connection_assert_same('missing_identifier', $warning['context']['drop_reason'], 'Unprovisioned drop warnings should state the missing_identifier reason.');
+    patwc_connection_assert_same('Not configured', $warning['context']['terminal_id_masked'], 'Unprovisioned drop warnings should mask to the Not configured placeholder.');
+}
 
 
 $GLOBALS['patwc_http_requests'] = array();

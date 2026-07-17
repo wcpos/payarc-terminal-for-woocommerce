@@ -55,7 +55,9 @@ class PayArcConnectionService
         }
 
         $loginTerminals = isset($login['Terminals']) && is_array($login['Terminals']) ? $login['Terminals'] : array();
-        $terminals = $this->normalize_terminals(array_merge($loginTerminals, $registry), $settings);
+        $partition = $this->partition_terminals(array_merge($loginTerminals, $registry), $settings);
+        $terminals = $partition['terminals'];
+        $unidentifiedTerminals = $partition['unidentified'];
         $tokenInfo = isset($login['BearerTokenInfo']) && is_array($login['BearerTokenInfo']) ? $login['BearerTokenInfo'] : array();
         $accessToken = isset($tokenInfo['AccessToken']) && is_scalar($tokenInfo['AccessToken']) ? trim((string) $tokenInfo['AccessToken']) : '';
 
@@ -85,7 +87,7 @@ class PayArcConnectionService
         $this->assert_no_in_flight_payment_attempts();
         $this->persist($updates);
 
-        $result = $this->public_result('connected', 'Connected to PayArc. Enter or confirm the PayArc terminal serial number and save settings.', $tenantId, $defaultTerminal, $terminals);
+        $result = $this->public_result('connected', 'Connected to PayArc. Enter or confirm the PayArc terminal serial number and save settings.', $tenantId, $defaultTerminal, $terminals, $unidentifiedTerminals);
         if ($registryWarning !== '') {
             $result['warning'] = 'Connected to PayArc. Terminal Registry lookup failed, but registry data is only reporting metadata; confirm the terminal serial number with PayArc before testing a payment.';
         }
@@ -94,6 +96,7 @@ class PayArcConnectionService
             'tenant_id_masked' => Settings::mask_identifier($tenantId),
             'default_terminal_id_masked' => Settings::mask_identifier($defaultTerminal),
             'terminal_count' => count($terminals),
+            'unidentified_terminal_count' => count($unidentifiedTerminals),
             'terminal_registry_warning' => $registryWarning !== '',
             'default_terminal_in_fetched_list' => $this->terminal_in_list($terminals, $defaultTerminal),
         )));
@@ -109,7 +112,9 @@ class PayArcConnectionService
         $this->assert_no_in_flight_payment_attempts();
         Logger::log('PayArc terminal refresh started', $this->connection_log_context($this->settings));
         $registry = $this->terminal_registry($this->settings);
-        $terminals = $this->normalize_terminals($registry);
+        $partition = $this->partition_terminals($registry);
+        $terminals = $partition['terminals'];
+        $unidentifiedTerminals = $partition['unidentified'];
         $defaultTerminal = $this->choose_default_terminal($terminals, $this->settings->default_terminal_id());
         $updates = array(
             'terminal_registry' => $terminals,
@@ -121,10 +126,11 @@ class PayArcConnectionService
         Logger::log('PayArc terminal refresh completed', $this->connection_log_context($this->settings, array(
             'default_terminal_id_masked' => Settings::mask_identifier($defaultTerminal),
             'terminal_count' => count($terminals),
+            'unidentified_terminal_count' => count($unidentifiedTerminals),
             'default_terminal_in_fetched_list' => $this->terminal_in_list($terminals, $defaultTerminal),
         )));
 
-        return $this->public_result('connected', 'PayArc terminals refreshed.', $this->settings->tenant_id(), $defaultTerminal, $terminals);
+        return $this->public_result('connected', 'PayArc terminals refreshed.', $this->settings->tenant_id(), $defaultTerminal, $terminals, $unidentifiedTerminals);
     }
 
     /**
@@ -151,6 +157,8 @@ class PayArcConnectionService
             'tenant_id_configured' => $this->settings->tenant_id() !== '',
             'default_terminal_id_configured' => false,
             'terminals' => array(),
+            'unidentified_terminal_count' => 0,
+            'unidentified_terminals' => array(),
         );
     }
 
@@ -310,9 +318,23 @@ class PayArcConnectionService
      */
     public function normalize_terminals(array $rawTerminals, ?Settings $settings = null): array
     {
+        return $this->partition_terminals($rawTerminals, $settings)['terminals'];
+    }
+
+    /**
+     * Splits raw PayArc terminal records into selectable terminals and
+     * informational records that PayArc reported without a POS identifier.
+     *
+     * @param array<int, mixed> $rawTerminals
+     * @return array{terminals: array<int, array<string, mixed>>, unidentified: array<int, array<string, string>>}
+     */
+    private function partition_terminals(array $rawTerminals, ?Settings $settings = null): array
+    {
         $settings = $settings === null ? $this->settings : $settings;
         $terminals = array();
+        $unidentified = array();
         $seen = array();
+        $seenUnidentified = array();
 
         foreach ($rawTerminals as $raw) {
             if (!is_array($raw)) {
@@ -322,6 +344,22 @@ class PayArcConnectionService
             $terminalId = $this->field($raw, array('pos_identifier', 'Pos_identifier', 'terminal_id', 'TerminalId'));
             if ($terminalId === '') {
                 $this->log_dropped_terminal($settings, 'missing_identifier', $terminalId);
+                $name = $this->field($raw, array('terminal', 'Terminal', 'name', 'Name'));
+                $type = $this->field($raw, array('type', 'Type'));
+                // Dedupe key may use raw device fields because it never leaves
+                // this method; the exposed entry carries only name/type.
+                $key = strtolower(implode('|', array(
+                    $name,
+                    $type,
+                    $this->field($raw, array('device_id', 'Device_id')),
+                    $this->field($raw, array('code', 'Code', 'id', 'Id')),
+                )));
+                if (!isset($seenUnidentified[$key])) {
+                    $seenUnidentified[$key] = true;
+                    $unidentified[] = array(
+                        'label' => Settings::terminal_label($name, $type, ''),
+                    );
+                }
                 continue;
             }
 
@@ -351,7 +389,7 @@ class PayArcConnectionService
             );
         }
 
-        return $terminals;
+        return array('terminals' => $terminals, 'unidentified' => $unidentified);
     }
 
     /**
@@ -520,10 +558,15 @@ class PayArcConnectionService
 
     /**
      * @param array<int, array<string, mixed>> $terminals
+     * @param array<int, array<string, string>> $unidentifiedTerminals
      * @return array<string, mixed>
      */
-    private function public_result(string $status, string $message, string $tenantId, string $defaultTerminal, array $terminals): array
+    private function public_result(string $status, string $message, string $tenantId, string $defaultTerminal, array $terminals, array $unidentifiedTerminals = array()): array
     {
+        if (count($unidentifiedTerminals) > 0) {
+            $message .= ' PayArc reports ' . count($unidentifiedTerminals) . ' terminal(s) without a POS identifier assigned. Ask PayArc support to provision the terminal for PayArc Connect, or enter the PayArc-confirmed terminal serial number manually.';
+        }
+
         return array(
             'status' => $status,
             'message' => $message,
@@ -538,6 +581,12 @@ class PayArcConnectionService
                     'label' => (string) $terminal['label'],
                 );
             }, $terminals),
+            'unidentified_terminal_count' => count($unidentifiedTerminals),
+            'unidentified_terminals' => array_map(static function (array $terminal): array {
+                return array(
+                    'label' => (string) $terminal['label'],
+                );
+            }, $unidentifiedTerminals),
         );
     }
 
