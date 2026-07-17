@@ -348,12 +348,15 @@ class PayArcConnectionService
                 $type = $this->field($raw, array('type', 'Type'));
                 // Dedupe key may use raw device fields because it never leaves
                 // this method; the exposed entry carries only name/type.
-                $key = strtolower(implode('|', array(
-                    $name,
-                    $type,
-                    $this->field($raw, array('device_id', 'Device_id')),
-                    $this->field($raw, array('code', 'Code', 'id', 'Id')),
-                )));
+                $deviceId = $this->field($raw, array('device_id', 'Device_id'));
+                $code = $this->field($raw, array('code', 'Code', 'id', 'Id'));
+                if ($deviceId !== '') {
+                    $key = 'device|' . strtolower($deviceId);
+                } elseif ($code !== '') {
+                    $key = 'code|' . strtolower($code);
+                } else {
+                    $key = 'label|' . strtolower($name . '|' . $type) . '|' . count($seenUnidentified);
+                }
                 if (!isset($seenUnidentified[$key])) {
                     $seenUnidentified[$key] = true;
                     $unidentified[] = array(
