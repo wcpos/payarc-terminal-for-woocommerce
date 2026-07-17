@@ -83,8 +83,12 @@ class WebhookHandler
             $failureCount = self::AUTH_FAILURE_LOG_LIMIT + 1;
 
             if (function_exists('get_transient') && function_exists('set_transient')) {
-                $failureCount = (int) get_transient($throttleKey) + 1;
-                if (set_transient($throttleKey, $failureCount, self::AUTH_FAILURE_LOG_WINDOW) === false) {
+                $storedFailureCount = get_transient($throttleKey);
+                $failureCount = (int) $storedFailureCount + 1;
+                $stored = $storedFailureCount === false
+                    ? set_transient($throttleKey, $failureCount, self::AUTH_FAILURE_LOG_WINDOW)
+                    : set_transient($throttleKey, $failureCount);
+                if ($stored === false) {
                     $failureCount = self::AUTH_FAILURE_LOG_LIMIT + 1;
                 }
             }
