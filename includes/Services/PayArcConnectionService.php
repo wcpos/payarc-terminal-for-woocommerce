@@ -342,6 +342,12 @@ class PayArcConnectionService
             }
 
             $terminalId = $this->field($raw, array('pos_identifier', 'Pos_identifier', 'terminal_id', 'TerminalId'));
+            $enabled = $this->enabled_field($raw);
+            if (!$enabled) {
+                $this->log_dropped_terminal($settings, 'disabled', $terminalId);
+                continue;
+            }
+
             if ($terminalId === '') {
                 $this->log_dropped_terminal($settings, 'missing_identifier', $terminalId);
                 $name = $this->field($raw, array('terminal', 'Terminal', 'name', 'Name'));
@@ -367,12 +373,6 @@ class PayArcConnectionService
             }
 
             if (isset($seen[$terminalId])) {
-                continue;
-            }
-
-            $enabled = $this->enabled_field($raw);
-            if (!$enabled) {
-                $this->log_dropped_terminal($settings, 'disabled', $terminalId);
                 continue;
             }
 

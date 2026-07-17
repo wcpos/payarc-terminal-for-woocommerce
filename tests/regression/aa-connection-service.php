@@ -234,6 +234,16 @@ $GLOBALS['patwc_http_response_queue'] = array(
                     'device_id' => '00000000000003',
                     'pos_identifier' => '',
                 ),
+                array(
+                    'object' => 'TerminalRegistry',
+                    'id' => 'disabled-empty',
+                    'terminal' => 'Disabled missing identifier terminal',
+                    'type' => 'pax_A920',
+                    'code' => 'disabled-empty',
+                    'is_enabled' => false,
+                    'device_id' => '00000000000004',
+                    'pos_identifier' => '',
+                ),
             ),
         )),
     ),
@@ -304,12 +314,14 @@ patwc_connection_assert_contains('PayArc connection completed', $encodedLogs, 'C
 $connectDropWarnings = array_values(array_filter($GLOBALS['patwc_captured_logs'], static function (array $entry): bool {
     return $entry['message'] === 'PayArc terminal record dropped during normalization';
 }));
-patwc_connection_assert_same(2, count($connectDropWarnings), 'Connect should log one warning per dropped registry record (disabled + missing identifier).');
+patwc_connection_assert_same(3, count($connectDropWarnings), 'Connect should log one warning per dropped registry record (disabled + missing identifier).');
 patwc_connection_assert_same('warning', $connectDropWarnings[0]['level'], 'Dropped-record log level mismatch during connect.');
 patwc_connection_assert_same('disabled', $connectDropWarnings[0]['context']['drop_reason'], 'Dropped disabled registry record should state the disabled reason.');
 patwc_connection_assert_same('••••••8140', $connectDropWarnings[0]['context']['terminal_id_masked'], 'Dropped-record log should mask the terminal identifier during connect.');
 patwc_connection_assert_same('missing_identifier', $connectDropWarnings[1]['context']['drop_reason'], 'Registry record without any identifier should state the missing_identifier reason.');
 patwc_connection_assert_same('Not configured', $connectDropWarnings[1]['context']['terminal_id_masked'], 'Missing identifier should mask to the Not configured placeholder.');
+patwc_connection_assert_same('disabled', $connectDropWarnings[2]['context']['drop_reason'], 'Disabled registry records should be classified before missing identifiers.');
+patwc_connection_assert_same('Not configured', $connectDropWarnings[2]['context']['terminal_id_masked'], 'Disabled registry records without identifiers should mask to the Not configured placeholder.');
 patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'merchant-api-token', 'Connect logs should redact API bearer token.');
 patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'connect-access-token', 'Connect logs should redact Connect access token.');
 patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'client-secret', 'Connect logs should redact client secret.');
