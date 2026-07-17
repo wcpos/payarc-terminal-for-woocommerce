@@ -34,6 +34,36 @@
     return message;
   }
 
+  function updateUnidentifiedTerminals(input, terminals) {
+    var listId = prefix + 'unidentified_terminals';
+    var existing = document.getElementById(listId);
+    if (existing && existing.parentNode) {
+      existing.parentNode.removeChild(existing);
+    }
+
+    if (!Array.isArray(terminals)) {
+      return;
+    }
+
+    var list = document.createElement('ul');
+    list.id = listId;
+    list.className = 'description patwc-unidentified-terminals';
+    list.setAttribute('aria-label', 'PayArc terminals without a POS identifier');
+    terminals.forEach(function (terminal) {
+      if (!terminal || !terminal.label) {
+        return;
+      }
+
+      var item = document.createElement('li');
+      item.textContent = terminal.label;
+      list.appendChild(item);
+    });
+
+    if (list.firstChild) {
+      input.insertAdjacentElement('afterend', list);
+    }
+  }
+
   function updateTerminalSelect(terminals, defaultTerminalId, unidentifiedTerminals) {
     var select = field('default_terminal_id');
     if (!select || !Array.isArray(terminals)) {
@@ -65,19 +95,7 @@
       select.appendChild(option);
     });
 
-    if (Array.isArray(unidentifiedTerminals)) {
-      unidentifiedTerminals.forEach(function (terminal) {
-        if (!terminal || !terminal.label) {
-          return;
-        }
-
-        var option = document.createElement('option');
-        option.value = '';
-        option.disabled = true;
-        option.textContent = terminal.label;
-        select.appendChild(option);
-      });
-    }
+    updateUnidentifiedTerminals(select, unidentifiedTerminals);
   }
 
   function connectionPayload(button) {
