@@ -74,7 +74,7 @@
 
         var $entries = $log.children();
         if ($entries.length > maxLogEntries) {
-            $entries.slice(0, $entries.length - maxLogEntries).remove();
+            $entries.slice(1, $entries.length - maxLogEntries + 1).remove();
         }
 
         if ($log[0]) {
@@ -110,7 +110,7 @@
         }
 
         if (!message) {
-            return strings.error;
+            message = strings.error;
         }
 
         if (xhr && xhr.status) {
