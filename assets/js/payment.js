@@ -179,7 +179,7 @@
             return;
         }
 
-        appendLog('Payment approved, but the order form could not be found. Please refresh the page.');
+        setStatus('Payment approved, but the order form could not be found. Please refresh the page.');
     }
 
     function finishAsRetry(message) {
