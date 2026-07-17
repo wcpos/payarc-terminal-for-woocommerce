@@ -353,6 +353,12 @@ patwc_gateway_ui_assert_contains('role="status"', $html, 'payment_fields status 
 patwc_gateway_ui_assert_contains('id="patwc-start-payment"', $html, 'payment_fields should render a start button.');
 patwc_gateway_ui_assert_contains('id="patwc-cancel-payment"', $html, 'payment_fields should render a cancel button.');
 patwc_gateway_ui_assert_contains('id="patwc-payment-log"', $html, 'payment_fields should render a log container.');
+patwc_gateway_ui_assert_contains('Ready to start payment.', $html, 'Authorized payment_fields should show the ready status.');
+patwc_gateway_ui_assert_contains('Payment activity', $html, 'payment_fields should render the payment activity section title.');
+patwc_gateway_ui_assert_contains('id="patwc-toggle-payment-log"', $html, 'payment_fields should render a log toggle button.');
+patwc_gateway_ui_assert_contains('aria-expanded="false"', $html, 'Log toggle should start collapsed.');
+patwc_gateway_ui_assert_contains('id="patwc-clear-payment-log"', $html, 'payment_fields should render a log clear button.');
+patwc_gateway_ui_assert_contains('id="patwc-payment-log" class="patwc-payment-log" hidden="hidden"', $html, 'Payment log should be hidden until toggled.');
 
 if (!isset($GLOBALS['patwc_gateway_scripts']['patwc-payment'])) {
     throw new RuntimeException('payment_fields should enqueue the payment script.');
@@ -380,11 +386,28 @@ if (!is_array($strings)) {
     throw new RuntimeException('Localized data should include user-facing strings.');
 }
 
-foreach (array('ready', 'starting', 'waiting', 'approved', 'retry', 'canceling', 'timeout', 'error') as $key) {
+foreach (array('ready', 'starting', 'waiting', 'approved', 'retry', 'canceling', 'timeout', 'error', 'notAuthorized', 'showLog', 'hideLog') as $key) {
     if (!isset($strings[$key]) || !is_string($strings[$key]) || $strings[$key] === '') {
         throw new RuntimeException('Localized strings should include non-empty key: ' . $key);
     }
 }
+
+patwc_gateway_ui_assert_same(true, $data['authorized'] ?? null, 'Authorized render should localize authorized=true.');
+
+$GLOBALS['patwc_gateway_query_vars'] = array('order-pay' => 2001);
+$GLOBALS['patwc_gateway_caps'] = array();
+$GLOBALS['patwc_ajax_caps'] = array();
+$_GET = array('key' => 'wrong-key');
+$unauthorizedGateway = new Gateway();
+ob_start();
+$unauthorizedGateway->payment_fields();
+$unauthorizedHtml = (string) ob_get_clean();
+patwc_gateway_ui_assert_contains('not authorized for this order', $unauthorizedHtml, 'Unauthorized payment_fields should explain why payment is unavailable.');
+patwc_gateway_ui_assert_contains('patwc-payment-status--blocked', $unauthorizedHtml, 'Unauthorized status should carry the blocked modifier class.');
+patwc_gateway_ui_assert_contains('disabled="disabled"', $unauthorizedHtml, 'Unauthorized payment_fields should disable the start button.');
+$unauthorizedData = $GLOBALS['patwc_gateway_localized']['patwc-payment']['data'] ?? array();
+patwc_gateway_ui_assert_same(false, $unauthorizedData['authorized'] ?? null, 'Unauthorized render should localize authorized=false.');
+$_GET = array();
 
 $missingKeyData = patwc_gateway_ui_render_payment_data(array('order-pay' => 2001));
 patwc_gateway_ui_assert_same('', patwc_gateway_ui_order_token($missingKeyData), 'Guest order-pay render without key must not localize a usable order token.');
