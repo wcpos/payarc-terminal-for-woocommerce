@@ -9,6 +9,8 @@ use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcClient;
 class WebhookHandler
 {
     private const RECONCILIATION_LOCK = 'reconcile';
+    private const AUTH_FAILURE_LOG_LIMIT = 5;
+    private const AUTH_FAILURE_LOG_WINDOW = 60;
 
     /** @var Settings */
     private $settings;
@@ -76,7 +78,20 @@ class WebhookHandler
     {
         $authorizationFailure = $this->authorization_failure_reason($server);
         if ($authorizationFailure !== '') {
-            $this->log('PayArc callback rejected', array('reason' => $authorizationFailure), 'warning');
+            $remoteAddress = isset($server['REMOTE_ADDR']) && is_scalar($server['REMOTE_ADDR']) ? trim((string) $server['REMOTE_ADDR']) : '';
+            $throttleKey = 'patwc_callback_rejection_' . md5($remoteAddress);
+            $failureCount = self::AUTH_FAILURE_LOG_LIMIT + 1;
+
+            if (function_exists('get_transient') && function_exists('set_transient')) {
+                $failureCount = (int) get_transient($throttleKey) + 1;
+                if (set_transient($throttleKey, $failureCount, self::AUTH_FAILURE_LOG_WINDOW) === false) {
+                    $failureCount = self::AUTH_FAILURE_LOG_LIMIT + 1;
+                }
+            }
+
+            if ($failureCount <= self::AUTH_FAILURE_LOG_LIMIT) {
+                $this->log('PayArc callback rejected', array('reason' => $authorizationFailure), 'warning');
+            }
 
             return $this->response(401, array('error' => 'unauthorized'));
         }
