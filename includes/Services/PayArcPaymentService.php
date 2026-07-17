@@ -4,6 +4,7 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Services;
 
 use RuntimeException;
 use Throwable;
+use WCPOS\WooCommercePOS\PayArcTerminal\Logger;
 use WCPOS\WooCommercePOS\PayArcTerminal\PaymentAttempt;
 use WCPOS\WooCommercePOS\PayArcTerminal\PaymentLock;
 use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
@@ -69,12 +70,13 @@ class PayArcPaymentService
             $attemptUuid = PayArcIds::idempotency_key();
             $transactionId = PayArcIds::transaction_id($this->order_id($order), $attemptUuid);
             $idempotencyKey = PayArcIds::idempotency_key();
+            $amount = Money::to_payarc_amount_object($this->order_total($order), $this->order_currency($order));
             $payload = array(
                 'tenantId' => $terminal['tenantId'],
                 'terminalId' => $terminal['terminalId'],
                 'transactionId' => $transactionId,
                 'tenderType' => $this->settings->tender_type(),
-                'amount' => Money::to_payarc_amount_object($this->order_total($order), $this->order_currency($order)),
+                'amount' => $amount,
                 'printReceipt' => $this->settings->print_receipt(),
                 'callbackURL' => $this->settings->webhook_url(),
                 'metadata' => array(
@@ -92,16 +94,39 @@ class PayArcPaymentService
             );
             PaymentAttempt::mark_in_flight($order, $attempt);
 
+            $this->log('PayArc sale started', array(
+                'order_id' => $this->order_id($order),
+                'mode' => $this->settings->mode(),
+                'terminal_id_masked' => Settings::mask_identifier($terminal['terminalId']),
+                'tender_type' => $this->settings->tender_type(),
+                'amount_total' => $amount['total'],
+                'currency' => $amount['currency'],
+                'transaction_id' => $transactionId,
+                'has_callback_url' => trim((string) $payload['callbackURL']) !== '',
+            ));
+
             try {
                 $response = $this->client->sale($payload, $idempotencyKey);
             } catch (Throwable $exception) {
                 PaymentAttempt::clear_in_flight($order);
+                $this->log('PayArc sale request failed', array(
+                    'order_id' => $this->order_id($order),
+                    'transaction_id' => $transactionId,
+                    'exception_class' => get_class($exception),
+                    'message' => Logger::redact_untrusted_text($exception->getMessage()),
+                ), 'error');
                 throw $exception;
             }
 
             $attempt['sale_response'] = $response;
 
             $traceId = $this->extract_scalar($response, 'traceId');
+            $this->log('PayArc sale accepted', array(
+                'order_id' => $this->order_id($order),
+                'transaction_id' => $transactionId,
+                'trace_id_returned' => $traceId !== '',
+                'trace_id_masked' => Settings::mask_identifier($traceId),
+            ));
             if ($traceId !== '') {
                 $attempt['trace_id'] = $traceId;
             }
@@ -194,9 +219,20 @@ class PayArcPaymentService
                 : $this->settings->default_terminal_id();
             $terminal = $this->terminal_service->validate_terminal($terminalId);
 
+            $this->log('PayArc cancel requested', array(
+                'order_id' => $this->order_id($order),
+                'trace_id_masked' => Settings::mask_identifier($traceId),
+            ));
+
             try {
                 $this->client->cancel($traceId, $terminal, PayArcIds::idempotency_key());
             } catch (Throwable $exception) {
+                $this->log('PayArc cancel request failed', array(
+                    'order_id' => $this->order_id($order),
+                    'trace_id_masked' => Settings::mask_identifier($traceId),
+                    'exception_class' => get_class($exception),
+                    'message' => Logger::redact_untrusted_text($exception->getMessage()),
+                ), 'error');
                 if ($this->is_already_processed_error($exception)) {
                     return PaymentLock::with_lock($this->order_id($order), self::RECONCILIATION_LOCK, function () use ($order, $traceId): array {
                         $payload = $this->client->get_transaction($traceId);
@@ -350,7 +386,34 @@ class PayArcPaymentService
             throw new RuntimeException('PayArc payment reconciler must return an array.');
         }
 
+        if ($source === 'poll' && array_key_exists('continue_polling', $result) && $result['continue_polling'] === false) {
+            $status = isset($result['status']) && is_scalar($result['status']) ? (string) $result['status'] : '';
+            $traceId = $this->extract_scalar($payload, 'traceId');
+            if ($traceId === '') {
+                $attempt = PaymentAttempt::current($order);
+                $traceId = isset($attempt['trace_id']) && is_scalar($attempt['trace_id']) ? trim((string) $attempt['trace_id']) : '';
+            }
+
+            $this->log('PayArc payment attempt resolved', array(
+                'order_id' => $this->order_id($order),
+                'status' => $status,
+                'trace_id_masked' => Settings::mask_identifier($traceId),
+            ));
+        }
+
         return $result;
+    }
+
+    /**
+     * @param array<string, mixed> $context
+     */
+    private function log(string $message, array $context, string $level = 'info'): void
+    {
+        try {
+            Logger::log($message, $context, null, $level);
+        } catch (Throwable $exception) {
+            // Diagnostic logging must not interrupt payment processing.
+        }
     }
 
     private function is_already_processed_error(Throwable $exception): bool

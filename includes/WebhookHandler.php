@@ -9,6 +9,8 @@ use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcClient;
 class WebhookHandler
 {
     private const RECONCILIATION_LOCK = 'reconcile';
+    private const AUTH_FAILURE_LOG_LIMIT = 5;
+    private const AUTH_FAILURE_LOG_WINDOW = 60;
 
     /** @var Settings */
     private $settings;
@@ -74,7 +76,27 @@ class WebhookHandler
      */
     public function handle_request(string $rawBody, array $server = array()): array
     {
-        if (!$this->is_authorized($server)) {
+        $authorizationFailure = $this->authorization_failure_reason($server);
+        if ($authorizationFailure !== '') {
+            $remoteAddress = isset($server['REMOTE_ADDR']) && is_scalar($server['REMOTE_ADDR']) ? trim((string) $server['REMOTE_ADDR']) : '';
+            $throttleKey = 'patwc_callback_rejection_' . md5($remoteAddress);
+            $failureCount = self::AUTH_FAILURE_LOG_LIMIT + 1;
+
+            if (function_exists('get_transient') && function_exists('set_transient')) {
+                $storedFailureCount = get_transient($throttleKey);
+                $failureCount = (int) $storedFailureCount + 1;
+                $stored = $storedFailureCount === false
+                    ? set_transient($throttleKey, $failureCount, self::AUTH_FAILURE_LOG_WINDOW)
+                    : set_transient($throttleKey, $failureCount);
+                if ($stored === false) {
+                    $failureCount = self::AUTH_FAILURE_LOG_LIMIT + 1;
+                }
+            }
+
+            if ($failureCount <= self::AUTH_FAILURE_LOG_LIMIT) {
+                $this->log('PayArc callback rejected', array('reason' => $authorizationFailure), 'warning');
+            }
+
             return $this->response(401, array('error' => 'unauthorized'));
         }
 
@@ -85,6 +107,10 @@ class WebhookHandler
 
         $traceId = $this->extract_scalar($payload, 'traceId');
         $transactionId = $this->extract_scalar($payload, 'transactionId');
+        $this->log('PayArc callback accepted', array(
+            'trace_id_masked' => Settings::mask_identifier($traceId),
+            'transaction_id' => $transactionId,
+        ));
         $order = $this->locate_order($payload, $traceId, $transactionId);
         if (!is_object($order)) {
             return $this->response(404, array('error' => 'order_not_found'));
@@ -148,32 +174,32 @@ class WebhookHandler
     /**
      * @param array<string, mixed> $server
      */
-    private function is_authorized(array $server): bool
+    private function authorization_failure_reason(array $server): string
     {
         $expected = $this->settings->callback_bearer_token();
         if ($expected === '') {
-            return false;
+            return 'callback_token_not_configured';
         }
 
         $authorization = $this->authorization_header($server);
         if ($authorization === '') {
-            return false;
+            return 'missing_authorization_header';
         }
 
         if (preg_match('/^Bearer\s+(.+)$/i', $authorization, $matches) !== 1) {
-            return false;
+            return 'malformed_authorization_header';
         }
 
         $actual = trim($matches[1]);
         if ($actual === '') {
-            return false;
+            return 'malformed_authorization_header';
         }
 
         if (function_exists('hash_equals')) {
-            return hash_equals($expected, $actual);
+            return hash_equals($expected, $actual) ? '' : 'token_mismatch';
         }
 
-        return $expected === $actual;
+        return $expected === $actual ? '' : 'token_mismatch';
     }
 
     /**
@@ -272,6 +298,18 @@ class WebhookHandler
     private function extract_scalar(array $payload, string $key): string
     {
         return isset($payload[$key]) && is_scalar($payload[$key]) ? trim((string) $payload[$key]) : '';
+    }
+
+    /**
+     * @param array<string, mixed> $context
+     */
+    private function log(string $message, array $context, string $level = 'info'): void
+    {
+        try {
+            Logger::log($message, $context, null, $level);
+        } catch (Throwable $exception) {
+            // Diagnostic logging must not interrupt callback processing.
+        }
     }
 
     /**

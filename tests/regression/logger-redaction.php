@@ -132,6 +132,11 @@ if (
     throw new RuntimeException('Logger should still redact delimited keyword secrets.');
 }
 
+$traceFailure = Logger::redact_untrusted_text('PayArc request failed; traceId: trace_failure_123.');
+if (strpos($traceFailure, 'trace_failure_123') !== false || strpos($traceFailure, 'traceId=[REDACTED]') === false) {
+    throw new RuntimeException('Untrusted exception text should redact embedded PayArc trace ids.');
+}
+
 // The patwc_logging filter can disable logging entirely.
 if (!function_exists('apply_filters')) {
     function apply_filters($hook, $value)
