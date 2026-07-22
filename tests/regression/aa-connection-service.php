@@ -319,6 +319,7 @@ patwc_connection_assert_same('warning', $connectDropWarnings[0]['level'], 'Dropp
 patwc_connection_assert_same('disabled', $connectDropWarnings[0]['context']['drop_reason'], 'Dropped disabled registry record should state the disabled reason.');
 patwc_connection_assert_same('••••••8140', $connectDropWarnings[0]['context']['terminal_id_masked'], 'Dropped-record log should mask the terminal identifier during connect.');
 patwc_connection_assert_same('no_pos_identifier', $connectDropWarnings[1]['context']['drop_reason'], 'Registry record with a null pos_identifier should state the no_pos_identifier reason.');
+patwc_connection_assert_same('info', $connectDropWarnings[1]['level'], 'A null pos_identifier must stay informational during connect, never a warning.');
 patwc_connection_assert_same('Not configured', $connectDropWarnings[1]['context']['terminal_id_masked'], 'Missing identifier should mask to the Not configured placeholder.');
 patwc_connection_assert_same('disabled', $connectDropWarnings[2]['context']['drop_reason'], 'Disabled registry records should be classified before missing identifiers.');
 patwc_connection_assert_same('Not configured', $connectDropWarnings[2]['context']['terminal_id_masked'], 'Disabled registry records without identifiers should mask to the Not configured placeholder.');
@@ -910,6 +911,7 @@ $unprovisionedDropWarnings = array_values(array_filter($GLOBALS['patwc_captured_
 patwc_connection_assert_same(5, count($unprovisionedDropWarnings), 'Each raw unprovisioned record should keep its own masked drop warning.');
 foreach ($unprovisionedDropWarnings as $warning) {
     patwc_connection_assert_same('no_pos_identifier', $warning['context']['drop_reason'], 'Records with a null pos_identifier should state the no_pos_identifier reason.');
+    patwc_connection_assert_same('info', $warning['level'], 'Every null pos_identifier record must stay informational, never a warning.');
     patwc_connection_assert_same('Not configured', $warning['context']['terminal_id_masked'], 'Unprovisioned drop warnings should mask to the Not configured placeholder.');
 }
 
