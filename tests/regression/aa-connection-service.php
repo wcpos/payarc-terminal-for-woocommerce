@@ -314,6 +314,7 @@ patwc_connection_assert_contains('PayArc connection completed', $encodedLogs, 'C
 $connectDropWarnings = array_values(array_filter($GLOBALS['patwc_captured_logs'], static function (array $entry): bool {
     return $entry['message'] === 'PayArc terminal record not selectable';
 }));
+/** @var list<array{level: string, context: array<string, mixed>}> $connectDropWarnings */
 patwc_connection_assert_same(3, count($connectDropWarnings), 'Connect should log one warning per dropped registry record (disabled + missing identifier).');
 patwc_connection_assert_same('warning', $connectDropWarnings[0]['level'], 'Dropped-record log level mismatch during connect.');
 patwc_connection_assert_same('disabled', $connectDropWarnings[0]['context']['drop_reason'], 'Dropped disabled registry record should state the disabled reason.');
