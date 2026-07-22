@@ -349,7 +349,10 @@ class PayArcConnectionService
             }
 
             if ($terminalId === '') {
-                $this->log_dropped_terminal($settings, 'missing_identifier', $terminalId);
+                // Informational, not a warning: the Terminal Registry schema
+                // makes pos_identifier nullable, and a sale is addressed by the
+                // 10-digit terminal serial number instead.
+                $this->log_dropped_terminal($settings, 'no_pos_identifier', $terminalId, 'info');
                 $name = $this->field($raw, array('terminal', 'Terminal', 'name', 'Name'));
                 $type = $this->field($raw, array('type', 'Type'));
                 // Dedupe key may use raw device fields because it never leaves
@@ -567,7 +570,10 @@ class PayArcConnectionService
     private function public_result(string $status, string $message, string $tenantId, string $defaultTerminal, array $terminals, array $unidentifiedTerminals = array()): array
     {
         if (count($unidentifiedTerminals) > 0) {
-            $message .= ' PayArc reports ' . count($unidentifiedTerminals) . ' terminal(s) without a POS identifier assigned. Ask PayArc support to provision the terminal for PayArc Connect, or enter the PayArc-confirmed terminal serial number manually.';
+            // pos_identifier is optional in the Terminal Registry schema and is
+            // not the value a sale needs, so its absence is normal metadata and
+            // must not read as a provisioning fault.
+            $message .= ' PayArc also returned ' . count($unidentifiedTerminals) . ' registry record(s) with no POS identifier. That is normal: the terminal serial number below is what PayArc Connect uses to take a payment.';
         }
 
         return array(
@@ -648,13 +654,13 @@ class PayArcConnectionService
         return false;
     }
 
-    private function log_dropped_terminal(Settings $settings, string $reason, string $terminalId): void
+    private function log_dropped_terminal(Settings $settings, string $reason, string $terminalId, string $level = 'warning'): void
     {
         try {
-            Logger::log('PayArc terminal record dropped during normalization', $this->connection_log_context($settings, array(
+            Logger::log('PayArc terminal record not selectable', $this->connection_log_context($settings, array(
                 'drop_reason' => $reason,
                 'terminal_id_masked' => Settings::mask_identifier($terminalId),
-            )), null, 'warning');
+            )), null, $level);
         } catch (\Throwable $exception) {
             // Diagnostic logging must not interrupt terminal discovery.
         }

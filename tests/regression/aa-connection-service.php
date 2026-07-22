@@ -272,7 +272,7 @@ patwc_connection_assert_same('42', $result['terminals'][2]['terminal_id'], 'Shor
 patwc_connection_assert_same('Front Counter A920 (pax_A920) ••••••8139', $result['terminals'][0]['label'], 'Terminal label should be merchant-friendly and masked.');
 patwc_connection_assert_same(1, $result['unidentified_terminal_count'], 'Registry record without a POS identifier should be surfaced as an informational count.');
 patwc_connection_assert_same(array(array('label' => 'Missing identifier terminal (pax_A920) Not configured')), $result['unidentified_terminals'], 'Unidentified terminals should expose only a name/type label with the masked placeholder.');
-patwc_connection_assert_contains('PayArc reports 1 terminal(s) without a POS identifier assigned. Ask PayArc support to provision the terminal for PayArc Connect, or enter the PayArc-confirmed terminal serial number manually.', $result['message'], 'Connect message should explain terminals missing a POS identifier.');
+patwc_connection_assert_contains('PayArc also returned 1 registry record(s) with no POS identifier. That is normal: the terminal serial number below is what PayArc Connect uses to take a payment.', $result['message'], 'Connect message should describe a null pos_identifier as normal, not a fault.');
 patwc_connection_assert_missing_secret($result, '00000000000003', 'Connect result must not expose the raw device id of an unidentified terminal.');
 patwc_connection_assert_same(3, count($stored['terminal_registry']), 'Unidentified terminals must not be stored in the selectable terminal registry.');
 patwc_connection_assert_same('connect-access-token', $stored['connect_access_token'], 'Connect access token should be stored server-side.');
@@ -312,13 +312,13 @@ patwc_connection_assert_contains('PayArc connection attempt started', $encodedLo
 patwc_connection_assert_contains('connect_mid_masked', $encodedLogs, 'Connect logs should include masked merchant context.');
 patwc_connection_assert_contains('PayArc connection completed', $encodedLogs, 'Connect should log a successful connection summary.');
 $connectDropWarnings = array_values(array_filter($GLOBALS['patwc_captured_logs'], static function (array $entry): bool {
-    return $entry['message'] === 'PayArc terminal record dropped during normalization';
+    return $entry['message'] === 'PayArc terminal record not selectable';
 }));
 patwc_connection_assert_same(3, count($connectDropWarnings), 'Connect should log one warning per dropped registry record (disabled + missing identifier).');
 patwc_connection_assert_same('warning', $connectDropWarnings[0]['level'], 'Dropped-record log level mismatch during connect.');
 patwc_connection_assert_same('disabled', $connectDropWarnings[0]['context']['drop_reason'], 'Dropped disabled registry record should state the disabled reason.');
 patwc_connection_assert_same('••••••8140', $connectDropWarnings[0]['context']['terminal_id_masked'], 'Dropped-record log should mask the terminal identifier during connect.');
-patwc_connection_assert_same('missing_identifier', $connectDropWarnings[1]['context']['drop_reason'], 'Registry record without any identifier should state the missing_identifier reason.');
+patwc_connection_assert_same('no_pos_identifier', $connectDropWarnings[1]['context']['drop_reason'], 'Registry record with a null pos_identifier should state the no_pos_identifier reason.');
 patwc_connection_assert_same('Not configured', $connectDropWarnings[1]['context']['terminal_id_masked'], 'Missing identifier should mask to the Not configured placeholder.');
 patwc_connection_assert_same('disabled', $connectDropWarnings[2]['context']['drop_reason'], 'Disabled registry records should be classified before missing identifiers.');
 patwc_connection_assert_same('Not configured', $connectDropWarnings[2]['context']['terminal_id_masked'], 'Disabled registry records without identifiers should mask to the Not configured placeholder.');
@@ -802,16 +802,17 @@ $droppedRefresh = $service->refresh_terminals();
 patwc_connection_assert_same(2, $droppedRefresh['terminal_count'], 'Enabled terminals with any non-empty identifier should survive normalization.');
 patwc_connection_assert_same(1, $droppedRefresh['unidentified_terminal_count'], 'Refresh should surface the unidentified terminal count.');
 patwc_connection_assert_same('Unidentified Terminal (pax_A920) Not configured', $droppedRefresh['unidentified_terminals'][0]['label'], 'Refresh should expose the unidentified terminal name/type label.');
-patwc_connection_assert_contains('PayArc reports 1 terminal(s) without a POS identifier assigned. Ask PayArc support to provision the terminal for PayArc Connect, or enter the PayArc-confirmed terminal serial number manually.', $droppedRefresh['message'], 'Refresh message should explain terminals missing a POS identifier.');
+patwc_connection_assert_contains('PayArc also returned 1 registry record(s) with no POS identifier. That is normal: the terminal serial number below is what PayArc Connect uses to take a payment.', $droppedRefresh['message'], 'Refresh message should describe a null pos_identifier as normal, not a fault.');
 
 $dropWarnings = array_values(array_filter($GLOBALS['patwc_captured_logs'], static function (array $entry): bool {
-    return $entry['message'] === 'PayArc terminal record dropped during normalization';
+    return $entry['message'] === 'PayArc terminal record not selectable';
 }));
 patwc_connection_assert_same(2, count($dropWarnings), 'Each dropped registry record should log exactly one warning.');
 patwc_connection_assert_same('warning', $dropWarnings[0]['level'], 'Dropped-record logs should use the warning level.');
 patwc_connection_assert_same('disabled', $dropWarnings[0]['context']['drop_reason'], 'Disabled record drop should state the disabled reason.');
 patwc_connection_assert_same('••••••8142', $dropWarnings[0]['context']['terminal_id_masked'], 'Disabled record identifier should be masked in the drop log.');
-patwc_connection_assert_same('missing_identifier', $dropWarnings[1]['context']['drop_reason'], 'Record without any identifier should state the missing_identifier reason.');
+patwc_connection_assert_same('no_pos_identifier', $dropWarnings[1]['context']['drop_reason'], 'Record with a null pos_identifier should state the no_pos_identifier reason.');
+patwc_connection_assert_same('info', $dropWarnings[1]['level'], 'A null pos_identifier is documented as optional and must not be logged as a warning.');
 patwc_connection_assert_same('Not configured', $dropWarnings[1]['context']['terminal_id_masked'], 'Missing identifier should mask to the Not configured placeholder.');
 patwc_connection_assert_same(true, array_key_exists('connect_mid_masked', $dropWarnings[0]['context']), 'Drop logs should carry the standard connection log context.');
 patwc_connection_assert_missing_secret($GLOBALS['patwc_captured_logs'], 'SERIAL-XYZ-987654', 'Logs must not contain the raw alphanumeric identifier even when it is accepted.');
@@ -899,16 +900,16 @@ patwc_connection_assert_same(array(
     array('label' => 'Unidentified Terminal (pax_A920) Not configured'),
     array('label' => 'Unidentified Terminal (pax_A920) Not configured'),
 ), $unprovisionedResult['unidentified_terminals'], 'Unidentified terminal labels should carry name/type with the masked placeholder only.');
-patwc_connection_assert_contains('PayArc reports 4 terminal(s) without a POS identifier assigned. Ask PayArc support to provision the terminal for PayArc Connect, or enter the PayArc-confirmed terminal serial number manually.', $unprovisionedResult['message'], 'Connect message should name the unprovisioned terminal count and the next steps.');
+patwc_connection_assert_contains('PayArc also returned 4 registry record(s) with no POS identifier. That is normal: the terminal serial number below is what PayArc Connect uses to take a payment.', $unprovisionedResult['message'], 'Connect message should describe null pos_identifier records as normal, not a fault.');
 patwc_connection_assert_missing_secret($unprovisionedResult, '00000000009001', 'Unidentified terminal entries must not expose raw device ids.');
 patwc_connection_assert_missing_secret($unprovisionedResult, '00000000009002', 'Deduped unidentified terminal entries must not expose raw device ids.');
 patwc_connection_assert_same(array(), $stored['terminal_registry'], 'Unprovisioned terminals must not be persisted as selectable registry entries.');
 $unprovisionedDropWarnings = array_values(array_filter($GLOBALS['patwc_captured_logs'], static function (array $entry): bool {
-    return $entry['message'] === 'PayArc terminal record dropped during normalization';
+    return $entry['message'] === 'PayArc terminal record not selectable';
 }));
 patwc_connection_assert_same(5, count($unprovisionedDropWarnings), 'Each raw unprovisioned record should keep its own masked drop warning.');
 foreach ($unprovisionedDropWarnings as $warning) {
-    patwc_connection_assert_same('missing_identifier', $warning['context']['drop_reason'], 'Unprovisioned drop warnings should state the missing_identifier reason.');
+    patwc_connection_assert_same('no_pos_identifier', $warning['context']['drop_reason'], 'Records with a null pos_identifier should state the no_pos_identifier reason.');
     patwc_connection_assert_same('Not configured', $warning['context']['terminal_id_masked'], 'Unprovisioned drop warnings should mask to the Not configured placeholder.');
 }
 
