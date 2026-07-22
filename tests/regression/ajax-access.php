@@ -375,9 +375,42 @@ patwc_ajax_reset_env();
 $service = new PatwcAjaxFakePaymentService();
 $handler = patwc_ajax_handler($service, $orders);
 $token = AjaxHandler::order_token_for($order);
+// WCPOS renders order-pay under the customer's user context while a cashier
+// submits, so the page nonce does not verify for the submitting user. The
+// signed order token is the durable POS credential and must stand alone.
 $tokenWithoutNonce = $handler->handle_start(array('order_id' => '1001', 'order_token' => $token));
-patwc_ajax_assert_same(403, $tokenWithoutNonce['status_code'], 'Order token lifecycle without nonce should be rejected.');
-patwc_ajax_assert_same(array(), $service->start_calls, 'Order token without nonce should not call payment service.');
+patwc_ajax_assert_same(200, $tokenWithoutNonce['status_code'], 'A valid signed order token must authorize a cashier whose nonce was minted under another user context.');
+patwc_ajax_assert_same(array(array('order_id' => 1001, 'terminal_id' => '')), $service->start_calls, 'Order token alone should reach the payment service.');
+
+// The token is an unguessable HMAC, so accepting it does not open a CSRF path:
+// anything short of a valid token for this exact order still needs the nonce.
+patwc_ajax_reset_env();
+$service = new PatwcAjaxFakePaymentService();
+$handler = patwc_ajax_handler($service, $orders);
+$forgedToken = $handler->handle_start(array('order_id' => '1001', 'order_token' => '1001:forged-signature'));
+patwc_ajax_assert_same(403, $forgedToken['status_code'], 'A forged order token without a nonce must be rejected.');
+$emptyToken = $handler->handle_start(array('order_id' => '1001', 'order_token' => ''));
+patwc_ajax_assert_same(403, $emptyToken['status_code'], 'An empty order token must not authorize a nonce-free request.');
+$otherOrderTokenNoNonce = $handler->handle_start(array('order_id' => '1001', 'order_token' => AjaxHandler::order_token_for($otherOrder)));
+patwc_ajax_assert_same(403, $otherOrderTokenNoNonce['status_code'], 'A token for a different order must not authorize this order.');
+$GLOBALS['patwc_ajax_caps'] = array('manage_woocommerce' => true);
+$capabilityNoNonce = $handler->handle_start(array('order_id' => '1001'));
+patwc_ajax_assert_same(403, $capabilityNoNonce['status_code'], 'Capability alone must still require a nonce, so CSRF protection is preserved.');
+patwc_ajax_assert_same(array(), $service->start_calls, 'No rejected request should reach the payment service.');
+
+$deniedLogs = array_values(array_filter($GLOBALS['patwc_captured_logs'], static function (array $entry): bool {
+    return $entry['message'] === 'PayArc payment request denied';
+}));
+patwc_ajax_assert_same(4, count($deniedLogs), 'Every denied lifecycle request must leave a server-side trace.');
+patwc_ajax_assert_same('warning', $deniedLogs[0]['level'], 'Denied payment requests should be logged as warnings.');
+patwc_ajax_assert_same('no_order_token_and_invalid_nonce', $deniedLogs[0]['context']['denied_reason'], 'Denial log should state why the request was rejected.');
+patwc_ajax_assert_same(true, $deniedLogs[0]['context']['order_token_submitted'], 'Denial log should record that a token was submitted.');
+patwc_ajax_assert_same(false, $deniedLogs[0]['context']['nonce_submitted'], 'Denial log should record that no nonce was submitted.');
+patwc_ajax_assert_true(strpos((string) json_encode($GLOBALS['patwc_captured_logs']), 'forged-signature') === false, 'Denial logs must not contain the submitted token value.');
+
+patwc_ajax_reset_env();
+$service = new PatwcAjaxFakePaymentService();
+$handler = patwc_ajax_handler($service, $orders);
 
 $tokenStart = $handler->handle_start(array('order_id' => '1001', 'order_token' => $token, '_ajax_nonce' => 'valid-payment-nonce'));
 $tokenPoll = $handler->handle_poll(array('order_id' => '1001', 'order_token' => $token, 'nonce' => 'valid-payment-nonce'));

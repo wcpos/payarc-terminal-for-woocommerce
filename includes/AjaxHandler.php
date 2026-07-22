@@ -189,10 +189,6 @@ class AjaxHandler
         $emit = $request === null;
         $request = $this->request($request);
 
-        if (!$this->has_valid_nonce($request, 'patwc_payment')) {
-            return $this->maybe_emit($this->error_response(403, 'Access denied.'), $emit);
-        }
-
         $orderId = $this->order_id_from_request($request);
 
         if ($orderId <= 0) {
@@ -204,7 +200,24 @@ class AjaxHandler
             return $this->maybe_emit($this->error_response(404, 'Order not found.'), $emit);
         }
 
-        if (!$this->can_access_order($orderId, $order, $request)) {
+        // WooCommerce POS renders order-pay under the customer's user context
+        // while a cashier submits the payment, so the nonce minted for the
+        // template does not verify for the submitting user. The signed
+        // order-scoped token is the durable POS credential: it is an HMAC over
+        // the order id and order key, so it is unguessable and safe to accept
+        // in place of the nonce. Capability-only requests still require the
+        // nonce, so this does not open a CSRF path for shop managers.
+        $hasOrderToken = $this->has_valid_order_token($request, $orderId, $order);
+
+        if (!$hasOrderToken && !$this->has_valid_nonce($request, 'patwc_payment')) {
+            $this->log_lifecycle_denied($action, $orderId, 'no_order_token_and_invalid_nonce', $request);
+
+            return $this->maybe_emit($this->error_response(403, 'Access denied.'), $emit);
+        }
+
+        if (!$hasOrderToken && !$this->can_access_order($orderId, $order, $request)) {
+            $this->log_lifecycle_denied($action, $orderId, 'order_access_denied', $request);
+
             return $this->maybe_emit($this->error_response(403, 'Access denied.'), $emit);
         }
 
@@ -462,6 +475,60 @@ class AjaxHandler
         }
 
         return $_REQUEST;
+    }
+
+    /**
+     * Whether the request carries the signed order-scoped token for this order.
+     *
+     * @param array<string, mixed> $request
+     * @param object $order
+     */
+    private function has_valid_order_token(array $request, int $order_id, $order): bool
+    {
+        $token = isset($request['order_token']) && is_scalar($request['order_token']) ? trim((string) $request['order_token']) : '';
+
+        if ($token === '' || $order_id <= 0) {
+            return false;
+        }
+
+        return self::token_matches_order($token, $order_id, $order);
+    }
+
+    /**
+     * Records why a payment lifecycle request was rejected. Without this a
+     * cashier whose request is denied produces no server-side trace at all,
+     * which is what made this failure mode invisible in merchant logs.
+     *
+     * @param array<string, mixed> $request
+     */
+    private function log_lifecycle_denied(string $action, int $order_id, string $reason, array $request): void
+    {
+        try {
+            Logger::log('PayArc payment request denied', array(
+                'action' => $action,
+                'order_id' => $order_id,
+                'denied_reason' => $reason,
+                'order_token_submitted' => isset($request['order_token']) && is_scalar($request['order_token']) && trim((string) $request['order_token']) !== '',
+                'nonce_submitted' => $this->nonce_submitted($request),
+                'user_logged_in' => function_exists('is_user_logged_in') ? is_user_logged_in() : null,
+            ), null, 'warning');
+        } catch (Throwable $exception) {
+            // Diagnostic logging must not interrupt the error response.
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $request
+     */
+    private function nonce_submitted(array $request): bool
+    {
+        foreach (array('_ajax_nonce', 'nonce', 'security') as $key) {
+            if (isset($request[$key]) && is_scalar($request[$key]) && trim((string) $request[$key]) !== '') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
