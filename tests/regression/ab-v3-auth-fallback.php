@@ -128,6 +128,28 @@ patwc_v3_assert_same(array(
     'source' => 'payarc-terminal-for-woocommerce',
 ), $fallbackLog['context'] ?? array(), 'Successful fallback warning context mismatch.');
 
+// A failed Login refresh must not prevent the untouched SecretKey fallback.
+$stored = array();
+$settings = new Settings($baseSettings);
+$service = new class($settings, static function (array $updates) use (&$stored): void {
+    $stored = array_merge($stored, $updates);
+}) extends PatwcV3FallbackConnectionService {
+    public function login(?Settings $settings = null): array
+    {
+        $this->login_calls++;
+
+        throw new RuntimeException('PayArc Login unavailable.');
+    }
+};
+$GLOBALS['patwc_client_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(patwc_v3_response(401), patwc_v3_response(200));
+(new PayArcClient($settings, $service))->sale($payload, $idempotencyKey);
+patwc_v3_assert_same(array('Bearer stale-access-token', 'Bearer merchant-secret-key'), array_map(static function (array $request): string {
+    return $request['args']['headers']['Authorization'];
+}, $GLOBALS['patwc_client_requests']), 'A failed Login refresh should fall back to the SecretKey.');
+patwc_v3_assert_same(1, $service->login_calls, 'A failed Login refresh should be attempted once.');
+patwc_v3_assert_same('secret_key', $stored['v3_auth_credential'] ?? '', 'The working SecretKey should be persisted after a failed Login refresh.');
+
 // Every credential attempt rejected.
 $stored = array();
 $settings = new Settings($baseSettings);

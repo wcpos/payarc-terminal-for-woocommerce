@@ -145,7 +145,12 @@ class PayArcClient
 
             $attempted[$credential] = true;
             if ($credential === 'access_token' && !$this->login_attempted) {
-                $token = $this->refresh_connect_access_token();
+                try {
+                    $token = $this->refresh_connect_access_token();
+                } catch (RuntimeException $exception) {
+                    $credential = 'secret_key';
+                    $token = $this->settings->connect_secret_key();
+                }
                 continue;
             }
 
