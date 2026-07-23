@@ -141,7 +141,10 @@ class Settings
 
     public function v3_auth_credential(): string
     {
-        return $this->string_setting('v3_auth_credential', '') === 'secret_key' ? 'secret_key' : 'access_token';
+        // Live probe 2026-07-23: production /v3/transactions authenticates with the
+        // merchant SecretKey JWT and rejects the curvpos Login AccessToken, so the
+        // SecretKey is the default and the AccessToken remains the opt-in fallback.
+        return $this->string_setting('v3_auth_credential', '') === 'access_token' ? 'access_token' : 'secret_key';
     }
 
     /**

@@ -83,7 +83,7 @@ patwc_client_assert_same('https://testpayarcconnectapi.payarc.net/v3/transaction
 patwc_client_assert_same('POST', $args['method'], 'Sale method mismatch.');
 patwc_client_assert_same('application/json', $headers['Accept'], 'Accept header mismatch.');
 patwc_client_assert_same('application/json', $headers['Content-Type'], 'Content-Type header mismatch.');
-patwc_client_assert_same('Bearer connect-access-token', $headers['Authorization'], 'Connect V3 requests should use the Login AccessToken, not the Merchant Dashboard API token.');
+patwc_client_assert_same('Bearer merchant-api-token', $headers['Authorization'], 'Connect V3 requests should default to the merchant SecretKey bearer (verified against production 2026-07-23).');
 patwc_client_assert_same($idempotencyKey, $headers['X-Idempotency-Key'], 'Idempotency header mismatch.');
 patwc_client_assert_same(array(
     'tenantId' => '123456789012',

@@ -10,6 +10,7 @@ $root = dirname(__DIR__, 2);
 foreach (array(
     $root . '/includes/Settings.php',
     $root . '/includes/Logger.php',
+    $root . '/includes/Utils/PayArcIds.php',
     $root . '/includes/Services/PayArcConnectionService.php',
     $root . '/includes/Services/PayArcClient.php',
 ) as $file) {
@@ -86,6 +87,9 @@ $baseSettings = array(
     'connect_secret_key' => 'merchant-secret-key',
     'connect_access_token' => 'stale-access-token',
     'connect_token_expires_at' => (string) (time() + 3600),
+    // The shipped default preference is secret_key; these scenarios exercise
+    // the AccessToken-preferred path explicitly.
+    'v3_auth_credential' => 'access_token',
 );
 $idempotencyKey = '550e8400-e29b-41d4-a716-446655440000';
 $payload = array('tenantId' => '123456789012', 'terminalId' => '1234567890', 'amount' => array('total' => 100));
@@ -191,4 +195,17 @@ $GLOBALS['patwc_http_response_queue'] = array(patwc_v3_response(200));
 patwc_v3_assert_same('Bearer token-without-expiry', $GLOBALS['patwc_client_requests'][0]['args']['headers']['Authorization'], 'Expiry 0 should refresh before the V3 request.');
 patwc_v3_assert_same('2200', $stored['connect_token_expires_at'] ?? '', 'Missing ExpiresIn should store now + 1200.');
 
-patwc_v3_assert_same('access_token', (new Settings(array('v3_auth_credential' => 'invalid')))->v3_auth_credential(), 'Invalid preference should default to AccessToken.');
+patwc_v3_assert_same('secret_key', (new Settings(array()))->v3_auth_credential(), 'The default V3 credential must be the SecretKey (verified against production 2026-07-23).');
+patwc_v3_assert_same('secret_key', (new Settings(array('v3_auth_credential' => 'invalid')))->v3_auth_credential(), 'Invalid preference should fall back to the SecretKey default.');
+patwc_v3_assert_same('access_token', (new Settings(array('v3_auth_credential' => 'access_token')))->v3_auth_credential(), 'Stored access_token preference should be honored.');
+
+// The V3 API rejects requests without X-Idempotency-Key even on GET, so the
+// client must generate one when the caller does not supply it.
+$settings = new Settings($baseSettings);
+$GLOBALS['patwc_client_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(patwc_v3_response(200));
+(new PayArcClient($settings, new PatwcV3FallbackConnectionService($settings, static function (array $updates): void {})))->get_transaction('trace_123');
+$generatedKey = $GLOBALS['patwc_client_requests'][0]['args']['headers']['X-Idempotency-Key'] ?? '';
+if (preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/', $generatedKey) !== 1) {
+    throw new RuntimeException('get_transaction must send a generated UUID X-Idempotency-Key, got ' . var_export($generatedKey, true) . '.');
+}

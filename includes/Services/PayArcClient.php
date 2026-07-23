@@ -5,6 +5,7 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Services;
 use RuntimeException;
 use WCPOS\WooCommercePOS\PayArcTerminal\Logger;
 use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
+use WCPOS\WooCommercePOS\PayArcTerminal\Utils\PayArcIds;
 
 class PayArcClient
 {
@@ -82,6 +83,7 @@ class PayArcClient
         $preferredCredential = $this->settings->v3_auth_credential();
         $credential = $preferredCredential;
         $this->login_attempted = false;
+        $this->assert_connect_state();
         $token = $credential === 'secret_key' ? $this->settings->connect_secret_key() : $this->connect_access_token();
 
         if ($baseUrl === '') {
@@ -89,7 +91,9 @@ class PayArcClient
         }
 
         if ($token === '') {
-            throw new RuntimeException('PayArc Connect access token is not configured. Press Connect PayArc in the gateway settings.');
+            throw new RuntimeException($credential === 'secret_key'
+                ? 'PayArc SecretKey/API bearer token is not configured. Enter it in the gateway settings.'
+                : 'PayArc Connect access token is not configured. Press Connect PayArc in the gateway settings.');
         }
 
         $headers = array(
@@ -98,9 +102,12 @@ class PayArcClient
             'Authorization' => 'Bearer ' . $token,
         );
 
-        if ($idempotency_key !== null && trim($idempotency_key) !== '') {
-            $headers['X-Idempotency-Key'] = $idempotency_key;
+        // The V3 API requires X-Idempotency-Key on every call, including GETs
+        // (verified live 2026-07-23: requests without it are rejected with 400).
+        if ($idempotency_key === null || trim($idempotency_key) === '') {
+            $idempotency_key = PayArcIds::idempotency_key();
         }
+        $headers['X-Idempotency-Key'] = $idempotency_key;
 
         $args = array(
             'method' => $method,
@@ -183,7 +190,12 @@ class PayArcClient
     }
 
 
-    private function connect_access_token(): string
+    /**
+     * The connected-state guards must hold for every credential: they enforce
+     * that Connect PayArc was completed for the current mode and credentials,
+     * which is what validates the setup even when the SecretKey signs requests.
+     */
+    private function assert_connect_state(): void
     {
         $connectedMode = $this->settings->connected_mode();
         $connectedFingerprint = $this->settings->connected_fingerprint();
@@ -199,7 +211,10 @@ class PayArcClient
         if ($this->settings->mode() === 'production' && ($connectedMode !== 'production' || $connectedFingerprint === '')) {
             throw new RuntimeException('PayArc Live mode requires a Live Connect AccessToken. Press Connect PayArc in Live mode before taking payments.');
         }
+    }
 
+    private function connect_access_token(): string
+    {
         $token = $this->settings->connect_access_token();
         $expiresAt = $this->settings->connect_token_expires_at();
         $now = time();
