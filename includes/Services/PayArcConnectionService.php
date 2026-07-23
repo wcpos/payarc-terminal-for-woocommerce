@@ -6,6 +6,7 @@ use RuntimeException;
 use WCPOS\WooCommercePOS\PayArcTerminal\Logger;
 use WCPOS\WooCommercePOS\PayArcTerminal\PaymentAttempt;
 use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
+use WCPOS\WooCommercePOS\PayArcTerminal\Utils\PayArcIds;
 
 class PayArcConnectionService
 {
@@ -90,6 +91,13 @@ class PayArcConnectionService
         $updates['tenant_id'] = $tenantId;
         $updates['terminal_registry'] = $terminals;
         $updates['default_terminal_id'] = $defaultTerminal;
+
+        if ($this->settings->callback_url_token() === '') {
+            // Self-provisioned callback secret: embedded in the callbackURL of
+            // every sale so inbound callbacks verify without a PayArc-provided
+            // bearer token. Generated once and kept stable across reconnects.
+            $updates['callback_url_token'] = PayArcIds::idempotency_key();
+        }
 
         $this->assert_no_in_flight_payment_attempts();
         $this->persist($updates);
@@ -352,46 +360,29 @@ class PayArcConnectionService
         $seen = array();
         $seenUnidentified = array();
 
+        // Serials/devices we already know about: the configured terminal serial
+        // plus any device referenced by an identified record. Registry records
+        // without a pos_identifier that describe one of these devices are
+        // duplicates of a known terminal, not a separate unidentified device.
+        $knownDevices = array();
+        $defaultSerial = strtolower(trim($settings->default_terminal_id()));
+        if ($defaultSerial !== '') {
+            $knownDevices[$defaultSerial] = true;
+        }
+
+        // First pass: records carrying a POS identifier.
         foreach ($rawTerminals as $raw) {
             if (!is_array($raw)) {
                 continue;
             }
 
             $terminalId = $this->field($raw, array('pos_identifier', 'Pos_identifier', 'terminal_id', 'TerminalId'));
-            $enabled = $this->enabled_field($raw);
-            if (!$enabled) {
-                $this->log_dropped_terminal($settings, 'disabled', $terminalId);
-                continue;
-            }
-
             if ($terminalId === '') {
-                // Informational, not a warning: the Terminal Registry schema
-                // makes pos_identifier nullable, and a sale is addressed by the
-                // 10-digit terminal serial number instead.
-                $this->log_dropped_terminal($settings, 'no_pos_identifier', $terminalId, 'info');
-                $name = $this->field($raw, array('terminal', 'Terminal', 'name', 'Name'));
-                $type = $this->field($raw, array('type', 'Type'));
-                // Dedupe key may use raw device fields because it never leaves
-                // this method; the exposed entry carries only name/type.
-                $deviceId = $this->field($raw, array('device_id', 'Device_id'));
-                $code = $this->field($raw, array('code', 'Code', 'id', 'Id'));
-                if ($deviceId !== '') {
-                    $key = 'device|' . strtolower($deviceId);
-                } elseif ($code !== '') {
-                    $key = 'code|' . strtolower($code);
-                } else {
-                    $key = 'label|' . strtolower($name . '|' . $type) . '|' . count($seenUnidentified);
-                }
-                if (!isset($seenUnidentified[$key])) {
-                    $seenUnidentified[$key] = true;
-                    $unidentified[] = array(
-                        'label' => Settings::terminal_label($name, $type, ''),
-                    );
-                }
                 continue;
             }
 
-            if (isset($seen[$terminalId])) {
+            if (!$this->enabled_field($raw)) {
+                $this->log_dropped_terminal($settings, 'disabled', $terminalId);
                 continue;
             }
 
@@ -399,6 +390,16 @@ class PayArcConnectionService
             $type = $this->field($raw, array('type', 'Type'));
             $deviceId = $this->field($raw, array('device_id', 'Device_id'));
             $code = $this->field($raw, array('code', 'Code', 'id', 'Id'));
+            foreach (array($deviceId, $name) as $knownKey) {
+                if (trim($knownKey) !== '') {
+                    $knownDevices[strtolower(trim($knownKey))] = true;
+                }
+            }
+
+            if (isset($seen[$terminalId])) {
+                continue;
+            }
+
             $seen[$terminalId] = true;
             $terminals[] = array(
                 'terminal_id' => $terminalId,
@@ -409,6 +410,58 @@ class PayArcConnectionService
                 'device_id' => $deviceId,
                 'code' => $code,
             );
+        }
+
+        // Second pass: records without a POS identifier.
+        foreach ($rawTerminals as $raw) {
+            if (!is_array($raw)) {
+                continue;
+            }
+
+            $terminalId = $this->field($raw, array('pos_identifier', 'Pos_identifier', 'terminal_id', 'TerminalId'));
+            if ($terminalId !== '') {
+                continue;
+            }
+
+            if (!$this->enabled_field($raw)) {
+                $this->log_dropped_terminal($settings, 'disabled', $terminalId);
+                continue;
+            }
+
+            $name = $this->field($raw, array('terminal', 'Terminal', 'name', 'Name'));
+            $type = $this->field($raw, array('type', 'Type'));
+            // Dedupe key may use raw device fields because it never leaves
+            // this method; the exposed entry carries only name/type.
+            $deviceId = $this->field($raw, array('device_id', 'Device_id'));
+            $code = $this->field($raw, array('code', 'Code', 'id', 'Id'));
+
+            $matchesKnownDevice = (trim($deviceId) !== '' && isset($knownDevices[strtolower(trim($deviceId))]))
+                || (trim($name) !== '' && isset($knownDevices[strtolower(trim($name))]));
+            if ($matchesKnownDevice) {
+                // The registry mirrors an already-known terminal without its
+                // pos_identifier; reporting it as unidentified only alarms the
+                // merchant about a device that is fully configured.
+                $this->log_dropped_terminal($settings, 'registry_duplicate_of_known_terminal', $terminalId, 'info');
+                continue;
+            }
+
+            // Informational, not a warning: the Terminal Registry schema
+            // makes pos_identifier nullable, and a sale is addressed by the
+            // 10-digit terminal serial number instead.
+            $this->log_dropped_terminal($settings, 'no_pos_identifier', $terminalId, 'info');
+            if ($deviceId !== '') {
+                $key = 'device|' . strtolower($deviceId);
+            } elseif ($code !== '') {
+                $key = 'code|' . strtolower($code);
+            } else {
+                $key = 'label|' . strtolower($name . '|' . $type) . '|' . count($seenUnidentified);
+            }
+            if (!isset($seenUnidentified[$key])) {
+                $seenUnidentified[$key] = true;
+                $unidentified[] = array(
+                    'label' => Settings::terminal_label($name, $type, ''),
+                );
+            }
         }
 
         return array('terminals' => $terminals, 'unidentified' => $unidentified);

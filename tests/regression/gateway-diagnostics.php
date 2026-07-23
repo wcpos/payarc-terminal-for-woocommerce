@@ -224,7 +224,7 @@ patwc_gateway_diagnostics_assert_same('error', $diagnostics['status'], 'Invalid 
 patwc_gateway_diagnostics_assert_same(array(
     'PayArc SecretKey/API bearer token must be configured.',
     'Click Connect using these credentials to fetch a Connect AccessToken.',
-    'Callback bearer token must be configured.',
+    'Callback authentication is not configured. Press Connect PayArc to generate the callback URL token.',
     'PayArc MID or tenant id must be configured.',
     'Enter the PayArc terminal serial number.',
     'Callback URL must be HTTPS.',

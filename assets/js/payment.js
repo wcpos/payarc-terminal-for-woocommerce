@@ -60,12 +60,20 @@
         return pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
     }
 
+    var lastLogMessage = '';
+
     function appendLog(message) {
         var $log = logContainer();
 
         if (!$log.length || !message) {
             return;
         }
+
+        // Polling repeats the same status every couple of seconds; only log changes.
+        if (message === lastLogMessage) {
+            return;
+        }
+        lastLogMessage = message;
 
         $('<div/>', {
             'class': 'patwc-payment-log__entry',

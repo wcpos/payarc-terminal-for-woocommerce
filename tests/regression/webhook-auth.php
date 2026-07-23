@@ -313,3 +313,38 @@ patwc_webhook_assert_same('conflict', $nestedPollResult['status'], 'Poll overlap
 patwc_webhook_assert_same(true, $nestedPollResult['continue_polling'], 'Poll overlapping webhook reconciliation should continue polling.');
 patwc_webhook_assert_same(array(), $nestedPollClient->get_calls, 'Poll overlapping webhook reconciliation should not fetch transaction.');
 patwc_webhook_assert_same(array(), $nestedPollReconciler->calls, 'Poll overlapping webhook reconciliation should not reconcile.');
+
+// Callback URL token: the plugin-generated secret in the callbackURL query
+// authenticates callbacks without a PayArc-provided bearer token.
+$urlTokenOrder = new PatwcWebhookAuthOrder(2002);
+$urlTokenClient = new PatwcWebhookAuthFakeClient();
+$urlTokenReconciler = new PatwcWebhookAuthFakeReconciler();
+$urlTokenLocator = static function (array $criteria) use ($urlTokenOrder) {
+    return $urlTokenOrder;
+};
+$urlTokenHandler = new WebhookHandler(new Settings(array('callback_url_token' => 'url-secret-token')), $urlTokenClient, $urlTokenReconciler, $urlTokenLocator);
+
+// Correct URL token, no bearer at all: auth passes (the 400 proves the request
+// advanced past authorization to JSON parsing).
+$urlTokenAccepted = $urlTokenHandler->handle_request('{invalid json', array('REMOTE_ADDR' => '203.0.113.11'), array('patwc_cb' => 'url-secret-token'));
+patwc_webhook_assert_same(400, $urlTokenAccepted['status_code'], 'A correct callback URL token should authenticate without a bearer token.');
+patwc_webhook_assert_same('invalid_json', $urlTokenAccepted['body']['error'], 'URL-token-authenticated request should fail on JSON, not auth.');
+
+// Wrong or missing URL token with no bearer configured: rejected with a
+// specific reason (not the not-configured reason).
+$GLOBALS['patwc_captured_logs'] = array();
+$urlTokenWrong = $urlTokenHandler->handle_request('{"traceId":"trace-webhook-2"}', array('REMOTE_ADDR' => '203.0.113.12'), array('patwc_cb' => 'wrong-token'));
+patwc_webhook_assert_same(401, $urlTokenWrong['status_code'], 'A wrong callback URL token should return 401.');
+$urlTokenMissing = $urlTokenHandler->handle_request('{"traceId":"trace-webhook-2"}', array('REMOTE_ADDR' => '203.0.113.13'));
+patwc_webhook_assert_same(401, $urlTokenMissing['status_code'], 'A missing callback URL token should return 401 when no bearer is configured.');
+$urlTokenReasons = array_map(static function (array $entry): string {
+    return (string) $entry['context']['reason'];
+}, patwc_webhook_logs('PayArc callback rejected'));
+patwc_webhook_assert_same(true, in_array('callback_url_token_mismatch', $urlTokenReasons, true), 'URL token rejection should be identified as a mismatch, not as unconfigured.');
+patwc_webhook_assert_same(false, in_array('callback_token_not_configured', $urlTokenReasons, true), 'Configured URL token must not be reported as unconfigured.');
+patwc_webhook_assert_logs_hide('url-secret-token', 'Callback logs must not contain the URL token.');
+
+// Both configured: a valid bearer still authenticates even without the query token.
+$bothHandler = new WebhookHandler(new Settings(array('callback_bearer_token' => 'expected-token', 'callback_url_token' => 'url-secret-token')), $urlTokenClient, $urlTokenReconciler, $urlTokenLocator);
+$bearerStillWorks = $bothHandler->handle_request('{invalid json', array('HTTP_AUTHORIZATION' => 'Bearer expected-token', 'REMOTE_ADDR' => '203.0.113.14'));
+patwc_webhook_assert_same(400, $bearerStillWorks['status_code'], 'A valid bearer should still authenticate when a URL token is also configured.');
