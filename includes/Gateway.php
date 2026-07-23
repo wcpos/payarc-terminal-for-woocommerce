@@ -35,7 +35,8 @@ trait GatewayImplementation
             'enabled' => array(
                 'title' => 'Enable/Disable',
                 'type' => 'checkbox',
-                'label' => 'Enable PayArc Terminal',
+                'label' => 'Enable PayArc Terminal on the online checkout',
+                'description' => 'Most stores leave this unchecked. WooCommerce POS manages its own payment gateways for in-store terminal payments, so this setting only controls whether online shoppers see PayArc Terminal at the website checkout.',
                 'default' => 'no',
             ),
             'title' => array(
@@ -89,7 +90,7 @@ trait GatewayImplementation
             'callback_bearer_token' => array(
                 'title' => 'Callback bearer token',
                 'type' => 'patwc_secret',
-                'description' => 'PayArc support provides this callback secret when you register your callback URL - the Connect button cannot fetch it. PayArc sends it in the Authorization header of terminal callbacks so the plugin can verify them.',
+                'description' => 'Optional. The plugin adds its own secret token to the callback URL when you press Connect PayArc, so callbacks verify automatically. Only fill this in if PayArc support also issued you a callback bearer token for the Authorization header.',
                 'default' => '',
             ),
             'connection' => array(
@@ -237,9 +238,10 @@ trait GatewayImplementation
         self::append_local_check(
             $checks,
             'callback_bearer_token',
-            self::setting_configured($settings, 'callback_bearer_token_configured', 'callback_bearer_token'),
-            'Callback bearer token is configured.',
-            'Callback bearer token must be configured.'
+            self::setting_configured($settings, 'callback_bearer_token_configured', 'callback_bearer_token')
+                || self::setting_configured($settings, 'callback_auth_configured', 'callback_url_token'),
+            'Callback authentication is configured.',
+            'Callback authentication is not configured. Press Connect PayArc to generate the callback URL token.'
         );
 
         self::append_local_check(
@@ -484,6 +486,7 @@ trait GatewayImplementation
             'connect_secret_key_configured' => $this->gateway_option('connect_secret_key', '') !== '' || $this->gateway_option('api_bearer_token', '') !== '',
             'connect_access_token_configured' => $this->gateway_option('connect_access_token', '') !== '',
             'callback_bearer_token_configured' => $this->gateway_option('callback_bearer_token', '') !== '',
+            'callback_auth_configured' => $this->gateway_option('callback_bearer_token', '') !== '' || $this->gateway_option('callback_url_token', '') !== '',
         );
 
         $html = '<tr valign="top">';
@@ -720,7 +723,7 @@ trait GatewayImplementation
             'function configured(key,flag){return fieldValue(key)!==""||!!config.savedState[flag];}' .
             'function add(errors,condition,message){if(!condition){errors.push(message);}}' .
             'function render(errors){if(errors.length===0){result.textContent="Settings validation passed.";return;}var html="<strong>Settings validation found issues:</strong><ul>";for(var i=0;i<errors.length;i++){html+="<li>"+errors[i].replace(/[&<>]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c];})+"</li>";}result.innerHTML=html+"</ul>";}' .
-            'function localValidate(diagnostics){diagnostics=diagnostics||{};var errors=[];var mid=fieldValue("connect_mid").replace(/\D/g,"");var terminal=fieldValue("default_terminal_id");var secretConfigured=configured("connect_secret_key","connect_secret_key_configured")||!!diagnostics.connect_secret_key_configured;var accessConfigured=!!diagnostics.connect_access_token_configured||!!config.savedState.connect_access_token_configured;var callbackConfigured=configured("callback_bearer_token","callback_bearer_token_configured")||!!diagnostics.callback_bearer_token_configured;var tenantConfigured=mid.length>=12||!!diagnostics.tenant_id_configured;add(errors,secretConfigured,"PayArc SecretKey/API bearer token must be configured.");add(errors,accessConfigured,"Press Connect PayArc to fetch a Connect AccessToken.");add(errors,callbackConfigured,"Callback bearer token must be configured.");add(errors,tenantConfigured,"PayArc MID or tenant id must be configured.");add(errors,terminal!=="","Enter the PayArc terminal serial number.");add(errors,/^https:\/\//i.test(fieldValue("webhook_url")),"Callback URL must be HTTPS.");add(errors,["0","1","2","3"].indexOf(fieldValue("print_receipt"))!==-1,"Print receipt must be one of 0, 1, 2, or 3.");add(errors,["CREDIT","DEBIT"].indexOf(fieldValue("tender_type").toUpperCase())!==-1,"Tender type must be CREDIT or DEBIT.");render(errors);}' .
+            'function localValidate(diagnostics){diagnostics=diagnostics||{};var errors=[];var mid=fieldValue("connect_mid").replace(/\D/g,"");var terminal=fieldValue("default_terminal_id");var secretConfigured=configured("connect_secret_key","connect_secret_key_configured")||!!diagnostics.connect_secret_key_configured;var accessConfigured=!!diagnostics.connect_access_token_configured||!!config.savedState.connect_access_token_configured;var callbackConfigured=configured("callback_bearer_token","callback_bearer_token_configured")||!!diagnostics.callback_bearer_token_configured||!!diagnostics.callback_auth_configured||!!config.savedState.callback_auth_configured;var tenantConfigured=mid.length>=12||!!diagnostics.tenant_id_configured;add(errors,secretConfigured,"PayArc SecretKey/API bearer token must be configured.");add(errors,accessConfigured,"Press Connect PayArc to fetch a Connect AccessToken.");add(errors,callbackConfigured,"Callback authentication is not configured. Press Connect PayArc to generate the callback URL token.");add(errors,tenantConfigured,"PayArc MID or tenant id must be configured.");add(errors,terminal!=="","Enter the PayArc terminal serial number.");add(errors,/^https:\/\//i.test(fieldValue("webhook_url")),"Callback URL must be HTTPS.");add(errors,["0","1","2","3"].indexOf(fieldValue("print_receipt"))!==-1,"Print receipt must be one of 0, 1, 2, or 3.");add(errors,["CREDIT","DEBIT"].indexOf(fieldValue("tender_type").toUpperCase())!==-1,"Tender type must be CREDIT or DEBIT.");render(errors);}' .
             'button.addEventListener("click",function(){var action=button.getAttribute("data-action")||"patwc_validate_settings";var nonce=button.getAttribute("data-nonce")||"";var ajaxUrl=button.getAttribute("data-ajax-url")||"admin-ajax.php";result.textContent="Checking saved settings...";if(!window.fetch||!window.FormData){localValidate({});return;}var data=new FormData();data.append("action",action);data.append("_ajax_nonce",nonce);window.fetch(ajaxUrl,{method:"POST",credentials:"same-origin",body:data}).then(function(response){return response.json();}).then(function(body){localValidate(body&&body.diagnostics?body.diagnostics:{});}).catch(function(){localValidate({});});});' .
             '})(' . $encoded . ');</script>';
     }
@@ -1041,7 +1044,7 @@ trait GatewayImplementation
         }
 
         $state = array();
-        foreach (array('connected_mode', 'connected_fingerprint', 'connect_access_token', 'connect_token_expires_at', 'terminal_registry') as $key) {
+        foreach (array('connected_mode', 'connected_fingerprint', 'connect_access_token', 'connect_token_expires_at', 'terminal_registry', 'callback_url_token', 'v3_auth_credential') as $key) {
             if (array_key_exists($key, $settings)) {
                 $state[$key] = $settings[$key];
             }

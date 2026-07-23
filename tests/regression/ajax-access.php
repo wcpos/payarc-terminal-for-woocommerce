@@ -13,6 +13,7 @@ $root = dirname(__DIR__, 2);
 foreach (array(
     $root . '/includes/Settings.php',
     $root . '/includes/Logger.php',
+    $root . '/includes/Utils/PayArcIds.php',
     $root . '/includes/Services/PayArcConnectionService.php',
     $root . '/includes/AjaxHandler.php',
 ) as $file) {

@@ -15,6 +15,7 @@ foreach (array(
     $root . '/includes/Settings.php',
     $root . '/includes/Logger.php',
     $root . '/includes/PaymentAttempt.php',
+    $root . '/includes/Utils/PayArcIds.php',
     $root . '/includes/Services/PayArcConnectionService.php',
 ) as $file) {
     if (!is_readable($file)) {
@@ -1019,3 +1020,180 @@ try {
         throw new RuntimeException('Provider ErrorMessage redaction marker missing from the exception.');
     }
 }
+
+// Connect self-provisions the callback URL token exactly once.
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'ErrorCode' => 0,
+            'Terminals' => array(),
+            'BearerTokenInfo' => array('AccessToken' => 'cb-token-access', 'ExpiresIn' => 3600),
+        )),
+    ),
+    array('response' => array('code' => 200), 'body' => json_encode(array('data' => array()))),
+);
+$cbStored = array();
+$cbService = new PayArcConnectionService(new Settings(array(
+    'mode' => 'test',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'client-secret',
+    'connect_secret_key' => 'merchant-api-token',
+)), static function (array $updates) use (&$cbStored): void {
+    $cbStored = array_merge($cbStored, $updates);
+});
+$cbService->connect();
+$generatedCallbackToken = isset($cbStored['callback_url_token']) ? (string) $cbStored['callback_url_token'] : '';
+if (preg_match('/^[0-9a-f]{32}$/', $generatedCallbackToken) !== 1) {
+    throw new RuntimeException('Connect should generate a CSPRNG hex callback_url_token, got ' . var_export($generatedCallbackToken, true) . '.');
+}
+
+// A previously generated callback URL token is never regenerated.
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array(
+            'ErrorCode' => 0,
+            'Terminals' => array(),
+            'BearerTokenInfo' => array('AccessToken' => 'cb-token-access-2', 'ExpiresIn' => 3600),
+        )),
+    ),
+    array('response' => array('code' => 200), 'body' => json_encode(array('data' => array()))),
+);
+$cbStored = array();
+$cbKeepService = new PayArcConnectionService(new Settings(array(
+    'mode' => 'test',
+    'connect_email' => 'merchant@example.com',
+    'connect_mid' => '0000123456789012',
+    'connect_client_secret' => 'client-secret',
+    'connect_secret_key' => 'merchant-api-token',
+    'callback_url_token' => 'existing-callback-token',
+)), static function (array $updates) use (&$cbStored): void {
+    $cbStored = array_merge($cbStored, $updates);
+});
+$cbKeepService->connect();
+patwc_connection_assert_same(false, array_key_exists('callback_url_token', $cbStored), 'An existing callback_url_token must be preserved across reconnects.');
+
+// A registry record without a pos_identifier that describes the configured
+// terminal serial is registry metadata for a known device, not a new
+// unidentified terminal (observed live 2026-07-23 on a provisioned pax_A35).
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array('data' => array(array(
+            'object' => 'TerminalRegistry',
+            'id' => 'KnownDeviceRecord',
+            'terminal' => '2290689066',
+            'type' => 'pax_A35',
+            'code' => 'KnownDeviceRecord',
+            'is_enabled' => true,
+            'device_id' => '2290689066',
+            'pos_identifier' => null,
+        )))),
+    ),
+);
+$knownStored = array();
+$knownService = new PayArcConnectionService(new Settings(array(
+    'mode' => 'test',
+    'connect_secret_key' => 'merchant-api-token',
+    'default_terminal_id' => '2290689066',
+)), static function (array $updates) use (&$knownStored): void {
+    $knownStored = array_merge($knownStored, $updates);
+});
+$knownRefresh = $knownService->refresh_terminals();
+patwc_connection_assert_same(0, $knownRefresh['unidentified_terminal_count'], 'A registry record matching the configured serial must not be reported as unidentified.');
+patwc_connection_assert_same(false, strpos((string) $knownRefresh['message'], 'no POS identifier') !== false, 'The refresh message must not warn about the merchant\'s own configured terminal.');
+
+// A genuinely unknown registry record without a pos_identifier is still surfaced.
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array('data' => array(array(
+            'object' => 'TerminalRegistry',
+            'id' => 'UnknownDeviceRecord',
+            'terminal' => 'Warehouse spare',
+            'type' => 'pax_A920',
+            'code' => 'UnknownDeviceRecord',
+            'is_enabled' => true,
+            'device_id' => '00000000009999',
+            'pos_identifier' => null,
+        )))),
+    ),
+);
+$unknownRefresh = $knownService->refresh_terminals();
+patwc_connection_assert_same(1, $unknownRefresh['unidentified_terminal_count'], 'A registry record for an unknown device should still be surfaced as unidentified.');
+
+// A distinct identifier-less device that merely shares a display name with a
+// known terminal must still be surfaced (its own device id differs).
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array('data' => array(
+            array(
+                'object' => 'TerminalRegistry',
+                'id' => 'IdentifiedFront',
+                'terminal' => 'Front Counter',
+                'type' => 'pax_A920',
+                'code' => 'IdentifiedFront',
+                'is_enabled' => true,
+                'device_id' => '00000000001111',
+                'pos_identifier' => '1850528139',
+            ),
+            array(
+                'object' => 'TerminalRegistry',
+                'id' => 'SameNameDifferentDevice',
+                'terminal' => 'Front Counter',
+                'type' => 'pax_A920',
+                'code' => 'SameNameDifferentDevice',
+                'is_enabled' => true,
+                'device_id' => '00000000002222',
+                'pos_identifier' => null,
+            ),
+        ))),
+    ),
+);
+$sharedNameRefresh = $knownService->refresh_terminals();
+patwc_connection_assert_same(1, $sharedNameRefresh['unidentified_terminal_count'], 'A different device sharing only a display name must still be reported as unidentified.');
+
+// A registry row mirroring an identified terminal's POS identifier (with no
+// device id on the identified record) is suppressed, not reported as unknown.
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array('data' => array(
+            array(
+                'object' => 'TerminalRegistry',
+                'id' => 'IdentifiedNoDevice',
+                'terminal' => 'Shop Counter',
+                'type' => 'pax_A35',
+                'code' => 'IdentifiedNoDevice',
+                'is_enabled' => true,
+                'pos_identifier' => '2290689066',
+            ),
+            array(
+                'object' => 'TerminalRegistry',
+                'id' => 'MirrorRow',
+                'terminal' => '2290689066',
+                'type' => 'pax_A35',
+                'code' => 'MirrorRow',
+                'is_enabled' => true,
+                'device_id' => '2290689066',
+                'pos_identifier' => null,
+            ),
+        ))),
+    ),
+);
+$mirrorService = new PayArcConnectionService(new Settings(array(
+    'mode' => 'test',
+    'connect_secret_key' => 'merchant-api-token',
+)), static function (array $updates): void {});
+$mirrorRefresh = $mirrorService->refresh_terminals();
+patwc_connection_assert_same(1, $mirrorRefresh['terminal_count'], 'The identified terminal should be selectable.');
+patwc_connection_assert_same(0, $mirrorRefresh['unidentified_terminal_count'], 'A registry row mirroring an identified POS identifier must be suppressed.');

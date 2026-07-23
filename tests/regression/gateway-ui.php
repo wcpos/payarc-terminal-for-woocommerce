@@ -420,3 +420,24 @@ patwc_gateway_ui_assert_same('', patwc_gateway_ui_order_token($orderIdFallbackDa
 
 $privilegedData = patwc_gateway_ui_render_payment_data(array('order-pay' => 2001), array(), array('edit_shop_order:2001' => true));
 patwc_gateway_ui_assert_same(AjaxHandler::order_token_for($GLOBALS['patwc_gateway_orders'][2001]), patwc_gateway_ui_order_token($privilegedData), 'Privileged users may localize an order token without an order key.');
+
+// The settings-save preservation list must carry the plugin-managed keys that
+// are not WooCommerce form fields; otherwise a routine settings save wipes the
+// callback URL token (callbacks then 401) and the learned V3 credential.
+$GLOBALS['patwc_gateway_options']['woocommerce_' . Settings::GATEWAY_ID . '_settings'] = array(
+    'enabled' => 'no',
+    'connected_mode' => 'test',
+    'connected_fingerprint' => 'fp-123',
+    'connect_access_token' => 'token-123',
+    'connect_token_expires_at' => '123456',
+    'terminal_registry' => array(),
+    'callback_url_token' => 'cb-url-token-persisted',
+    'v3_auth_credential' => 'secret_key',
+);
+$preservationGateway = new Gateway();
+$preservationMethod = new ReflectionMethod(Gateway::class, 'saved_connection_state');
+$preservationMethod->setAccessible(true);
+$preservedState = $preservationMethod->invoke($preservationGateway);
+patwc_gateway_ui_assert_same('cb-url-token-persisted', $preservedState['callback_url_token'] ?? '', 'A settings save must preserve the callback URL token.');
+patwc_gateway_ui_assert_same('secret_key', $preservedState['v3_auth_credential'] ?? '', 'A settings save must preserve the learned V3 credential.');
+unset($GLOBALS['patwc_gateway_options']['woocommerce_' . Settings::GATEWAY_ID . '_settings']);

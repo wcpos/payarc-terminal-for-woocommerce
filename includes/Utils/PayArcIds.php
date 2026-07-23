@@ -23,6 +23,16 @@ class PayArcIds
         return $prefix . substr($hash, 0, $suffixLength);
     }
 
+    /**
+     * Cryptographically secure secret for authentication purposes. Unlike
+     * idempotency_key(), this never uses wp_generate_uuid4(), whose core
+     * implementation is mt_rand-backed and unsuitable for auth tokens.
+     */
+    public static function secret_token(): string
+    {
+        return bin2hex(random_bytes(16));
+    }
+
     public static function idempotency_key(): string
     {
         if (function_exists('wp_generate_uuid4')) {

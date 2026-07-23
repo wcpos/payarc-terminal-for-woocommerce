@@ -261,13 +261,33 @@ class Settings
         return in_array($printReceipt, array('0', '1', '2', '3'), true) ? (int) $printReceipt : 0;
     }
 
+    /**
+     * Plugin-generated secret embedded in the callback URL. PayArc echoes the
+     * callbackURL from the sale payload verbatim, so this authenticates
+     * callbacks without the merchant needing a PayArc-provided bearer token.
+     */
+    public function callback_url_token(): string
+    {
+        return $this->string_setting('callback_url_token', '');
+    }
+
+    public function callback_auth_configured(): bool
+    {
+        return $this->callback_bearer_token() !== '' || $this->callback_url_token() !== '';
+    }
+
     public function webhook_url(): string
     {
-        if (function_exists('admin_url')) {
-            return admin_url('admin-ajax.php?action=patwc_payarc_callback');
+        $url = function_exists('admin_url')
+            ? admin_url('admin-ajax.php?action=patwc_payarc_callback')
+            : 'admin-ajax.php?action=patwc_payarc_callback';
+
+        $token = $this->callback_url_token();
+        if ($token !== '') {
+            $url .= '&patwc_cb=' . rawurlencode($token);
         }
 
-        return 'admin-ajax.php?action=patwc_payarc_callback';
+        return $url;
     }
 
     /**
@@ -293,6 +313,8 @@ class Settings
             'connect_secret_key_configured' => $this->connect_secret_key() !== '',
             'connect_access_token_configured' => $this->connect_access_token() !== '',
             'callback_bearer_token_configured' => $this->callback_bearer_token() !== '',
+            'callback_url_token_configured' => $this->callback_url_token() !== '',
+            'callback_auth_configured' => $this->callback_auth_configured(),
             'connected_mode' => $this->connected_mode(),
             'connected_for_current_mode' => $this->is_connected_for_current_mode(),
             'production_connect_base_url_verified' => true,

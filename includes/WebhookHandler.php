@@ -55,7 +55,7 @@ class WebhookHandler
             $rawBody = '';
         }
 
-        $response = $this->handle_request($rawBody, $_SERVER);
+        $response = $this->handle_request($rawBody, $_SERVER, $_GET);
 
         if (function_exists('wp_send_json')) {
             wp_send_json($response['body'], $response['status_code']);
@@ -72,11 +72,12 @@ class WebhookHandler
 
     /**
      * @param array<string, mixed> $server
+     * @param array<string, mixed> $query
      * @return array<string, mixed>
      */
-    public function handle_request(string $rawBody, array $server = array()): array
+    public function handle_request(string $rawBody, array $server = array(), array $query = array()): array
     {
-        $authorizationFailure = $this->authorization_failure_reason($server);
+        $authorizationFailure = $this->authorization_failure_reason($server, $query);
         if ($authorizationFailure !== '') {
             $remoteAddress = isset($server['REMOTE_ADDR']) && is_scalar($server['REMOTE_ADDR']) ? trim((string) $server['REMOTE_ADDR']) : '';
             $throttleKey = 'patwc_callback_rejection_' . md5($remoteAddress);
@@ -173,12 +174,25 @@ class WebhookHandler
 
     /**
      * @param array<string, mixed> $server
+     * @param array<string, mixed> $query
      */
-    private function authorization_failure_reason(array $server): string
+    private function authorization_failure_reason(array $server, array $query = array()): string
     {
         $expected = $this->settings->callback_bearer_token();
+        $urlToken = $this->settings->callback_url_token();
+
+        // The sale payload's callbackURL carries a plugin-generated secret, so
+        // a matching query token authenticates the callback even when PayArc
+        // never issued a separate bearer token for this merchant.
+        if ($urlToken !== '') {
+            $provided = isset($query['patwc_cb']) && is_scalar($query['patwc_cb']) ? trim((string) $query['patwc_cb']) : '';
+            if ($provided !== '' && (function_exists('hash_equals') ? hash_equals($urlToken, $provided) : $urlToken === $provided)) {
+                return '';
+            }
+        }
+
         if ($expected === '') {
-            return 'callback_token_not_configured';
+            return $urlToken === '' ? 'callback_token_not_configured' : 'callback_url_token_mismatch';
         }
 
         $authorization = $this->authorization_header($server);

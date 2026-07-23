@@ -585,3 +585,11 @@ $shortSecretHtml = $gateway->generate_patwc_secret_html('callback_bearer_token',
 if (strpos($shortSecretHtml, 'abcd') !== false || strpos($shortSecretHtml, 'placeholder="••••"') === false) {
     throw new RuntimeException('Saved secrets of four or fewer characters should be fully masked. HTML: ' . $shortSecretHtml);
 }
+
+// The plugin-generated callback URL token is appended to the webhook URL so
+// PayArc echoes it back on every callback.
+$tokenSettings = new Settings(array('callback_url_token' => 'cb-url-token-123'));
+patwc_assert_same('https://merchant.example/wp-admin/admin-ajax.php?action=patwc_payarc_callback&patwc_cb=cb-url-token-123', $tokenSettings->webhook_url(), 'Webhook URL should carry the callback URL token.');
+patwc_assert_same(true, $tokenSettings->callback_auth_configured(), 'A callback URL token alone should count as configured callback auth.');
+patwc_assert_same(true, (new Settings(array('callback_bearer_token' => 'bearer-x')))->callback_auth_configured(), 'A bearer token alone should count as configured callback auth.');
+patwc_assert_same(false, (new Settings(array()))->callback_auth_configured(), 'No callback credential should report unconfigured callback auth.');
