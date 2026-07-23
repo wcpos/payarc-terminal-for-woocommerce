@@ -119,7 +119,9 @@ class PaymentAttempt
 
     public static function is_final_unpaid(string $status): bool
     {
-        return in_array(self::normalize_status($status), array('decline', 'timeout', 'cancelled', 'failure', 'dup transaction'), true);
+        // 'aborted' is PayArc's final state for a cancelled terminal request
+        // (observed live 2026-07-23 after POST /cancel).
+        return in_array(self::normalize_status($status), array('decline', 'timeout', 'cancelled', 'failure', 'aborted', 'dup transaction'), true);
     }
 
     public static function has_in_flight_attempts(): bool

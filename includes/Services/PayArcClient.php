@@ -168,11 +168,11 @@ class PayArcClient
         $decoded = $this->decode_response_body($response, $httpStatus);
 
         if ($httpStatus < 200 || $httpStatus >= 300) {
-            throw new RuntimeException($this->failure_message($decoded, $httpStatus));
+            throw new PayArcRequestException($this->failure_message($decoded, $httpStatus), $this->error_code($decoded), $httpStatus);
         }
 
         if ($this->is_payarc_failure($decoded)) {
-            throw new RuntimeException($this->failure_message($decoded, $httpStatus));
+            throw new PayArcRequestException($this->failure_message($decoded, $httpStatus), $this->error_code($decoded), $httpStatus);
         }
 
         if ($credential !== $preferredCredential) {
@@ -318,6 +318,16 @@ class PayArcClient
         }
 
         return implode('; ', $parts) . '.';
+    }
+
+    /**
+     * @param array<string, mixed> $decoded
+     */
+    private function error_code(array $decoded): string
+    {
+        $error = $this->error_payload($decoded);
+
+        return isset($error['code']) && is_scalar($error['code']) ? trim((string) $error['code']) : '';
     }
 
     /**

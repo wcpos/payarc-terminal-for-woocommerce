@@ -12,6 +12,7 @@ foreach (array(
     $root . '/includes/Logger.php',
     $root . '/includes/Utils/PayArcIds.php',
     $root . '/includes/Services/PayArcConnectionService.php',
+    $root . '/includes/Services/PayArcRequestException.php',
     $root . '/includes/Services/PayArcClient.php',
 ) as $file) {
     require_once $file;
@@ -208,4 +209,23 @@ $GLOBALS['patwc_http_response_queue'] = array(patwc_v3_response(200));
 $generatedKey = $GLOBALS['patwc_client_requests'][0]['args']['headers']['X-Idempotency-Key'] ?? '';
 if (preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/', $generatedKey) !== 1) {
     throw new RuntimeException('get_transaction must send a generated UUID X-Idempotency-Key, got ' . var_export($generatedKey, true) . '.');
+}
+
+// Non-401 failure responses must carry the machine-readable PayArc error code
+// so the payment service can recognize TRANSACTION_NOT_FOUND polling windows.
+$settings = new Settings($baseSettings);
+$GLOBALS['patwc_client_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(array(
+    'response' => array('code' => 400),
+    'body' => json_encode(array('traceId' => 'trace_400', 'response' => array('status' => 'FAILURE', 'error' => array('code' => 'TRANSACTION_NOT_FOUND', 'message' => 'No transaction found for traceId trace_400.', 'friendlyMessage' => 'No transaction was found for the provided traceId.')))),
+));
+try {
+    (new PayArcClient($settings, new stdClass()))->get_transaction('trace_400');
+    throw new RuntimeException('A 400 failure response should throw.');
+} catch (WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcRequestException $exception) {
+    patwc_v3_assert_same('TRANSACTION_NOT_FOUND', $exception->payarc_code(), 'Failure exceptions should expose the PayArc error code.');
+    patwc_v3_assert_same(400, $exception->http_status(), 'Failure exceptions should expose the HTTP status.');
+    if (strpos($exception->getMessage(), 'TRANSACTION_NOT_FOUND') === false) {
+        throw new RuntimeException('Failure message should still contain the error code text.');
+    }
 }

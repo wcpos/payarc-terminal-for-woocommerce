@@ -183,7 +183,26 @@ class PayArcPaymentService
             }
 
             $this->store_last_poll_at($order, $this->now());
-            $payload = $this->client->get_transaction($traceId);
+
+            try {
+                $payload = $this->client->get_transaction($traceId);
+            } catch (Throwable $exception) {
+                // Verified live 2026-07-23: PayArc accepts a sale (200 + traceId)
+                // but GET /v3/transactions/{traceId} returns TRANSACTION_NOT_FOUND
+                // for several seconds until the transaction becomes visible, so
+                // that window means "keep waiting", not "the payment failed".
+                if ($exception instanceof PayArcRequestException && $exception->payarc_code() === 'TRANSACTION_NOT_FOUND') {
+                    $this->log('PayArc transaction not visible yet; continuing to poll', array(
+                        'order_id' => $this->order_id($order),
+                        'trace_id_masked' => Settings::mask_identifier($traceId),
+                    ));
+                    $attempt['continue_polling'] = true;
+
+                    return $attempt;
+                }
+
+                throw $exception;
+            }
 
             return $this->reconcile($order, $payload, 'poll');
         });
