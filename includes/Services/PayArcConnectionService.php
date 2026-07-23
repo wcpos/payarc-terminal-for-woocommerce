@@ -96,7 +96,7 @@ class PayArcConnectionService
             // Self-provisioned callback secret: embedded in the callbackURL of
             // every sale so inbound callbacks verify without a PayArc-provided
             // bearer token. Generated once and kept stable across reconnects.
-            $updates['callback_url_token'] = PayArcIds::idempotency_key();
+            $updates['callback_url_token'] = PayArcIds::secret_token();
         }
 
         $this->assert_no_in_flight_payment_attempts();
@@ -390,7 +390,10 @@ class PayArcConnectionService
             $type = $this->field($raw, array('type', 'Type'));
             $deviceId = $this->field($raw, array('device_id', 'Device_id'));
             $code = $this->field($raw, array('code', 'Code', 'id', 'Id'));
-            foreach (array($deviceId, $name) as $knownKey) {
+            // Include the POS identifier itself: registry rows can mirror an
+            // identified terminal by carrying its serial in device_id/terminal
+            // while the identified record has no Device_id of its own.
+            foreach (array($deviceId, $name, $terminalId) as $knownKey) {
                 if (trim($knownKey) !== '') {
                     $knownDevices[strtolower(trim($knownKey))] = true;
                 }

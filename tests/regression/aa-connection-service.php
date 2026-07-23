@@ -1046,8 +1046,8 @@ $cbService = new PayArcConnectionService(new Settings(array(
 });
 $cbService->connect();
 $generatedCallbackToken = isset($cbStored['callback_url_token']) ? (string) $cbStored['callback_url_token'] : '';
-if (preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/', $generatedCallbackToken) !== 1) {
-    throw new RuntimeException('Connect should generate a UUID callback_url_token, got ' . var_export($generatedCallbackToken, true) . '.');
+if (preg_match('/^[0-9a-f]{32}$/', $generatedCallbackToken) !== 1) {
+    throw new RuntimeException('Connect should generate a CSPRNG hex callback_url_token, got ' . var_export($generatedCallbackToken, true) . '.');
 }
 
 // A previously generated callback URL token is never regenerated.
@@ -1160,3 +1160,40 @@ $GLOBALS['patwc_http_response_queue'] = array(
 );
 $sharedNameRefresh = $knownService->refresh_terminals();
 patwc_connection_assert_same(1, $sharedNameRefresh['unidentified_terminal_count'], 'A different device sharing only a display name must still be reported as unidentified.');
+
+// A registry row mirroring an identified terminal's POS identifier (with no
+// device id on the identified record) is suppressed, not reported as unknown.
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array('data' => array(
+            array(
+                'object' => 'TerminalRegistry',
+                'id' => 'IdentifiedNoDevice',
+                'terminal' => 'Shop Counter',
+                'type' => 'pax_A35',
+                'code' => 'IdentifiedNoDevice',
+                'is_enabled' => true,
+                'pos_identifier' => '2290689066',
+            ),
+            array(
+                'object' => 'TerminalRegistry',
+                'id' => 'MirrorRow',
+                'terminal' => '2290689066',
+                'type' => 'pax_A35',
+                'code' => 'MirrorRow',
+                'is_enabled' => true,
+                'device_id' => '2290689066',
+                'pos_identifier' => null,
+            ),
+        ))),
+    ),
+);
+$mirrorService = new PayArcConnectionService(new Settings(array(
+    'mode' => 'test',
+    'connect_secret_key' => 'merchant-api-token',
+)), static function (array $updates): void {});
+$mirrorRefresh = $mirrorService->refresh_terminals();
+patwc_connection_assert_same(1, $mirrorRefresh['terminal_count'], 'The identified terminal should be selectable.');
+patwc_connection_assert_same(0, $mirrorRefresh['unidentified_terminal_count'], 'A registry row mirroring an identified POS identifier must be suppressed.');
