@@ -15,6 +15,7 @@ foreach (array(
     $root . '/includes/Settings.php',
     $root . '/includes/PaymentAttempt.php',
     $root . '/includes/Utils/Money.php',
+    $root . '/includes/Logger.php',
     $root . '/includes/PaymentReconciler.php',
 ) as $file) {
     if (!is_readable($file)) {
@@ -404,3 +405,112 @@ patwc_reconciler_assert_same('txn-original', $paidProcessedSameTraceCurrentAttem
 patwc_reconciler_assert_same('charge-original', $paidProcessedSameTraceCurrentAttempt['charge_id'], 'Paid processed same-trace conflict should not overwrite current charge id.');
 patwc_reconciler_assert_same('charge-original', $paidProcessedSameTraceDifferentTransactionOrder->meta['_patwc_charge_id'], 'Paid processed same-trace conflict should not overwrite charge detail meta.');
 patwc_reconciler_assert_same(array(), $paidProcessedSameTraceDifferentTransactionOrder->payment_complete_calls, 'Paid processed same-trace conflict should not complete another payment.');
+
+// Final declines must surface WHY: processor response, PayArc error, and card
+// entry mode go to the cashier message and the order note (live gap observed
+// 2026-07-23: three production declines logged only the word "decline").
+$declineDetailOrder = new PatwcReconcilerCallbacksOrder(1099);
+PaymentAttempt::record_new($declineDetailOrder, array('status' => 'processing', 'trace_id' => 'trace-1099', 'transaction_id' => 'txn-1099'));
+$declineDetail = $reconciler->reconcile($declineDetailOrder, patwc_reconciler_payload(array(
+    'traceId' => 'trace-1099',
+    'transactionId' => 'txn-1099',
+    'status' => 'DECLINED',
+    'metadata' => array('order_id' => '1099'),
+    'processorResponse' => array('code' => '51', 'text' => 'Insufficient funds'),
+    'card' => array('entryMode' => 'contactless'),
+)), 'poll');
+patwc_reconciler_assert_same('Payment was not approved. Processor response: 51 Insufficient funds. Card entry: contactless.', $declineDetail['message'] ?? '', 'Decline result should carry the processor summary for the cashier.');
+$declineDetailNote = end($declineDetailOrder->notes);
+patwc_reconciler_assert_true(strpos((string) $declineDetailNote, 'Processor response: 51 Insufficient funds.') !== false, 'Decline order note should include the processor summary.');
+
+$callbackFirstDeclineOrder = new PatwcReconcilerCallbacksOrder(1101);
+PaymentAttempt::record_new($callbackFirstDeclineOrder, array('status' => 'processing', 'trace_id' => 'trace-1101', 'transaction_id' => 'txn-1101'));
+$callbackFirstPayload = patwc_reconciler_payload(array(
+    'traceId' => 'trace-1101',
+    'transactionId' => 'txn-1101',
+    'status' => 'DECLINED',
+    'metadata' => array('order_id' => '1101'),
+    'processorResponse' => array('code' => '51', 'text' => 'Insufficient funds'),
+));
+$callbackFirstMessage = 'Payment was not approved. Processor response: 51 Insufficient funds. Card entry: CONTACTLESS.';
+$reconciler->reconcile($callbackFirstDeclineOrder, $callbackFirstPayload, 'webhook');
+$callbackFirstAttempt = PaymentAttempt::current($callbackFirstDeclineOrder);
+patwc_reconciler_assert_same($callbackFirstMessage, $callbackFirstAttempt['message'] ?? '', 'Callback-first declines must persist the cashier message on the payment attempt.');
+$duplicateDecline = $reconciler->reconcile($callbackFirstDeclineOrder, $callbackFirstPayload, 'poll');
+patwc_reconciler_assert_same('idempotent', $duplicateDecline['status'], 'Callback-first decline polls should remain idempotent.');
+patwc_reconciler_assert_same($callbackFirstMessage, $duplicateDecline['message'] ?? '', 'Idempotent decline polls must return the persisted cashier message.');
+
+// Success results never carry a failure summary.
+$successNoSummaryOrder = new PatwcReconcilerCallbacksOrder(1100);
+PaymentAttempt::record_new($successNoSummaryOrder, array('status' => 'processing', 'trace_id' => 'trace-1100', 'transaction_id' => 'txn-1100'));
+$successNoSummary = $reconciler->reconcile($successNoSummaryOrder, patwc_reconciler_payload(array(
+    'traceId' => 'trace-1100',
+    'transactionId' => 'txn-1100',
+    'metadata' => array('order_id' => '1100'),
+)), 'webhook');
+patwc_reconciler_assert_false(array_key_exists('message', $successNoSummary), 'Successful reconciliation should not attach a failure message.');
+
+$reconcilerReflection = new ReflectionClass(PaymentReconciler::class);
+patwc_reconciler_assert_true(
+    $reconcilerReflection->hasMethod('resolve_processor_array'),
+    'Processor array resolution must be shared by the failure-details and detail-meta paths.'
+);
+$resolveProcessorArray = $reconcilerReflection->getMethod('resolve_processor_array');
+$resolveProcessorArray->setAccessible(true);
+patwc_reconciler_assert_same(
+    array('code' => 'processor-response'),
+    $resolveProcessorArray->invoke(null, array(
+        'processorResponse' => array('code' => 'processor-response'),
+        'processor' => array('code' => 'processor'),
+        'response' => array('code' => 'response'),
+    )),
+    'Processor response must take precedence over the other supported payload shapes.'
+);
+patwc_reconciler_assert_same(
+    array('code' => 'processor'),
+    $resolveProcessorArray->invoke(null, array(
+        'processorResponse' => array(),
+        'processor' => array('code' => 'processor'),
+        'response' => array('code' => 'response'),
+    )),
+    'An empty processor response must fall back to processor.'
+);
+patwc_reconciler_assert_same(
+    array('code' => 'response'),
+    $resolveProcessorArray->invoke(null, array(
+        'processorResponse' => array(),
+        'processor' => array(),
+        'response' => array('code' => 'response'),
+    )),
+    'Empty processor arrays must fall back to the response envelope.'
+);
+patwc_reconciler_assert_same(
+    array(),
+    $resolveProcessorArray->invoke(null, array('processorResponse' => 'invalid')),
+    'Processor array resolution must fall back to an empty array.'
+);
+
+// Summary sanitization: control characters stripped, length capped.
+$noisySummary = WCPOS\WooCommercePOS\PayArcTerminal\PaymentReconciler::failure_summary(array(
+    'processorResponse' => array('code' => '05', 'text' => "DO\x01 NOT HONOR" . str_repeat('x', 400)),
+));
+patwc_reconciler_assert_true(strpos($noisySummary, "\x01") === false, 'Failure summary must strip control characters.');
+patwc_reconciler_assert_true(strlen($noisySummary) <= 240, 'Failure summary must be length capped.');
+
+$unicodeSummary = PaymentReconciler::failure_summary(array(
+    'processorResponse' => array('code' => '05', 'text' => str_repeat('a', 216) . 'é'),
+));
+patwc_reconciler_assert_same(1, preg_match('//u', $unicodeSummary), 'Failure summary truncation must preserve valid UTF-8.');
+
+$envelopedErrorSummary = PaymentReconciler::failure_summary(array(
+    'response' => array(
+        'error' => array('code' => 'DECLINED', 'message' => 'Card disabled'),
+    ),
+));
+patwc_reconciler_assert_same('PayArc error: DECLINED Card disabled.', $envelopedErrorSummary, 'Failure summary must read errors from the response envelope.');
+
+$redactedSummary = PaymentReconciler::failure_summary(array(
+    'error' => array('message' => 'Declined traceId=trace-12345'),
+));
+patwc_reconciler_assert_true(strpos($redactedSummary, 'trace-12345') === false, 'Failure summary must redact secret-like provider values.');
+patwc_reconciler_assert_true(strpos($redactedSummary, '[REDACTED]') !== false, 'Failure summary must retain a redaction marker.');

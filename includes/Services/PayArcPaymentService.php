@@ -7,6 +7,7 @@ use Throwable;
 use WCPOS\WooCommercePOS\PayArcTerminal\Logger;
 use WCPOS\WooCommercePOS\PayArcTerminal\PaymentAttempt;
 use WCPOS\WooCommercePOS\PayArcTerminal\PaymentLock;
+use WCPOS\WooCommercePOS\PayArcTerminal\PaymentReconciler;
 use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
 use WCPOS\WooCommercePOS\PayArcTerminal\Utils\Money;
 use WCPOS\WooCommercePOS\PayArcTerminal\Utils\PayArcIds;
@@ -413,11 +414,28 @@ class PayArcPaymentService
                 $traceId = isset($attempt['trace_id']) && is_scalar($attempt['trace_id']) ? trim((string) $attempt['trace_id']) : '';
             }
 
-            $this->log('PayArc payment attempt resolved', array(
+            $context = array(
                 'order_id' => $this->order_id($order),
                 'status' => $status,
                 'trace_id_masked' => Settings::mask_identifier($traceId),
-            ));
+            );
+
+            if ($status !== '' && $status !== 'success') {
+                $details = PaymentReconciler::failure_details($payload);
+                foreach (array(
+                    'processor_response_code' => $details['code'],
+                    'processor_response_text' => $details['text'],
+                    'payarc_error_code' => $details['error_code'],
+                    'payarc_error_message' => $details['error_message'],
+                    'card_entry_mode' => $details['entry_mode'],
+                ) as $key => $value) {
+                    if ($value !== '') {
+                        $context[$key] = Logger::redact_untrusted_text($value);
+                    }
+                }
+            }
+
+            $this->log('PayArc payment attempt resolved', $context);
         }
 
         return $result;

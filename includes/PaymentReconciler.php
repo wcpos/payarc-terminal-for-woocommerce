@@ -45,7 +45,13 @@ class PaymentReconciler
         }
 
         if ($callbackKey !== '' && $this->callback_already_processed($order, $callbackKey)) {
-            return array('status' => 'idempotent', 'continue_polling' => false, 'attempt' => PaymentAttempt::current($order));
+            $attempt = PaymentAttempt::current($order);
+            $result = array('status' => 'idempotent', 'continue_polling' => false, 'attempt' => $attempt);
+            if (isset($attempt['message']) && is_scalar($attempt['message']) && trim((string) $attempt['message']) !== '') {
+                $result['message'] = trim((string) $attempt['message']);
+            }
+
+            return $result;
         }
 
         $identity = $this->verify_identity($order, $payload, $traceId, $transactionId);
@@ -79,11 +85,16 @@ class PaymentReconciler
 
         $this->store_detail_meta($order, $payload, $chargeId);
 
-        $attempt = PaymentAttempt::update_status($order, $status, $fields);
         $isFinal = $status === 'success' || PaymentAttempt::is_final_unpaid($status);
+        $failureSummary = $isFinal && $status !== 'success' ? self::failure_summary($payload) : '';
+        if ($failureSummary !== '') {
+            $fields['message'] = 'Payment was not approved. ' . $failureSummary;
+        }
+        $attempt = PaymentAttempt::update_status($order, $status, $fields);
 
         if ($isFinal) {
-            $this->add_note($order, 'PayArc transaction reconciled with final status: ' . $status . '.');
+            $this->add_note($order, 'PayArc transaction reconciled with final status: ' . $status . '.'
+                . ($failureSummary !== '' ? ' ' . $failureSummary : ''));
         }
 
         if ($callbackKey !== '' && $isFinal) {
@@ -96,7 +107,91 @@ class PaymentReconciler
 
         $this->save($order);
 
-        return array('status' => $status, 'continue_polling' => !$isFinal, 'attempt' => $attempt);
+        $result = array('status' => $status, 'continue_polling' => !$isFinal, 'attempt' => $attempt);
+        if ($failureSummary !== '') {
+            // Shown to the cashier in place of the generic retry message so a
+            // processor decline is distinguishable from a config problem.
+            $result['message'] = $fields['message'];
+        }
+
+        return $result;
+    }
+
+    /**
+     * Failure diagnostics from an authoritative PayArc transaction payload:
+     * processor response, PayArc error, and how the card was presented.
+     *
+     * @param array<string, mixed> $payload
+     * @return array{code:string, text:string, error_code:string, error_message:string, entry_mode:string}
+     */
+    public static function failure_details(array $payload): array
+    {
+        $firstScalar = static function (array $source, array $keys): string {
+            foreach ($keys as $key) {
+                if (isset($source[$key]) && is_scalar($source[$key]) && trim((string) $source[$key]) !== '') {
+                    return trim((string) $source[$key]);
+                }
+            }
+
+            return '';
+        };
+
+        // Same shape tolerance as store_detail_meta(): processorResponse,
+        // processor, then the response envelope.
+        $processor = self::resolve_processor_array($payload);
+        $error = isset($payload['error']) && is_array($payload['error']) ? $payload['error'] : array();
+        if ($error === array() && isset($payload['response']['error']) && is_array($payload['response']['error'])) {
+            $error = $payload['response']['error'];
+        }
+        $card = isset($payload['card']) && is_array($payload['card']) ? $payload['card'] : array();
+
+        return array(
+            'code' => $firstScalar($processor, array('code', 'responseCode', 'response_code')),
+            'text' => $firstScalar($processor, array('text', 'message', 'responseText', 'response_text', 'friendlyMessage')),
+            'error_code' => $firstScalar($error, array('code')),
+            'error_message' => $firstScalar($error, array('friendlyMessage', 'message')),
+            'entry_mode' => $firstScalar($card, array('entryMode', 'entry_mode', 'entry')),
+        );
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     */
+    public static function failure_summary(array $payload): string
+    {
+        $details = self::failure_details($payload);
+        $parts = array();
+        if ($details['code'] !== '' || $details['text'] !== '') {
+            $parts[] = 'Processor response: ' . trim($details['code'] . ' ' . $details['text']) . '.';
+        }
+        if ($details['error_code'] !== '' || $details['error_message'] !== '') {
+            $parts[] = 'PayArc error: ' . trim($details['error_code'] . ' ' . $details['error_message']) . '.';
+        }
+        if ($details['entry_mode'] !== '') {
+            $parts[] = 'Card entry: ' . $details['entry_mode'] . '.';
+        }
+
+        $summary = Logger::redact_untrusted_text(implode(' ', $parts));
+        $summary = function_exists('mb_substr') ? mb_substr($summary, 0, 240) : substr($summary, 0, 240);
+
+        return trim($summary);
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     * @return array<string, mixed>
+     */
+    private static function resolve_processor_array(array $payload): array
+    {
+        $processor = isset($payload['processorResponse']) && is_array($payload['processorResponse']) ? $payload['processorResponse'] : array();
+        if ($processor === array() && isset($payload['processor']) && is_array($payload['processor'])) {
+            $processor = $payload['processor'];
+        }
+        if ($processor === array() && isset($payload['response']) && is_array($payload['response'])) {
+            $processor = $payload['response'];
+        }
+
+        return $processor;
     }
 
     /**
@@ -264,13 +359,7 @@ class PaymentReconciler
         $this->update_meta($order, self::META_CARD_ENTRY_MODE, $this->first_scalar($card, array('entryMode', 'entry_mode', 'entry')));
         $this->update_meta($order, self::META_CARD_LAST4, $this->first_scalar($card, array('last4', 'lastFour', 'last_four')));
 
-        $processor = isset($payload['processorResponse']) && is_array($payload['processorResponse']) ? $payload['processorResponse'] : array();
-        if ($processor === array() && isset($payload['processor']) && is_array($payload['processor'])) {
-            $processor = $payload['processor'];
-        }
-        if ($processor === array() && isset($payload['response']) && is_array($payload['response'])) {
-            $processor = $payload['response'];
-        }
+        $processor = self::resolve_processor_array($payload);
 
         $this->update_meta($order, self::META_PROCESSOR_RESPONSE_CODE, $this->first_scalar($processor, array('code', 'responseCode', 'response_code')));
         $this->update_meta($order, self::META_PROCESSOR_RESPONSE_TEXT, $this->first_scalar($processor, array('text', 'message', 'responseText', 'response_text', 'friendlyMessage')));
