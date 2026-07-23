@@ -450,6 +450,46 @@ $successNoSummary = $reconciler->reconcile($successNoSummaryOrder, patwc_reconci
 )), 'webhook');
 patwc_reconciler_assert_false(array_key_exists('message', $successNoSummary), 'Successful reconciliation should not attach a failure message.');
 
+$reconcilerReflection = new ReflectionClass(PaymentReconciler::class);
+patwc_reconciler_assert_true(
+    $reconcilerReflection->hasMethod('resolve_processor_array'),
+    'Processor array resolution must be shared by the failure-details and detail-meta paths.'
+);
+$resolveProcessorArray = $reconcilerReflection->getMethod('resolve_processor_array');
+$resolveProcessorArray->setAccessible(true);
+patwc_reconciler_assert_same(
+    array('code' => 'processor-response'),
+    $resolveProcessorArray->invoke(null, array(
+        'processorResponse' => array('code' => 'processor-response'),
+        'processor' => array('code' => 'processor'),
+        'response' => array('code' => 'response'),
+    )),
+    'Processor response must take precedence over the other supported payload shapes.'
+);
+patwc_reconciler_assert_same(
+    array('code' => 'processor'),
+    $resolveProcessorArray->invoke(null, array(
+        'processorResponse' => array(),
+        'processor' => array('code' => 'processor'),
+        'response' => array('code' => 'response'),
+    )),
+    'An empty processor response must fall back to processor.'
+);
+patwc_reconciler_assert_same(
+    array('code' => 'response'),
+    $resolveProcessorArray->invoke(null, array(
+        'processorResponse' => array(),
+        'processor' => array(),
+        'response' => array('code' => 'response'),
+    )),
+    'Empty processor arrays must fall back to the response envelope.'
+);
+patwc_reconciler_assert_same(
+    array(),
+    $resolveProcessorArray->invoke(null, array('processorResponse' => 'invalid')),
+    'Processor array resolution must fall back to an empty array.'
+);
+
 // Summary sanitization: control characters stripped, length capped.
 $noisySummary = WCPOS\WooCommercePOS\PayArcTerminal\PaymentReconciler::failure_summary(array(
     'processorResponse' => array('code' => '05', 'text' => "DO\x01 NOT HONOR" . str_repeat('x', 400)),

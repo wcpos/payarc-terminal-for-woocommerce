@@ -138,13 +138,7 @@ class PaymentReconciler
 
         // Same shape tolerance as store_detail_meta(): processorResponse,
         // processor, then the response envelope.
-        $processor = isset($payload['processorResponse']) && is_array($payload['processorResponse']) ? $payload['processorResponse'] : array();
-        if ($processor === array() && isset($payload['processor']) && is_array($payload['processor'])) {
-            $processor = $payload['processor'];
-        }
-        if ($processor === array() && isset($payload['response']) && is_array($payload['response'])) {
-            $processor = $payload['response'];
-        }
+        $processor = self::resolve_processor_array($payload);
         $error = isset($payload['error']) && is_array($payload['error']) ? $payload['error'] : array();
         if ($error === array() && isset($payload['response']['error']) && is_array($payload['response']['error'])) {
             $error = $payload['response']['error'];
@@ -181,6 +175,23 @@ class PaymentReconciler
         $summary = function_exists('mb_substr') ? mb_substr($summary, 0, 240) : substr($summary, 0, 240);
 
         return trim($summary);
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     * @return array<string, mixed>
+     */
+    private static function resolve_processor_array(array $payload): array
+    {
+        $processor = isset($payload['processorResponse']) && is_array($payload['processorResponse']) ? $payload['processorResponse'] : array();
+        if ($processor === array() && isset($payload['processor']) && is_array($payload['processor'])) {
+            $processor = $payload['processor'];
+        }
+        if ($processor === array() && isset($payload['response']) && is_array($payload['response'])) {
+            $processor = $payload['response'];
+        }
+
+        return $processor;
     }
 
     /**
@@ -348,13 +359,7 @@ class PaymentReconciler
         $this->update_meta($order, self::META_CARD_ENTRY_MODE, $this->first_scalar($card, array('entryMode', 'entry_mode', 'entry')));
         $this->update_meta($order, self::META_CARD_LAST4, $this->first_scalar($card, array('last4', 'lastFour', 'last_four')));
 
-        $processor = isset($payload['processorResponse']) && is_array($payload['processorResponse']) ? $payload['processorResponse'] : array();
-        if ($processor === array() && isset($payload['processor']) && is_array($payload['processor'])) {
-            $processor = $payload['processor'];
-        }
-        if ($processor === array() && isset($payload['response']) && is_array($payload['response'])) {
-            $processor = $payload['response'];
-        }
+        $processor = self::resolve_processor_array($payload);
 
         $this->update_meta($order, self::META_PROCESSOR_RESPONSE_CODE, $this->first_scalar($processor, array('code', 'responseCode', 'response_code')));
         $this->update_meta($order, self::META_PROCESSOR_RESPONSE_TEXT, $this->first_scalar($processor, array('text', 'message', 'responseText', 'response_text', 'friendlyMessage')));
