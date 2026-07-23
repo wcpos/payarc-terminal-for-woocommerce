@@ -1044,7 +1044,7 @@ trait GatewayImplementation
         }
 
         $state = array();
-        foreach (array('connected_mode', 'connected_fingerprint', 'connect_access_token', 'connect_token_expires_at', 'terminal_registry') as $key) {
+        foreach (array('connected_mode', 'connected_fingerprint', 'connect_access_token', 'connect_token_expires_at', 'terminal_registry', 'callback_url_token', 'v3_auth_credential') as $key) {
             if (array_key_exists($key, $settings)) {
                 $state[$key] = $settings[$key];
             }

@@ -1127,3 +1127,36 @@ $GLOBALS['patwc_http_response_queue'] = array(
 );
 $unknownRefresh = $knownService->refresh_terminals();
 patwc_connection_assert_same(1, $unknownRefresh['unidentified_terminal_count'], 'A registry record for an unknown device should still be surfaced as unidentified.');
+
+// A distinct identifier-less device that merely shares a display name with a
+// known terminal must still be surfaced (its own device id differs).
+$GLOBALS['patwc_http_requests'] = array();
+$GLOBALS['patwc_http_response_queue'] = array(
+    array(
+        'response' => array('code' => 200),
+        'body' => json_encode(array('data' => array(
+            array(
+                'object' => 'TerminalRegistry',
+                'id' => 'IdentifiedFront',
+                'terminal' => 'Front Counter',
+                'type' => 'pax_A920',
+                'code' => 'IdentifiedFront',
+                'is_enabled' => true,
+                'device_id' => '00000000001111',
+                'pos_identifier' => '1850528139',
+            ),
+            array(
+                'object' => 'TerminalRegistry',
+                'id' => 'SameNameDifferentDevice',
+                'terminal' => 'Front Counter',
+                'type' => 'pax_A920',
+                'code' => 'SameNameDifferentDevice',
+                'is_enabled' => true,
+                'device_id' => '00000000002222',
+                'pos_identifier' => null,
+            ),
+        ))),
+    ),
+);
+$sharedNameRefresh = $knownService->refresh_terminals();
+patwc_connection_assert_same(1, $sharedNameRefresh['unidentified_terminal_count'], 'A different device sharing only a display name must still be reported as unidentified.');

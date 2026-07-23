@@ -320,6 +320,7 @@
         $(document).on('click', '#patwc-clear-payment-log', function (event) {
             event.preventDefault();
             logContainer().empty();
+            lastLogMessage = '';
         });
 
         if (config.authorized === false) {

@@ -435,8 +435,14 @@ class PayArcConnectionService
             $deviceId = $this->field($raw, array('device_id', 'Device_id'));
             $code = $this->field($raw, array('code', 'Code', 'id', 'Id'));
 
-            $matchesKnownDevice = (trim($deviceId) !== '' && isset($knownDevices[strtolower(trim($deviceId))]))
-                || (trim($name) !== '' && isset($knownDevices[strtolower(trim($name))]));
+            // A record with its own device id must match on the device id; the
+            // display-name fallback only applies when no device id is present,
+            // so a distinct device sharing a name is still surfaced.
+            $deviceKey = strtolower(trim($deviceId));
+            $nameKey = strtolower(trim($name));
+            $matchesKnownDevice = $deviceKey !== ''
+                ? isset($knownDevices[$deviceKey])
+                : ($nameKey !== '' && isset($knownDevices[$nameKey]));
             if ($matchesKnownDevice) {
                 // The registry mirrors an already-known terminal without its
                 // pos_identifier; reporting it as unidentified only alarms the
