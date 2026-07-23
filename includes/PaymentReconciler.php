@@ -45,7 +45,13 @@ class PaymentReconciler
         }
 
         if ($callbackKey !== '' && $this->callback_already_processed($order, $callbackKey)) {
-            return array('status' => 'idempotent', 'continue_polling' => false, 'attempt' => PaymentAttempt::current($order));
+            $attempt = PaymentAttempt::current($order);
+            $result = array('status' => 'idempotent', 'continue_polling' => false, 'attempt' => $attempt);
+            if (isset($attempt['message']) && is_scalar($attempt['message']) && trim((string) $attempt['message']) !== '') {
+                $result['message'] = trim((string) $attempt['message']);
+            }
+
+            return $result;
         }
 
         $identity = $this->verify_identity($order, $payload, $traceId, $transactionId);
@@ -79,9 +85,12 @@ class PaymentReconciler
 
         $this->store_detail_meta($order, $payload, $chargeId);
 
-        $attempt = PaymentAttempt::update_status($order, $status, $fields);
         $isFinal = $status === 'success' || PaymentAttempt::is_final_unpaid($status);
         $failureSummary = $isFinal && $status !== 'success' ? self::failure_summary($payload) : '';
+        if ($failureSummary !== '') {
+            $fields['message'] = 'Payment was not approved. ' . $failureSummary;
+        }
+        $attempt = PaymentAttempt::update_status($order, $status, $fields);
 
         if ($isFinal) {
             $this->add_note($order, 'PayArc transaction reconciled with final status: ' . $status . '.'
@@ -102,7 +111,7 @@ class PaymentReconciler
         if ($failureSummary !== '') {
             // Shown to the cashier in place of the generic retry message so a
             // processor decline is distinguishable from a config problem.
-            $result['message'] = 'Payment was not approved. ' . $failureSummary;
+            $result['message'] = $fields['message'];
         }
 
         return $result;
@@ -137,6 +146,9 @@ class PaymentReconciler
             $processor = $payload['response'];
         }
         $error = isset($payload['error']) && is_array($payload['error']) ? $payload['error'] : array();
+        if ($error === array() && isset($payload['response']['error']) && is_array($payload['response']['error'])) {
+            $error = $payload['response']['error'];
+        }
         $card = isset($payload['card']) && is_array($payload['card']) ? $payload['card'] : array();
 
         return array(
@@ -165,9 +177,9 @@ class PaymentReconciler
             $parts[] = 'Card entry: ' . $details['entry_mode'] . '.';
         }
 
-        $summary = preg_replace('/[[:cntrl:]]+/', ' ', implode(' ', $parts));
+        $summary = Logger::redact_untrusted_text(implode(' ', $parts));
 
-        return is_string($summary) ? trim(substr($summary, 0, 240)) : '';
+        return trim(substr($summary, 0, 240));
     }
 
     /**

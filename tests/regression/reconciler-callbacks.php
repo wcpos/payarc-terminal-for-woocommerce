@@ -15,6 +15,7 @@ foreach (array(
     $root . '/includes/Settings.php',
     $root . '/includes/PaymentAttempt.php',
     $root . '/includes/Utils/Money.php',
+    $root . '/includes/Logger.php',
     $root . '/includes/PaymentReconciler.php',
 ) as $file) {
     if (!is_readable($file)) {
@@ -422,6 +423,23 @@ patwc_reconciler_assert_same('Payment was not approved. Processor response: 51 I
 $declineDetailNote = end($declineDetailOrder->notes);
 patwc_reconciler_assert_true(strpos((string) $declineDetailNote, 'Processor response: 51 Insufficient funds.') !== false, 'Decline order note should include the processor summary.');
 
+$callbackFirstDeclineOrder = new PatwcReconcilerCallbacksOrder(1101);
+PaymentAttempt::record_new($callbackFirstDeclineOrder, array('status' => 'processing', 'trace_id' => 'trace-1101', 'transaction_id' => 'txn-1101'));
+$callbackFirstPayload = patwc_reconciler_payload(array(
+    'traceId' => 'trace-1101',
+    'transactionId' => 'txn-1101',
+    'status' => 'DECLINED',
+    'metadata' => array('order_id' => '1101'),
+    'processorResponse' => array('code' => '51', 'text' => 'Insufficient funds'),
+));
+$callbackFirstMessage = 'Payment was not approved. Processor response: 51 Insufficient funds. Card entry: CONTACTLESS.';
+$reconciler->reconcile($callbackFirstDeclineOrder, $callbackFirstPayload, 'webhook');
+$callbackFirstAttempt = PaymentAttempt::current($callbackFirstDeclineOrder);
+patwc_reconciler_assert_same($callbackFirstMessage, $callbackFirstAttempt['message'] ?? '', 'Callback-first declines must persist the cashier message on the payment attempt.');
+$duplicateDecline = $reconciler->reconcile($callbackFirstDeclineOrder, $callbackFirstPayload, 'poll');
+patwc_reconciler_assert_same('idempotent', $duplicateDecline['status'], 'Callback-first decline polls should remain idempotent.');
+patwc_reconciler_assert_same($callbackFirstMessage, $duplicateDecline['message'] ?? '', 'Idempotent decline polls must return the persisted cashier message.');
+
 // Success results never carry a failure summary.
 $successNoSummaryOrder = new PatwcReconcilerCallbacksOrder(1100);
 PaymentAttempt::record_new($successNoSummaryOrder, array('status' => 'processing', 'trace_id' => 'trace-1100', 'transaction_id' => 'txn-1100'));
@@ -438,3 +456,16 @@ $noisySummary = WCPOS\WooCommercePOS\PayArcTerminal\PaymentReconciler::failure_s
 ));
 patwc_reconciler_assert_true(strpos($noisySummary, "\x01") === false, 'Failure summary must strip control characters.');
 patwc_reconciler_assert_true(strlen($noisySummary) <= 240, 'Failure summary must be length capped.');
+
+$envelopedErrorSummary = PaymentReconciler::failure_summary(array(
+    'response' => array(
+        'error' => array('code' => 'DECLINED', 'message' => 'Card disabled'),
+    ),
+));
+patwc_reconciler_assert_same('PayArc error: DECLINED Card disabled.', $envelopedErrorSummary, 'Failure summary must read errors from the response envelope.');
+
+$redactedSummary = PaymentReconciler::failure_summary(array(
+    'error' => array('message' => 'Declined traceId=trace-12345'),
+));
+patwc_reconciler_assert_true(strpos($redactedSummary, 'trace-12345') === false, 'Failure summary must redact secret-like provider values.');
+patwc_reconciler_assert_true(strpos($redactedSummary, '[REDACTED]') !== false, 'Failure summary must retain a redaction marker.');
