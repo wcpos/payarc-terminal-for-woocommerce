@@ -376,20 +376,21 @@ class PayArcConnectionService
                 continue;
             }
 
-            $terminalId = $this->field($raw, array('pos_identifier', 'Pos_identifier', 'terminal_id', 'TerminalId'));
+            $fields = $this->terminal_fields($raw);
+            $terminalId = $fields['terminal_id'];
             if ($terminalId === '') {
                 continue;
             }
 
-            if (!$this->enabled_field($raw)) {
+            if (!$fields['enabled']) {
                 $this->log_dropped_terminal($settings, 'disabled', $terminalId);
                 continue;
             }
 
-            $name = $this->field($raw, array('terminal', 'Terminal', 'name', 'Name'));
-            $type = $this->field($raw, array('type', 'Type'));
-            $deviceId = $this->field($raw, array('device_id', 'Device_id'));
-            $code = $this->field($raw, array('code', 'Code', 'id', 'Id'));
+            $name = $fields['name'];
+            $type = $fields['type'];
+            $deviceId = $fields['device_id'];
+            $code = $fields['code'];
             // Include the POS identifier itself: registry rows can mirror an
             // identified terminal by carrying its serial in device_id/terminal
             // while the identified record has no Device_id of its own.
@@ -421,22 +422,23 @@ class PayArcConnectionService
                 continue;
             }
 
-            $terminalId = $this->field($raw, array('pos_identifier', 'Pos_identifier', 'terminal_id', 'TerminalId'));
+            $fields = $this->terminal_fields($raw);
+            $terminalId = $fields['terminal_id'];
             if ($terminalId !== '') {
                 continue;
             }
 
-            if (!$this->enabled_field($raw)) {
+            if (!$fields['enabled']) {
                 $this->log_dropped_terminal($settings, 'disabled', $terminalId);
                 continue;
             }
 
-            $name = $this->field($raw, array('terminal', 'Terminal', 'name', 'Name'));
-            $type = $this->field($raw, array('type', 'Type'));
+            $name = $fields['name'];
+            $type = $fields['type'];
             // Dedupe key may use raw device fields because it never leaves
             // this method; the exposed entry carries only name/type.
-            $deviceId = $this->field($raw, array('device_id', 'Device_id'));
-            $code = $this->field($raw, array('code', 'Code', 'id', 'Id'));
+            $deviceId = $fields['device_id'];
+            $code = $fields['code'];
 
             // A record with its own device id must match on the device id; the
             // display-name fallback only applies when no device id is present,
@@ -690,6 +692,22 @@ class PayArcConnectionService
         }
 
         return '';
+    }
+
+    /**
+     * @param array<string, mixed> $raw
+     * @return array{terminal_id: string, name: string, type: string, device_id: string, code: string, enabled: bool}
+     */
+    private function terminal_fields(array $raw): array
+    {
+        return array(
+            'terminal_id' => $this->field($raw, array('pos_identifier', 'Pos_identifier', 'terminal_id', 'TerminalId')),
+            'name' => $this->field($raw, array('terminal', 'Terminal', 'name', 'Name')),
+            'type' => $this->field($raw, array('type', 'Type')),
+            'device_id' => $this->field($raw, array('device_id', 'Device_id')),
+            'code' => $this->field($raw, array('code', 'Code', 'id', 'Id')),
+            'enabled' => $this->enabled_field($raw),
+        );
     }
 
     /**

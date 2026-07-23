@@ -245,6 +245,7 @@
 
     function startPayment() {
         clearPollTimer();
+        lastLogMessage = '';
         paymentStartedAt = Date.now();
         startButton().prop('disabled', true);
         cancelButton().prop('disabled', false).removeAttr('hidden');
