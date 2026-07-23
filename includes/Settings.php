@@ -139,6 +139,11 @@ class Settings
         return ctype_digit($value) ? (int) $value : 0;
     }
 
+    public function v3_auth_credential(): string
+    {
+        return $this->string_setting('v3_auth_credential', '') === 'secret_key' ? 'secret_key' : 'access_token';
+    }
+
     /**
      * Backwards-compatible alias for older code/tests. New transaction calls should use connect_access_token().
      */

@@ -53,6 +53,7 @@ $settings = new Settings(array(
     'api_bearer_token' => 'merchant-api-token',
     'connect_secret_key' => 'merchant-api-token',
     'connect_access_token' => 'connect-access-token',
+    'connect_token_expires_at' => (string) (time() + 3600),
     'callback_bearer_token' => 'callback-secret-token',
 ));
 $client = new PayArcClient($settings);
