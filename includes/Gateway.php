@@ -89,7 +89,7 @@ trait GatewayImplementation
             'callback_bearer_token' => array(
                 'title' => 'Callback bearer token',
                 'type' => 'patwc_secret',
-                'description' => 'PayArc-provided callback secret expected in the callback Authorization header.',
+                'description' => 'PayArc support provides this callback secret when you register your callback URL - the Connect button cannot fetch it. PayArc sends it in the Authorization header of terminal callbacks so the plugin can verify them.',
                 'default' => '',
             ),
             'connection' => array(

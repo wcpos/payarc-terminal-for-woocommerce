@@ -9,6 +9,13 @@ use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
 
 class PayArcConnectionService
 {
+    /**
+     * Assumed Connect AccessToken lifetime when PayArc Login returns no
+     * positive ExpiresIn, so an unknown lifetime is refreshed early instead
+     * of being reused forever.
+     */
+    private const CONNECT_TOKEN_FALLBACK_TTL = 1200;
+
     /** @var Settings */
     private $settings;
 
@@ -72,7 +79,7 @@ class PayArcConnectionService
         }
 
         $expiresIn = isset($tokenInfo['ExpiresIn']) && is_scalar($tokenInfo['ExpiresIn']) ? (int) $tokenInfo['ExpiresIn'] : 0;
-        $expiresAt = $expiresIn > 0 ? $this->now() + max(60, $expiresIn - 60) : 0;
+        $expiresAt = $expiresIn > 0 ? $this->now() + max(60, $expiresIn - 60) : $this->now() + self::CONNECT_TOKEN_FALLBACK_TTL;
         $tenantId = $settings->tenant_id();
         $defaultTerminal = $this->choose_default_terminal($terminals, $settings->default_terminal_id());
         $updates = $this->credential_updates($settings, $overrides);
@@ -162,12 +169,12 @@ class PayArcConnectionService
         );
     }
 
-    public function ensure_connect_access_token(): string
+    public function ensure_connect_access_token(bool $force = false): string
     {
         $token = $this->settings->connect_access_token();
         $expiresAt = $this->settings->connect_token_expires_at();
 
-        if ($token !== '' && ($expiresAt === 0 || $expiresAt > $this->now() + 60)) {
+        if (!$force && $token !== '' && $expiresAt > $this->now() + 60) {
             return $token;
         }
 
@@ -179,7 +186,7 @@ class PayArcConnectionService
         }
 
         $expiresIn = isset($tokenInfo['ExpiresIn']) && is_scalar($tokenInfo['ExpiresIn']) ? (int) $tokenInfo['ExpiresIn'] : 0;
-        $expiresAt = $expiresIn > 0 ? $this->now() + max(60, $expiresIn - 60) : 0;
+        $expiresAt = $expiresIn > 0 ? $this->now() + max(60, $expiresIn - 60) : $this->now() + self::CONNECT_TOKEN_FALLBACK_TTL;
         $this->persist(array(
             'connect_access_token' => $accessToken,
             'connect_token_expires_at' => (string) $expiresAt,
@@ -190,6 +197,15 @@ class PayArcConnectionService
         )));
 
         return $accessToken;
+    }
+
+    public function remember_v3_auth_credential(string $credential): void
+    {
+        if (!in_array($credential, array('access_token', 'secret_key'), true)) {
+            throw new RuntimeException('Invalid PayArc V3 authentication credential.');
+        }
+
+        $this->persist(array('v3_auth_credential' => $credential));
     }
 
     private function assert_no_in_flight_payment_attempts(): void

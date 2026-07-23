@@ -21,6 +21,7 @@ foreach (array(
     $root . '/includes/PaymentLock.php',
     $root . '/includes/Utils/Money.php',
     $root . '/includes/Utils/PayArcIds.php',
+    $root . '/includes/Services/PayArcRequestException.php',
     $root . '/includes/Services/PayArcClient.php',
     $root . '/includes/Services/TerminalService.php',
     $root . '/includes/Services/PayArcPaymentService.php',
@@ -606,3 +607,39 @@ $processedResult = $processedService->cancel_order_payment($processedOrder);
 patwc_payment_service_assert_same($processedReconciler->result, $processedResult, 'Already-processed cancel should return reconciler result.');
 patwc_payment_service_assert_same(array(array('trace_id' => 'trace-processed-001')), $processedClient->get_calls, 'Already-processed cancel should fetch transaction.');
 patwc_payment_service_assert_same(array(array('order_id' => 130, 'payload' => $processedClient->transaction_response, 'source' => 'cancel_lookup')), $processedReconciler->calls, 'Already-processed cancel should reconcile fetched transaction.');
+
+// Verified live 2026-07-23: PayArc accepts a sale (200 + traceId) but GET
+// /v3/transactions/{traceId} returns TRANSACTION_NOT_FOUND for several seconds
+// until the transaction becomes visible. Polling must treat that window as
+// "keep waiting", not as a fatal error.
+$notFoundClient = new PatwcPaymentServiceFakeClient();
+$notFoundClient->get_transaction_callback = static function (): void {
+    throw new WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcRequestException('PayArc request failed; HTTP status: 400; code: TRANSACTION_NOT_FOUND.', 'TRANSACTION_NOT_FOUND', 400);
+};
+$notFoundReconciler = new PatwcPaymentServiceFakeReconciler();
+$notFoundService = patwc_payment_service_make_service(patwc_payment_service_settings(), $notFoundClient, $notFoundReconciler);
+$notFoundOrder = new PatwcPaymentServiceOrder(220);
+PaymentAttempt::record_new($notFoundOrder, array('status' => 'processing', 'trace_id' => 'trace-not-found', 'transaction_id' => 'txn-nf', 'terminal_id' => '1234567890'));
+$notFoundResult = $notFoundService->poll_order($notFoundOrder);
+patwc_payment_service_assert_same('processing', $notFoundResult['status'], 'TRANSACTION_NOT_FOUND during poll should keep the local in-flight status.');
+patwc_payment_service_assert_true($notFoundResult['continue_polling'], 'TRANSACTION_NOT_FOUND during poll should continue polling.');
+patwc_payment_service_assert_same(array(), $notFoundReconciler->calls, 'TRANSACTION_NOT_FOUND should not reach the reconciler.');
+$notVisibleLogs = patwc_payment_service_logs('PayArc transaction not visible yet; continuing to poll');
+patwc_payment_service_assert_same(1, count($notVisibleLogs), 'The not-visible poll window should emit one log entry.');
+patwc_payment_service_assert_same(Settings::mask_identifier('trace-not-found'), $notVisibleLogs[0]['context']['trace_id_masked'], 'Not-visible log should mask the trace id.');
+patwc_payment_service_assert_logs_hide('trace-not-found', 'Not-visible logs must not contain the raw trace id.');
+
+// Any other PayArc failure during polling must still surface.
+$otherErrorClient = new PatwcPaymentServiceFakeClient();
+$otherErrorClient->get_transaction_callback = static function (): void {
+    throw new WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcRequestException('PayArc request failed; HTTP status: 400; code: INVALID_REQUEST.', 'INVALID_REQUEST', 400);
+};
+$otherErrorService = patwc_payment_service_make_service(patwc_payment_service_settings(), $otherErrorClient);
+$otherErrorOrder = new PatwcPaymentServiceOrder(221);
+PaymentAttempt::record_new($otherErrorOrder, array('status' => 'processing', 'trace_id' => 'trace-other-error', 'transaction_id' => 'txn-oe', 'terminal_id' => '1234567890'));
+try {
+    $otherErrorService->poll_order($otherErrorOrder);
+    throw new RuntimeException('Non-TRANSACTION_NOT_FOUND poll failures should be rethrown.');
+} catch (WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcRequestException $exception) {
+    patwc_payment_service_assert_same('INVALID_REQUEST', $exception->payarc_code(), 'Other poll failures should surface unchanged.');
+}

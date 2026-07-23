@@ -153,7 +153,7 @@
     }
 
     function isFailureStatus(status) {
-        return $.inArray(status, ['decline', 'declined', 'failure', 'failed', 'error', 'timeout', 'canceled', 'cancelled']) !== -1;
+        return $.inArray(status, ['decline', 'declined', 'failure', 'failed', 'error', 'timeout', 'canceled', 'cancelled', 'aborted']) !== -1;
     }
 
     function clearPollTimer() {

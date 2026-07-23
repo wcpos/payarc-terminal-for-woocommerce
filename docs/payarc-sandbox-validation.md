@@ -45,6 +45,11 @@ Required settings:
 12. Complete the terminal interaction and confirm the order is paid only after PayArc callback/get-transaction confirmation.
 13. Test decline, timeout/no-card, duplicate callback, and cancel-before-card-present when practical. Do not change PayArc mode, credentials, Connect state, or disconnect while a terminal payment is still in progress; the plugin blocks those connection changes to protect reconciliation.
 
+### Troubleshooting: sale returns 401
+
+The V3 client automatically tries the Connect AccessToken and SecretKey, remembering whichever credential succeeds.
+If both credentials return 401, the log message means PayArc must confirm Connect V3 provisioning and the required `/v3/transactions` credential for that merchant.
+
 ## Evidence to record after merchant validation
 
 Record sanitized evidence only:

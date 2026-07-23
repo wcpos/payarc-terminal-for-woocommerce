@@ -375,3 +375,10 @@ $afterExceptionResult = PaymentLock::with_lock(6003, 'void sale', function () us
 });
 patwc_payment_attempt_assert_true($afterExceptionRan, 'Lock should be released after callback throws.');
 patwc_payment_attempt_assert_same(array('status' => 'after-exception'), $afterExceptionResult, 'Released lock should run callback after exception.');
+
+// Observed live 2026-07-23: PayArc reports ABORTED as the final state of a
+// cancelled terminal request. It must be treated as final-unpaid so polling
+// stops and the cashier can retry immediately.
+patwc_payment_attempt_assert_same('aborted', PaymentAttempt::normalize_status('ABORTED'), 'ABORTED should normalize to aborted.');
+patwc_payment_attempt_assert_true(PaymentAttempt::is_final_unpaid('ABORTED'), 'ABORTED must be a final unpaid status.');
+patwc_payment_attempt_assert_false(PaymentAttempt::is_non_final('ABORTED'), 'ABORTED must not count as in-flight.');

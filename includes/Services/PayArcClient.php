@@ -3,7 +3,9 @@
 namespace WCPOS\WooCommercePOS\PayArcTerminal\Services;
 
 use RuntimeException;
+use WCPOS\WooCommercePOS\PayArcTerminal\Logger;
 use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
+use WCPOS\WooCommercePOS\PayArcTerminal\Utils\PayArcIds;
 
 class PayArcClient
 {
@@ -12,6 +14,9 @@ class PayArcClient
 
     /** @var object */
     private $connection_service;
+
+    /** @var bool */
+    private $login_attempted = false;
 
     /**
      * @param object|null $connection_service
@@ -75,14 +80,20 @@ class PayArcClient
     private function request(string $method, string $path, ?array $payload = null, ?string $idempotency_key = null): array
     {
         $baseUrl = rtrim($this->settings->connect_base_url(), '/');
-        $token = $this->connect_access_token();
+        $preferredCredential = $this->settings->v3_auth_credential();
+        $credential = $preferredCredential;
+        $this->login_attempted = false;
+        $this->assert_connect_state();
+        $token = $credential === 'secret_key' ? $this->settings->connect_secret_key() : $this->connect_access_token();
 
         if ($baseUrl === '') {
             throw new RuntimeException('PayArc Connect base URL is not configured.');
         }
 
         if ($token === '') {
-            throw new RuntimeException('PayArc Connect access token is not configured. Press Connect PayArc in the gateway settings.');
+            throw new RuntimeException($credential === 'secret_key'
+                ? 'PayArc SecretKey/API bearer token is not configured. Enter it in the gateway settings.'
+                : 'PayArc Connect access token is not configured. Press Connect PayArc in the gateway settings.');
         }
 
         $headers = array(
@@ -91,9 +102,12 @@ class PayArcClient
             'Authorization' => 'Bearer ' . $token,
         );
 
-        if ($idempotency_key !== null && trim($idempotency_key) !== '') {
-            $headers['X-Idempotency-Key'] = $idempotency_key;
+        // The V3 API requires X-Idempotency-Key on every call, including GETs
+        // (verified live 2026-07-23: requests without it are rejected with 400).
+        if ($idempotency_key === null || trim($idempotency_key) === '') {
+            $idempotency_key = PayArcIds::idempotency_key();
         }
+        $headers['X-Idempotency-Key'] = $idempotency_key;
 
         $args = array(
             'method' => $method,
@@ -111,32 +125,82 @@ class PayArcClient
             $args['body'] = $body;
         }
 
-        $response = wp_remote_request($baseUrl . $path, $args);
+        $attempted = array();
+        while (true) {
+            $args['headers']['Authorization'] = 'Bearer ' . $token;
+            $response = wp_remote_request($baseUrl . $path, $args);
 
-        if (function_exists('is_wp_error') && is_wp_error($response)) {
-            throw new RuntimeException('PayArc request failed before receiving a response.');
+            if (function_exists('is_wp_error') && is_wp_error($response)) {
+                throw new RuntimeException('PayArc request failed before receiving a response.');
+            }
+
+            if (!is_array($response)) {
+                throw new RuntimeException('PayArc response was not an array.');
+            }
+
+            $httpStatus = $this->http_status($response);
+            if ($httpStatus !== 401) {
+                break;
+            }
+
+            $attempted[$credential] = true;
+            if ($credential === 'access_token' && !$this->login_attempted) {
+                try {
+                    $token = $this->refresh_connect_access_token();
+                } catch (RuntimeException $exception) {
+                    $credential = 'secret_key';
+                    $token = $this->settings->connect_secret_key();
+                }
+                continue;
+            }
+
+            if ($credential === 'access_token' && empty($attempted['secret_key'])) {
+                $credential = 'secret_key';
+                $token = $this->settings->connect_secret_key();
+                continue;
+            }
+
+            if ($credential === 'secret_key' && empty($attempted['access_token'])) {
+                $credential = 'access_token';
+                $token = $this->refresh_connect_access_token();
+                continue;
+            }
+
+            $host = (string) parse_url($baseUrl, PHP_URL_HOST);
+            throw new RuntimeException('PayArc rejected both the Connect AccessToken and the SecretKey for the V3 transactions API (HTTP 401) at ' . $host . '. Ask PayArc support to confirm PayArc Connect V3 is enabled for this merchant and which credential authorizes /v3/transactions requests.');
         }
 
-        if (!is_array($response)) {
-            throw new RuntimeException('PayArc response was not an array.');
-        }
-
-        $httpStatus = $this->http_status($response);
         $decoded = $this->decode_response_body($response, $httpStatus);
 
         if ($httpStatus < 200 || $httpStatus >= 300) {
-            throw new RuntimeException($this->failure_message($decoded, $httpStatus));
+            throw new PayArcRequestException($this->failure_message($decoded, $httpStatus), $this->error_code($decoded), $httpStatus);
         }
 
         if ($this->is_payarc_failure($decoded)) {
-            throw new RuntimeException($this->failure_message($decoded, $httpStatus));
+            throw new PayArcRequestException($this->failure_message($decoded, $httpStatus), $this->error_code($decoded), $httpStatus);
+        }
+
+        if ($credential !== $preferredCredential) {
+            if (is_object($this->connection_service) && method_exists($this->connection_service, 'remember_v3_auth_credential')) {
+                $this->connection_service->remember_v3_auth_credential($credential);
+            }
+            Logger::log('PayArc V3 credential fallback succeeded', array(
+                'request_host' => (string) parse_url($baseUrl, PHP_URL_HOST),
+                'worked_with' => $credential,
+                'previously_preferred' => $preferredCredential,
+            ), null, 'warning');
         }
 
         return $decoded;
     }
 
 
-    private function connect_access_token(): string
+    /**
+     * The connected-state guards must hold for every credential: they enforce
+     * that Connect PayArc was completed for the current mode and credentials,
+     * which is what validates the setup even when the SecretKey signs requests.
+     */
+    private function assert_connect_state(): void
     {
         $connectedMode = $this->settings->connected_mode();
         $connectedFingerprint = $this->settings->connected_fingerprint();
@@ -152,22 +216,38 @@ class PayArcClient
         if ($this->settings->mode() === 'production' && ($connectedMode !== 'production' || $connectedFingerprint === '')) {
             throw new RuntimeException('PayArc Live mode requires a Live Connect AccessToken. Press Connect PayArc in Live mode before taking payments.');
         }
+    }
 
+    private function connect_access_token(): string
+    {
         $token = $this->settings->connect_access_token();
         $expiresAt = $this->settings->connect_token_expires_at();
         $now = time();
 
-        if ($token !== '' && ($expiresAt === 0 || $expiresAt > $now + 60)) {
+        if ($token !== '' && $expiresAt > $now + 60) {
             return $token;
         }
 
         if (is_object($this->connection_service) && method_exists($this->connection_service, 'ensure_connect_access_token')) {
+            $this->login_attempted = true;
             $refreshed = $this->connection_service->ensure_connect_access_token();
 
             return is_scalar($refreshed) ? trim((string) $refreshed) : '';
         }
 
         return $token;
+    }
+
+    private function refresh_connect_access_token(): string
+    {
+        $this->login_attempted = true;
+        if (is_object($this->connection_service) && method_exists($this->connection_service, 'ensure_connect_access_token')) {
+            $refreshed = $this->connection_service->ensure_connect_access_token(true);
+
+            return is_scalar($refreshed) ? trim((string) $refreshed) : '';
+        }
+
+        return $this->settings->connect_access_token();
     }
 
     /**
@@ -243,6 +323,16 @@ class PayArcClient
         }
 
         return implode('; ', $parts) . '.';
+    }
+
+    /**
+     * @param array<string, mixed> $decoded
+     */
+    private function error_code(array $decoded): string
+    {
+        $error = $this->error_payload($decoded);
+
+        return isset($error['code']) && is_scalar($error['code']) ? trim((string) $error['code']) : '';
     }
 
     /**

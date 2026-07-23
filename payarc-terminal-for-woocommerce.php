@@ -2,7 +2,7 @@
 /**
  * Plugin Name: PayArc Terminal for WooCommerce
  * Description: PayArc PAX Terminal integration for WooCommerce POS.
- * Version: 0.1.12
+ * Version: 0.1.13
  * Author: kilbot
  * License: GPL-3.0-or-later
  * Requires PHP: 7.4
@@ -14,7 +14,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('PATWC_VERSION', '0.1.12');
+define('PATWC_VERSION', '0.1.13');
 define('PATWC_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('PATWC_PLUGIN_URL', plugin_dir_url(__FILE__));
 
