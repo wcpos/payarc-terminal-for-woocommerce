@@ -479,6 +479,24 @@ $now = 1002;
 $pollService->poll_order($pollOrder);
 patwc_payment_service_assert_same(2, count($pollClient->get_calls), 'Poll after throttle window should fetch again.');
 
+$GLOBALS['patwc_captured_logs'] = array();
+$declinePollClient = new PatwcPaymentServiceFakeClient();
+$declinePollClient->transaction_response = array(
+    'traceId' => 'trace-poll-decline',
+    'status' => 'DECLINED',
+    'response' => array(
+        'error' => array('code' => 'DECLINED', 'message' => 'Card disabled'),
+    ),
+);
+$declineReconciler = new PatwcPaymentServiceFakeReconciler();
+$declineReconciler->result = array('status' => 'failure', 'continue_polling' => false);
+$declinePollService = patwc_payment_service_make_service(patwc_payment_service_settings(), $declinePollClient, $declineReconciler);
+$declinePollOrder = new PatwcPaymentServiceOrder(1271);
+PaymentAttempt::record_new($declinePollOrder, array('status' => 'processing', 'trace_id' => 'trace-poll-decline', 'transaction_id' => 'txn-poll-decline', 'terminal_id' => '1234567890'));
+$declinePollService->poll_order($declinePollOrder);
+$declineLogs = patwc_payment_service_logs('PayArc payment attempt resolved');
+patwc_payment_service_assert_same('Card disabled', $declineLogs[0]['context']['payarc_error_message'] ?? '', 'Decline resolution logs should include the redacted PayArc error message.');
+
 $cancelNoTraceClient = new PatwcPaymentServiceFakeClient();
 $cancelNoTraceService = patwc_payment_service_make_service(patwc_payment_service_settings(), $cancelNoTraceClient);
 $cancelNoTraceOrder = new PatwcPaymentServiceOrder(128);

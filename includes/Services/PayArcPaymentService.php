@@ -426,6 +426,7 @@ class PayArcPaymentService
                     'processor_response_code' => $details['code'],
                     'processor_response_text' => $details['text'],
                     'payarc_error_code' => $details['error_code'],
+                    'payarc_error_message' => $details['error_message'],
                     'card_entry_mode' => $details['entry_mode'],
                 ) as $key => $value) {
                     if ($value !== '') {

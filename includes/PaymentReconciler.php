@@ -178,8 +178,9 @@ class PaymentReconciler
         }
 
         $summary = Logger::redact_untrusted_text(implode(' ', $parts));
+        $summary = function_exists('mb_substr') ? mb_substr($summary, 0, 240) : substr($summary, 0, 240);
 
-        return trim(substr($summary, 0, 240));
+        return trim($summary);
     }
 
     /**

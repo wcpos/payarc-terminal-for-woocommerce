@@ -457,6 +457,11 @@ $noisySummary = WCPOS\WooCommercePOS\PayArcTerminal\PaymentReconciler::failure_s
 patwc_reconciler_assert_true(strpos($noisySummary, "\x01") === false, 'Failure summary must strip control characters.');
 patwc_reconciler_assert_true(strlen($noisySummary) <= 240, 'Failure summary must be length capped.');
 
+$unicodeSummary = PaymentReconciler::failure_summary(array(
+    'processorResponse' => array('code' => '05', 'text' => str_repeat('a', 216) . 'é'),
+));
+patwc_reconciler_assert_same(1, preg_match('//u', $unicodeSummary), 'Failure summary truncation must preserve valid UTF-8.');
+
 $envelopedErrorSummary = PaymentReconciler::failure_summary(array(
     'response' => array(
         'error' => array('code' => 'DECLINED', 'message' => 'Card disabled'),
