@@ -404,3 +404,37 @@ patwc_reconciler_assert_same('txn-original', $paidProcessedSameTraceCurrentAttem
 patwc_reconciler_assert_same('charge-original', $paidProcessedSameTraceCurrentAttempt['charge_id'], 'Paid processed same-trace conflict should not overwrite current charge id.');
 patwc_reconciler_assert_same('charge-original', $paidProcessedSameTraceDifferentTransactionOrder->meta['_patwc_charge_id'], 'Paid processed same-trace conflict should not overwrite charge detail meta.');
 patwc_reconciler_assert_same(array(), $paidProcessedSameTraceDifferentTransactionOrder->payment_complete_calls, 'Paid processed same-trace conflict should not complete another payment.');
+
+// Final declines must surface WHY: processor response, PayArc error, and card
+// entry mode go to the cashier message and the order note (live gap observed
+// 2026-07-23: three production declines logged only the word "decline").
+$declineDetailOrder = new PatwcReconcilerCallbacksOrder(1099);
+PaymentAttempt::record_new($declineDetailOrder, array('status' => 'processing', 'trace_id' => 'trace-1099', 'transaction_id' => 'txn-1099'));
+$declineDetail = $reconciler->reconcile($declineDetailOrder, patwc_reconciler_payload(array(
+    'traceId' => 'trace-1099',
+    'transactionId' => 'txn-1099',
+    'status' => 'DECLINED',
+    'metadata' => array('order_id' => '1099'),
+    'processorResponse' => array('code' => '51', 'text' => 'Insufficient funds'),
+    'card' => array('entryMode' => 'contactless'),
+)), 'poll');
+patwc_reconciler_assert_same('Payment was not approved. Processor response: 51 Insufficient funds. Card entry: contactless.', $declineDetail['message'] ?? '', 'Decline result should carry the processor summary for the cashier.');
+$declineDetailNote = end($declineDetailOrder->notes);
+patwc_reconciler_assert_true(strpos((string) $declineDetailNote, 'Processor response: 51 Insufficient funds.') !== false, 'Decline order note should include the processor summary.');
+
+// Success results never carry a failure summary.
+$successNoSummaryOrder = new PatwcReconcilerCallbacksOrder(1100);
+PaymentAttempt::record_new($successNoSummaryOrder, array('status' => 'processing', 'trace_id' => 'trace-1100', 'transaction_id' => 'txn-1100'));
+$successNoSummary = $reconciler->reconcile($successNoSummaryOrder, patwc_reconciler_payload(array(
+    'traceId' => 'trace-1100',
+    'transactionId' => 'txn-1100',
+    'metadata' => array('order_id' => '1100'),
+)), 'webhook');
+patwc_reconciler_assert_false(array_key_exists('message', $successNoSummary), 'Successful reconciliation should not attach a failure message.');
+
+// Summary sanitization: control characters stripped, length capped.
+$noisySummary = WCPOS\WooCommercePOS\PayArcTerminal\PaymentReconciler::failure_summary(array(
+    'processorResponse' => array('code' => '05', 'text' => "DO\x01 NOT HONOR" . str_repeat('x', 400)),
+));
+patwc_reconciler_assert_true(strpos($noisySummary, "\x01") === false, 'Failure summary must strip control characters.');
+patwc_reconciler_assert_true(strlen($noisySummary) <= 240, 'Failure summary must be length capped.');

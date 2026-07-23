@@ -18,6 +18,7 @@ foreach (array(
     $root . '/includes/Settings.php',
     $root . '/includes/Logger.php',
     $root . '/includes/PaymentAttempt.php',
+    $root . '/includes/PaymentReconciler.php',
     $root . '/includes/PaymentLock.php',
     $root . '/includes/Utils/Money.php',
     $root . '/includes/Utils/PayArcIds.php',
