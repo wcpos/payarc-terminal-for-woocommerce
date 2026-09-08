@@ -17,7 +17,7 @@ class PaymentAttempt
 
     /**
      * Terminal payments bypass the pay form that records the gateway. POS needs
-     * it before payment_complete to select the paid status; refunds need it too.
+     * it before payment_complete to select the configured paid status.
      * Claim only at completion so an abandoned terminal attempt cannot leave
      * PayArc on an order that is then paid another way.
      *
