@@ -132,6 +132,7 @@ class PayArcPaymentService
                 $attempt['trace_id'] = $traceId;
             }
 
+            PaymentAttempt::claim_order_gateway($order, $this->settings->title());
             return PaymentAttempt::record_new($order, $attempt);
         });
     }

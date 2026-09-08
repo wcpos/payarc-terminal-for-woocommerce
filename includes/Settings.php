@@ -25,6 +25,11 @@ class Settings
         $this->settings = $settings === null ? $this->load_settings() : $settings;
     }
 
+    public function title(): string
+    {
+        return $this->string_setting('title', 'PayArc Terminal');
+    }
+
     public function mode(): string
     {
         $mode = $this->string_setting('mode', 'production');

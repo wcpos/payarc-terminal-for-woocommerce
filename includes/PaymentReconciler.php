@@ -435,6 +435,7 @@ class PaymentReconciler
     private function payment_complete($order, string $transactionId): void
     {
         if (is_object($order) && method_exists($order, 'payment_complete')) {
+            PaymentAttempt::claim_order_gateway($order, $this->settings->title());
             $order->payment_complete($transactionId);
         }
     }
