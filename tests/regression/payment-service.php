@@ -111,6 +111,18 @@ class PatwcPaymentServiceOrder
     /** @var int */
     public $save_count = 0;
 
+    public $method = 'pos_cash';
+
+    public function get_payment_method(): string
+    {
+        return $this->method;
+    }
+
+    public function set_payment_method($method): void
+    {
+        $this->method = $method;
+    }
+
     public function __construct(int $id, string $total = '10.23', string $currency = 'USD', bool $paid = false)
     {
         $this->id = $id;
@@ -372,6 +384,7 @@ $client->sale_callback = function () use (&$client): void {
 $service = patwc_payment_service_make_service(patwc_payment_service_settings(), $client);
 $order = new PatwcPaymentServiceOrder(123);
 $started = $service->start_payment_for_order($order);
+patwc_payment_service_assert_same('pos_cash', $order->get_payment_method(), 'Starting a payment must leave the order payment method untouched.');
 $expectedTransactionId = PayArcIds::transaction_id(123, '550e8400-e29b-41d4-a716-446655440000');
 $expectedCallbackUrl = function_exists('admin_url') ? admin_url('admin-ajax.php?action=patwc_payarc_callback') : 'admin-ajax.php?action=patwc_payarc_callback';
 patwc_payment_service_assert_same(1, count($client->sale_calls), 'start_payment_for_order should call sale once.');

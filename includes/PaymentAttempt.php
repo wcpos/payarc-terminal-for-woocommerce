@@ -16,6 +16,33 @@ class PaymentAttempt
     private const IN_FLIGHT_STALE_AFTER_SECONDS = 1800;
 
     /**
+     * Terminal payments bypass the pay form that records the gateway. POS needs
+     * it before payment_complete to select the configured paid status.
+     * Claim only at completion so an abandoned terminal attempt cannot leave
+     * PayArc on an order that is then paid another way.
+     *
+     * @param object $order WooCommerce order-like object.
+     */
+    public static function claim_order_gateway($order, string $title): void
+    {
+        if (!is_object($order)) {
+            return;
+        }
+        if (
+            method_exists($order, 'get_payment_method') && $order->get_payment_method() === Settings::GATEWAY_ID
+            && method_exists($order, 'get_payment_method_title') && $order->get_payment_method_title() !== ''
+        ) {
+            return;
+        }
+        if (method_exists($order, 'set_payment_method')) {
+            $order->set_payment_method(Settings::GATEWAY_ID);
+        }
+        if (method_exists($order, 'set_payment_method_title')) {
+            $order->set_payment_method_title($title);
+        }
+    }
+
+    /**
      * @param object $order WooCommerce order-like object.
      * @param array<string, mixed> $attempt
      * @return array<string, mixed>
