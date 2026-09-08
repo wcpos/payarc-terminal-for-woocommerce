@@ -18,6 +18,8 @@ class PaymentAttempt
     /**
      * Terminal payments bypass the pay form that records the gateway. POS needs
      * it before payment_complete to select the paid status; refunds need it too.
+     * Claim only at completion so an abandoned terminal attempt cannot leave
+     * PayArc on an order that is then paid another way.
      *
      * @param object $order WooCommerce order-like object.
      */
@@ -26,7 +28,10 @@ class PaymentAttempt
         if (!is_object($order)) {
             return;
         }
-        if (method_exists($order, 'get_payment_method') && $order->get_payment_method() === Settings::GATEWAY_ID) {
+        if (
+            method_exists($order, 'get_payment_method') && $order->get_payment_method() === Settings::GATEWAY_ID
+            && method_exists($order, 'get_payment_method_title') && $order->get_payment_method_title() !== ''
+        ) {
             return;
         }
         if (method_exists($order, 'set_payment_method')) {

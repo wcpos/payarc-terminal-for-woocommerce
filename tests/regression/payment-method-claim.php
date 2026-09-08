@@ -23,6 +23,11 @@ class PatwcPaymentMethodClaimOrder
         return $this->method;
     }
 
+    public function get_payment_method_title(): string
+    {
+        return $this->title;
+    }
+
     public function set_payment_method($method): void
     {
         $this->method = $method;
@@ -87,6 +92,11 @@ PaymentAttempt::claim_order_gateway($order, (new Settings(array()))->title());
 patwc_payment_method_claim_expect($order->method === Settings::GATEWAY_ID, 'An empty payment method should be claimed.');
 patwc_payment_method_claim_expect($order->title === 'PayArc Terminal', 'Missing title setting should default to PayArc Terminal.');
 patwc_payment_method_claim_expect($order->save_count === 0, 'Claiming must leave saving to the caller.');
+
+$order->title = '';
+PaymentAttempt::claim_order_gateway($order, 'Counter terminal');
+patwc_payment_method_claim_expect($order->method === Settings::GATEWAY_ID, 'Our payment method should remain unchanged when filling its title.');
+patwc_payment_method_claim_expect($order->title === 'Counter terminal', 'An already claimed order with an empty title should get the configured title.');
 
 $order->title = 'Custom order title';
 $order->setter_calls = 0;
