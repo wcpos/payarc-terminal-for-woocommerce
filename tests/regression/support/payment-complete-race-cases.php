@@ -506,6 +506,28 @@ $cached = $reconciler->reconcile($pollCopy, $payload, 'poll');
 patwc_race_expect(1 === $GLOBALS['patwc_race_payment_complete_calls'] && 1 === $GLOBALS['patwc_race_stock_reductions'], 'the reload must clear the HPOS datastore cache (completed ' . $GLOBALS['patwc_race_payment_complete_calls'] . ' times)');
 patwc_race_expect('idempotent' === ($cached['status'] ?? ''), 'the reload past the HPOS datastore cache must see the completion from the other request');
 
+// Scenario 12: fresh meta alone does not stop a stale HPOS status. When another
+// transaction paid the order, a cached unpaid row would complete it again.
+foreach (array('order cache' => 'patwc_race_hpos_cache', 'datastore cache' => 'patwc_race_hpos_data_cache') as $cacheName => $cacheGlobal) {
+    patwc_race_reset();
+    $stale = wc_get_order(PATWC_RACE_ORDER_ID);
+    $GLOBALS[$cacheGlobal][PATWC_RACE_ORDER_ID] = $cacheGlobal === 'patwc_race_hpos_cache'
+        ? clone $stale
+        : $GLOBALS['patwc_race_rows'][PATWC_RACE_ORDER_ID];
+    $GLOBALS['patwc_race_rows'][PATWC_RACE_ORDER_ID]['status'] = 'processing';
+    $GLOBALS['patwc_race_rows'][PATWC_RACE_ORDER_ID]['transaction_id'] = 'charge-other';
+    $GLOBALS['patwc_race_rows'][PATWC_RACE_ORDER_ID]['meta'][PaymentAttempt::META_CURRENT_TRACE_ID] = 'trace-other';
+    $GLOBALS['patwc_race_rows'][PATWC_RACE_ORDER_ID]['meta'][PaymentAttempt::META_CURRENT_TRANSACTION_ID] = 'txn-other';
+    $GLOBALS['patwc_race_rows'][PATWC_RACE_ORDER_ID]['meta'][PaymentAttempt::META_CURRENT_ATTEMPT] = array(
+        'status' => 'success',
+        'trace_id' => 'trace-other',
+        'transaction_id' => 'txn-other',
+    );
+    $conflict = $reconciler->reconcile($stale, $payload, 'poll');
+    patwc_race_expect(0 === $GLOBALS['patwc_race_payment_complete_calls'] && 0 === $GLOBALS['patwc_race_stock_reductions'], 'a stale HPOS ' . $cacheName . ' must not complete an order paid by another transaction');
+    patwc_race_expect('conflict' === ($conflict['status'] ?? ''), 'a stale HPOS ' . $cacheName . ' copy of an order paid by another transaction must report conflict');
+}
+
 patwc_race_expect(0 === $GLOBALS['patwc_race_unclaimed_completions'], 'every completion must hold the complete_payment claim');
 
 echo "payment-complete-race ok\n";
