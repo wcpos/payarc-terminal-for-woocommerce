@@ -40,7 +40,7 @@ class PaymentReconciler
 
         $orderId = $this->order_id($order);
         if (!PaymentLock::acquire($orderId, 'complete_payment', self::COMPLETE_LOCK_TTL)) {
-            Logger::log('PayArc payment completion already in progress for this order.', array('order_id' => $orderId, 'source' => $source));
+            Logger::log('PayArc payment completion already in progress for this order.', array('order_id' => $orderId, 'completion_source' => $source));
 
             return array('status' => 'pending', 'continue_polling' => true);
         }
@@ -59,12 +59,10 @@ class PaymentReconciler
     public static function reload_order($order)
     {
         $id = (int) $order->get_id();
-        if (function_exists('clean_post_cache'))
-        {
+        if (function_exists('clean_post_cache')) {
             clean_post_cache($id);
         }
-        if (function_exists('wc_get_container') && class_exists(\Automattic\WooCommerce\Caches\OrderCache::class))
-        {
+        if (function_exists('wc_get_container') && class_exists(\Automattic\WooCommerce\Caches\OrderCache::class)) {
             wc_get_container()->get(\Automattic\WooCommerce\Caches\OrderCache::class)->remove($id);
         }
         $fresh = function_exists('wc_get_order') ? wc_get_order($id) : false;
