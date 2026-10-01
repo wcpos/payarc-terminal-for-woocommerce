@@ -167,6 +167,16 @@ class PatwcRaceOrder
         $this->changedMeta = array();
     }
 
+    // WC_Data::read_meta_data(): the 'orders' meta cache unless forced to read the database.
+    public function read_meta_data($forceRead = false): void
+    {
+        if ($forceRead) {
+            $this->row['meta'] = $GLOBALS['patwc_race_rows'][$this->get_id()]['meta'];
+            $GLOBALS['patwc_race_meta_cache'][$this->get_id()] = $this->row['meta'];
+            $this->changedMeta = array();
+        }
+    }
+
     public function payment_complete($transactionId = ''): bool
     {
         if (!isset($GLOBALS['wpdb']->rows[PATWC_RACE_CLAIM])) {
@@ -204,7 +214,9 @@ class PatwcRaceOrder
 
 // Each request keeps the order it loaded until clean_post_cache() (posts store)
 // or OrderCache::remove() (HPOS) drops it, as WooCommerce does without a
-// persistent object cache.
+// persistent object cache. HPOS datastore caching keeps the order row until
+// clear_cached_data(), and order meta comes from the request's 'orders' meta
+// cache, which neither of those clears, until read_meta_data(true).
 function wc_get_order($id)
 {
     if ($GLOBALS['patwc_race_missing_order'] || !isset($GLOBALS['patwc_race_rows'][$id])) {
@@ -213,8 +225,17 @@ function wc_get_order($id)
     if (isset($GLOBALS['patwc_race_hpos_cache'][$id])) {
         return clone $GLOBALS['patwc_race_hpos_cache'][$id];
     }
+    if (isset($GLOBALS['patwc_race_hpos_data_cache'][$id])) {
+        return new PatwcRaceOrder($GLOBALS['patwc_race_hpos_data_cache'][$id]);
+    }
     if (!isset($GLOBALS['patwc_race_post_cache'][$id])) {
-        $GLOBALS['patwc_race_post_cache'][$id] = new PatwcRaceOrder($GLOBALS['patwc_race_rows'][$id]);
+        $row = $GLOBALS['patwc_race_rows'][$id];
+        if (isset($GLOBALS['patwc_race_meta_cache'][$id])) {
+            $row['meta'] = $GLOBALS['patwc_race_meta_cache'][$id];
+        } else {
+            $GLOBALS['patwc_race_meta_cache'][$id] = $row['meta'];
+        }
+        $GLOBALS['patwc_race_post_cache'][$id] = new PatwcRaceOrder($row);
     }
 
     return clone $GLOBALS['patwc_race_post_cache'][$id];
@@ -279,6 +300,8 @@ function patwc_race_reset(): void
     $GLOBALS['patwc_race_payment_complete_calls'] = 0;
     $GLOBALS['patwc_race_post_cache'] = array();
     $GLOBALS['patwc_race_hpos_cache'] = array();
+    $GLOBALS['patwc_race_hpos_data_cache'] = array();
+    $GLOBALS['patwc_race_meta_cache'] = array();
     $GLOBALS['patwc_race_cleaned_posts'] = array();
     $GLOBALS['patwc_race_saves'] = 0;
     $GLOBALS['patwc_race_logs'] = array();
@@ -435,11 +458,26 @@ class PatwcRaceOrderCache
     }
 }
 class_alias(PatwcRaceOrderCache::class, 'Automattic\\WooCommerce\\Caches\\OrderCache');
+class PatwcRaceOrdersTableDataStore
+{
+    public function clear_cached_data(array $orderIds): array
+    {
+        foreach ($orderIds as $id) {
+            unset($GLOBALS['patwc_race_hpos_data_cache'][$id]);
+        }
+
+        return array_fill_keys($orderIds, true);
+    }
+}
+class_alias(PatwcRaceOrdersTableDataStore::class, 'Automattic\\WooCommerce\\Internal\\DataStores\\Orders\\OrdersTableDataStore');
 function wc_get_container()
 {
     return new class {
         public function get($class)
         {
+            if ('Automattic\\WooCommerce\\Internal\\DataStores\\Orders\\OrdersTableDataStore' === $class) {
+                return new PatwcRaceOrdersTableDataStore();
+            }
             patwc_race_expect('Automattic\\WooCommerce\\Caches\\OrderCache' === $class, 'reload must ask for the HPOS order cache');
 
             return new PatwcRaceOrderCache();
@@ -455,6 +493,18 @@ $reconciler->reconcile($webhookCopy, $payload, 'webhook');
 $GLOBALS['patwc_race_hpos_cache'][PATWC_RACE_ORDER_ID] = clone $pollCopy;
 $hpos = $reconciler->reconcile($pollCopy, $payload, 'poll');
 patwc_race_expect('idempotent' === ($hpos['status'] ?? '') && 1 === $GLOBALS['patwc_race_payment_complete_calls'], 'the HPOS reload must see the completion from the other request');
+
+// Scenario 11: with HPOS datastore caching on, the order row is cached apart from OrderCache.
+patwc_race_reset();
+$webhookCopy = wc_get_order(PATWC_RACE_ORDER_ID);
+$pollCopy = wc_get_order(PATWC_RACE_ORDER_ID);
+$unpaidRow = $GLOBALS['patwc_race_rows'][PATWC_RACE_ORDER_ID];
+$reconciler->reconcile($webhookCopy, $payload, 'webhook');
+// The poll's request cached the row while it was unpaid.
+$GLOBALS['patwc_race_hpos_data_cache'][PATWC_RACE_ORDER_ID] = $unpaidRow;
+$cached = $reconciler->reconcile($pollCopy, $payload, 'poll');
+patwc_race_expect(1 === $GLOBALS['patwc_race_payment_complete_calls'] && 1 === $GLOBALS['patwc_race_stock_reductions'], 'the reload must clear the HPOS datastore cache (completed ' . $GLOBALS['patwc_race_payment_complete_calls'] . ' times)');
+patwc_race_expect('idempotent' === ($cached['status'] ?? ''), 'the reload past the HPOS datastore cache must see the completion from the other request');
 
 patwc_race_expect(0 === $GLOBALS['patwc_race_unclaimed_completions'], 'every completion must hold the complete_payment claim');
 
