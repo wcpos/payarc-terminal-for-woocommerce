@@ -7,6 +7,10 @@ use WCPOS\WooCommercePOS\PayArcTerminal\Utils\Money;
 
 class PaymentReconciler
 {
+    // Covers payment_complete() (status, stock, emails); a dead request's claim
+    // can be taken over after this interval.
+    private const COMPLETE_LOCK_TTL = 120;
+
     public const META_CHARGE_ID = '_patwc_charge_id';
     public const META_CARD_BRAND = '_patwc_card_brand';
     public const META_CARD_ENTRY_MODE = '_patwc_card_entry_mode';
@@ -29,6 +33,46 @@ class PaymentReconciler
      * @return array<string, mixed>
      */
     public function reconcile($order, array $payload, string $source): array
+    {
+        if (PaymentAttempt::normalize_status($this->payload_status($payload)) !== 'success') {
+            return $this->apply_payload($order, $payload, $source);
+        }
+
+        $orderId = $this->order_id($order);
+        if (!PaymentLock::acquire($orderId, 'complete_payment', self::COMPLETE_LOCK_TTL)) {
+            Logger::log('PayArc payment completion already in progress for this order.', array('order_id' => $orderId, 'source' => $source));
+
+            return array('status' => 'pending', 'continue_polling' => true);
+        }
+
+        try {
+            // This request may hold a copy loaded before another request completed the order (#23).
+            return $this->apply_payload(self::reload_order($order), $payload, $source);
+        } finally {
+            PaymentLock::release($orderId, 'complete_payment');
+        }
+    }
+
+    /**
+     * Callers that read order state inside a lock use this to read it fresh.
+     */
+    public static function reload_order($order)
+    {
+        $id = (int) $order->get_id();
+        if (function_exists('clean_post_cache'))
+        {
+            clean_post_cache($id);
+        }
+        if (function_exists('wc_get_container') && class_exists(\Automattic\WooCommerce\Caches\OrderCache::class))
+        {
+            wc_get_container()->get(\Automattic\WooCommerce\Caches\OrderCache::class)->remove($id);
+        }
+        $fresh = function_exists('wc_get_order') ? wc_get_order($id) : false;
+
+        return is_object($fresh) ? $fresh : $order;
+    }
+
+    private function apply_payload($order, array $payload, string $source): array
     {
         $status = PaymentAttempt::normalize_status($this->payload_status($payload));
         $traceId = $this->extract_scalar($payload, 'traceId');

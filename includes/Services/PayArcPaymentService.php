@@ -160,6 +160,8 @@ class PayArcPaymentService
         }
 
         return PaymentLock::with_lock($this->order_id($order), self::RECONCILIATION_LOCK, function () use ($order): array {
+            // Another request may have completed the order since this one loaded it (#23).
+            $order = PaymentReconciler::reload_order($order);
             $attempt = PaymentAttempt::current($order);
             $status = isset($attempt['status']) ? (string) $attempt['status'] : 'created';
             $traceId = isset($attempt['trace_id']) && is_scalar($attempt['trace_id']) ? trim((string) $attempt['trace_id']) : '';
@@ -216,6 +218,8 @@ class PayArcPaymentService
     public function cancel_order_payment($order): array
     {
         return PaymentLock::with_lock($this->order_id($order), 'terminal', function () use ($order): array {
+            // Another request may have completed the order since this one loaded it (#23).
+            $order = PaymentReconciler::reload_order($order);
             $attempt = PaymentAttempt::current($order);
             $status = isset($attempt['status']) ? (string) $attempt['status'] : 'created';
             $traceId = isset($attempt['trace_id']) && is_scalar($attempt['trace_id']) ? trim((string) $attempt['trace_id']) : '';

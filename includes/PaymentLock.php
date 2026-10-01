@@ -3,11 +3,9 @@
 namespace WCPOS\WooCommercePOS\PayArcTerminal;
 
 /**
- * Provides a short-lived advisory lock for PayArc order operations.
- *
- * This lock is advisory: it reduces duplicate terminal commands from concurrent
- * requests, but it is not a database-atomic mutex and must not be treated as a
- * guarantee that only one process can ever enter the critical section.
+ * INSERT IGNORE claims the options table's unique option_name atomically;
+ * add_option() checks and then upserts. Compare-and-delete keeps a stale
+ * holder from deleting a replacement claim.
  */
 class PaymentLock
 {
@@ -16,14 +14,15 @@ class PaymentLock
     /** @var array<string, array<string, int>> */
     private static $fallbackLocks = array();
 
+    /** @var array<string, string> */
+    private static $held = array();
+
     /**
      * @return array<string, mixed>
      */
     public static function with_lock(int $order_id, string $operation, callable $callback): array
     {
-        $key = self::lock_key($order_id, $operation);
-
-        if (!self::acquire_lock($key)) {
+        if (!self::acquire($order_id, $operation)) {
             return array(
                 'status' => 'conflict',
                 'message' => 'Another PayArc operation is already in progress for this order.',
@@ -36,7 +35,7 @@ class PaymentLock
 
             return is_array($result) ? $result : array('status' => 'error');
         } finally {
-            self::release_lock($key);
+            self::release($order_id, $operation);
         }
     }
 
@@ -55,21 +54,28 @@ class PaymentLock
         return 'patwc_lock_' . $order_id . '_' . $sanitizedOperation;
     }
 
-    private static function acquire_lock(string $key): bool
+    public static function acquire(int $order_id, string $operation, int $ttl = self::LOCK_TTL_SECONDS): bool
     {
-        $payload = array('expires_at' => time() + self::LOCK_TTL_SECONDS);
+        $key = self::lock_key($order_id, $operation);
 
-        if (function_exists('add_option')) {
-            if (add_option($key, $payload, '', 'no')) {
+        if (isset($GLOBALS['wpdb']) && is_object($GLOBALS['wpdb'])) {
+            $wpdb = $GLOBALS['wpdb'];
+            $value = json_encode(array('token' => bin2hex(random_bytes(16)), 'expires_at' => time() + $ttl));
+            $claim = $wpdb->prepare("INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')", $key, $value);
+            if (1 === $wpdb->query($claim)) {
+                self::$held[$key] = $value;
+
                 return true;
             }
 
-            if (function_exists('get_option') && function_exists('delete_option')) {
-                $existing = get_option($key, false);
-                if (is_array($existing) && isset($existing['expires_at']) && (int) $existing['expires_at'] < time()) {
-                    delete_option($key);
+            $existing = $wpdb->get_var($wpdb->prepare("SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $key));
+            $lock = json_decode((string) $existing, true);
+            if (!is_array($lock) || !isset($lock['expires_at']) || !is_numeric($lock['expires_at']) || $lock['expires_at'] < time()) {
+                $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s", $key, $existing));
+                if (1 === $wpdb->query($claim)) {
+                    self::$held[$key] = $value;
 
-                    return add_option($key, $payload, '', 'no');
+                    return true;
                 }
             }
 
@@ -84,15 +90,21 @@ class PaymentLock
             }
         }
 
-        self::$fallbackLocks[$key] = $payload;
+        self::$fallbackLocks[$key] = array('expires_at' => time() + $ttl);
 
         return true;
     }
 
-    private static function release_lock(string $key): void
+    public static function release(int $order_id, string $operation): void
     {
-        if (function_exists('delete_option')) {
-            delete_option($key);
+        $key = self::lock_key($order_id, $operation);
+
+        if (isset($GLOBALS['wpdb']) && is_object($GLOBALS['wpdb'])) {
+            $wpdb = $GLOBALS['wpdb'];
+            if (isset(self::$held[$key])) {
+                $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s", $key, self::$held[$key]));
+                unset(self::$held[$key]);
+            }
 
             return;
         }
