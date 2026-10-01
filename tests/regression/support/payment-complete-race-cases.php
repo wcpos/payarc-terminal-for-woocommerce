@@ -47,8 +47,19 @@ function patwc_race_expect(bool $condition, string $message): void
 function wc_get_logger()
 {
     return new class {
-        public function __call($name, $arguments)
+        public function info($message, array $context = array()): void
         {
+            $GLOBALS['patwc_race_logs'][] = array('message' => $message, 'context' => $context);
+        }
+
+        public function warning($message, array $context = array()): void
+        {
+            $this->info($message, $context);
+        }
+
+        public function error($message, array $context = array()): void
+        {
+            $this->info($message, $context);
         }
     };
 }
@@ -270,6 +281,7 @@ function patwc_race_reset(): void
     $GLOBALS['patwc_race_hpos_cache'] = array();
     $GLOBALS['patwc_race_cleaned_posts'] = array();
     $GLOBALS['patwc_race_saves'] = 0;
+    $GLOBALS['patwc_race_logs'] = array();
     $GLOBALS['patwc_race_throw_completion'] = false;
     $GLOBALS['patwc_race_missing_order'] = false;
     $GLOBALS['wpdb']->rows = array();
@@ -338,6 +350,11 @@ patwc_race_expect(array('status' => 'pending', 'continue_polling' => true) === $
 patwc_race_expect(0 === $GLOBALS['patwc_race_payment_complete_calls'] && 0 === $GLOBALS['patwc_race_stock_reductions'], 'a busy completion must not complete or reduce stock');
 patwc_race_expect($unchanged === $GLOBALS['patwc_race_rows'][PATWC_RACE_ORDER_ID] && 0 === $GLOBALS['patwc_race_saves'], 'a busy completion must not touch or save the order');
 patwc_race_expect(array() === $GLOBALS['patwc_race_cleaned_posts'], 'a busy completion must not reload the order');
+// Logger sets its own 'source' (the plugin), so the path that found the claim busy needs its own key.
+$busyLogs = array_values(array_filter($GLOBALS['patwc_race_logs'], static function (array $log): bool {
+    return $log['message'] === 'PayArc payment completion already in progress for this order.';
+}));
+patwc_race_expect(1 === count($busyLogs) && 'poll' === ($busyLogs[0]['context']['completion_source'] ?? null), 'a busy completion must log which path found the claim held');
 PaymentLock::release(PATWC_RACE_ORDER_ID, 'complete_payment');
 $retried = $reconciler->reconcile(wc_get_order(PATWC_RACE_ORDER_ID), $payload, 'poll');
 patwc_race_expect('success' === $retried['status'] && 1 === $GLOBALS['patwc_race_payment_complete_calls'] && 1 === $GLOBALS['patwc_race_stock_reductions'], 'the next poll must complete exactly once');
