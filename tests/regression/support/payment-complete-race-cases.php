@@ -171,7 +171,9 @@ class PatwcRaceOrder
     public function read_meta_data($forceRead = false): void
     {
         if ($forceRead) {
-            $this->row['meta'] = $GLOBALS['patwc_race_rows'][$this->get_id()]['meta'];
+            // With HPOS data caching on, even a forced read goes through the meta store's cache.
+            $this->row['meta'] = $GLOBALS['patwc_race_hpos_meta_cache'][$this->get_id()]
+                ?? $GLOBALS['patwc_race_rows'][$this->get_id()]['meta'];
             $GLOBALS['patwc_race_meta_cache'][$this->get_id()] = $this->row['meta'];
             $this->changedMeta = array();
         }
@@ -230,7 +232,9 @@ function wc_get_order($id)
     }
     if (!isset($GLOBALS['patwc_race_post_cache'][$id])) {
         $row = $GLOBALS['patwc_race_rows'][$id];
-        if (isset($GLOBALS['patwc_race_meta_cache'][$id])) {
+        if (isset($GLOBALS['patwc_race_hpos_meta_cache'][$id])) {
+            $row['meta'] = $GLOBALS['patwc_race_hpos_meta_cache'][$id];
+        } elseif (isset($GLOBALS['patwc_race_meta_cache'][$id])) {
             $row['meta'] = $GLOBALS['patwc_race_meta_cache'][$id];
         } else {
             $GLOBALS['patwc_race_meta_cache'][$id] = $row['meta'];
@@ -301,6 +305,7 @@ function patwc_race_reset(): void
     $GLOBALS['patwc_race_post_cache'] = array();
     $GLOBALS['patwc_race_hpos_cache'] = array();
     $GLOBALS['patwc_race_hpos_data_cache'] = array();
+    $GLOBALS['patwc_race_hpos_meta_cache'] = array();
     $GLOBALS['patwc_race_meta_cache'] = array();
     $GLOBALS['patwc_race_cleaned_posts'] = array();
     $GLOBALS['patwc_race_saves'] = 0;
@@ -460,16 +465,33 @@ class PatwcRaceOrderCache
 class_alias(PatwcRaceOrderCache::class, 'Automattic\\WooCommerce\\Caches\\OrderCache');
 class PatwcRaceOrdersTableDataStore
 {
+    // Like WooCommerce 11.1.2: the meta cache is cleared only for ids whose
+    // row-cache delete succeeded, and a delete fails when the row entry is gone.
+    public function clear_cached_data(array $orderIds): array
+    {
+        $deleted = array();
+        foreach ($orderIds as $id) {
+            $deleted[$id] = isset($GLOBALS['patwc_race_hpos_data_cache'][$id]);
+            unset($GLOBALS['patwc_race_hpos_data_cache'][$id]);
+        }
+        (new PatwcRaceOrdersTableDataStoreMeta())->clear_cached_data(array_keys(array_filter($deleted)));
+
+        return $deleted;
+    }
+}
+class_alias(PatwcRaceOrdersTableDataStore::class, 'Automattic\\WooCommerce\\Internal\\DataStores\\Orders\\OrdersTableDataStore');
+class PatwcRaceOrdersTableDataStoreMeta
+{
     public function clear_cached_data(array $orderIds): array
     {
         foreach ($orderIds as $id) {
-            unset($GLOBALS['patwc_race_hpos_data_cache'][$id]);
+            unset($GLOBALS['patwc_race_hpos_meta_cache'][$id]);
         }
 
         return array_fill_keys($orderIds, true);
     }
 }
-class_alias(PatwcRaceOrdersTableDataStore::class, 'Automattic\\WooCommerce\\Internal\\DataStores\\Orders\\OrdersTableDataStore');
+class_alias(PatwcRaceOrdersTableDataStoreMeta::class, 'Automattic\\WooCommerce\\Internal\\DataStores\\Orders\\OrdersTableDataStoreMeta');
 function wc_get_container()
 {
     return new class {
@@ -477,6 +499,9 @@ function wc_get_container()
         {
             if ('Automattic\\WooCommerce\\Internal\\DataStores\\Orders\\OrdersTableDataStore' === $class) {
                 return new PatwcRaceOrdersTableDataStore();
+            }
+            if ('Automattic\\WooCommerce\\Internal\\DataStores\\Orders\\OrdersTableDataStoreMeta' === $class) {
+                return new PatwcRaceOrdersTableDataStoreMeta();
             }
             patwc_race_expect('Automattic\\WooCommerce\\Caches\\OrderCache' === $class, 'reload must ask for the HPOS order cache');
 
@@ -527,6 +552,42 @@ foreach (array('order cache' => 'patwc_race_hpos_cache', 'datastore cache' => 'p
     patwc_race_expect(0 === $GLOBALS['patwc_race_payment_complete_calls'] && 0 === $GLOBALS['patwc_race_stock_reductions'], 'a stale HPOS ' . $cacheName . ' must not complete an order paid by another transaction');
     patwc_race_expect('conflict' === ($conflict['status'] ?? ''), 'a stale HPOS ' . $cacheName . ' copy of an order paid by another transaction must report conflict');
 }
+
+// Scenario 13 (#25): with HPOS data caching on, the row's cache entry can already be
+// gone, so WooCommerce's row-cache delete fails and leaves the meta entry in place.
+// The reload must clear the meta store's cache itself.
+patwc_race_reset();
+$client = new PatwcRaceClient();
+$client->transaction = $payload;
+$service = new PayArcPaymentService($settings, $client, null, $reconciler, static function (): int {
+    return time();
+});
+$pollCopy = wc_get_order(PATWC_RACE_ORDER_ID);
+$unpaidMeta = $GLOBALS['patwc_race_rows'][PATWC_RACE_ORDER_ID]['meta'];
+$reconciler->reconcile(wc_get_order(PATWC_RACE_ORDER_ID), $payload, 'webhook');
+// The poll's request cached the meta while the payment was still in flight.
+$GLOBALS['patwc_race_hpos_meta_cache'][PATWC_RACE_ORDER_ID] = $unpaidMeta;
+$polled = $service->poll_order($pollCopy);
+patwc_race_expect(0 === $client->lookups, 'a poll after the webhook must not look the transaction up again when the HPOS row-cache delete fails');
+patwc_race_expect(1 === patwc_race_completion_notes(), 'a stale HPOS meta cache must not add a second final-status note (wrote ' . patwc_race_completion_notes() . ')');
+patwc_race_expect('success' === ($polled['status'] ?? '') && 1 === $GLOBALS['patwc_race_payment_complete_calls'], 'a poll past a stale HPOS meta cache must answer success and complete once');
+
+// Scenario 14 (#25): the same stale meta must not hide that another transaction paid the order.
+patwc_race_reset();
+$stale = wc_get_order(PATWC_RACE_ORDER_ID);
+$GLOBALS['patwc_race_hpos_meta_cache'][PATWC_RACE_ORDER_ID] = $GLOBALS['patwc_race_rows'][PATWC_RACE_ORDER_ID]['meta'];
+$GLOBALS['patwc_race_rows'][PATWC_RACE_ORDER_ID]['status'] = 'processing';
+$GLOBALS['patwc_race_rows'][PATWC_RACE_ORDER_ID]['transaction_id'] = 'charge-other';
+$GLOBALS['patwc_race_rows'][PATWC_RACE_ORDER_ID]['meta'][PaymentAttempt::META_CURRENT_TRACE_ID] = 'trace-other';
+$GLOBALS['patwc_race_rows'][PATWC_RACE_ORDER_ID]['meta'][PaymentAttempt::META_CURRENT_TRANSACTION_ID] = 'txn-other';
+$GLOBALS['patwc_race_rows'][PATWC_RACE_ORDER_ID]['meta'][PaymentAttempt::META_CURRENT_ATTEMPT] = array(
+    'status' => 'success',
+    'trace_id' => 'trace-other',
+    'transaction_id' => 'txn-other',
+);
+$conflict = $reconciler->reconcile($stale, $payload, 'webhook');
+patwc_race_expect('conflict' === ($conflict['status'] ?? ''), 'a stale HPOS meta cache must not hide that another transaction paid the order');
+patwc_race_expect(0 === $GLOBALS['patwc_race_payment_complete_calls'], 'a stale HPOS meta cache must not complete an order another transaction paid');
 
 patwc_race_expect(0 === $GLOBALS['patwc_race_unclaimed_completions'], 'every completion must hold the complete_payment claim');
 
