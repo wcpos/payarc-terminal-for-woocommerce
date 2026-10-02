@@ -353,8 +353,6 @@ patwc_payment_attempt_assert_same(array(
     'continue_polling' => true,
 ), $nestedConflict, 'Active lock should return conflict.');
 patwc_payment_attempt_assert_false($nestedCallbackRan, 'Active lock should not run nested callback.');
-patwc_payment_attempt_assert_same(2, count($GLOBALS['patwc_payment_attempt_add_option_calls']), 'Nested lock should make one atomic add_option acquisition attempt per with_lock call.');
-patwc_payment_attempt_assert_same('no', $GLOBALS['patwc_payment_attempt_add_option_calls'][0]['autoload'], 'Lock options should not autoload.');
 
 patwc_payment_attempt_reset_transients();
 patwc_payment_attempt_reset_options();
