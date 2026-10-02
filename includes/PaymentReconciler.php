@@ -55,7 +55,7 @@ class PaymentReconciler
 
     /**
      * Callers that read order state inside a lock use this to read it fresh.
-     * Clears the post cache, HPOS order cache and datastore cache, then force-reads meta.
+     * Clears the post cache, HPOS order cache, datastore cache and meta-store cache, then force-reads meta.
      */
     public static function reload_order($order)
     {
@@ -70,6 +70,13 @@ class PaymentReconciler
             $dataStore = wc_get_container()->get(\Automattic\WooCommerce\Internal\DataStores\Orders\OrdersTableDataStore::class);
             if (method_exists($dataStore, 'clear_cached_data')) {
                 $dataStore->clear_cached_data(array($id));
+            }
+            // The data store skips the meta cache when its row-cache delete fails (#25).
+            if (class_exists(\Automattic\WooCommerce\Internal\DataStores\Orders\OrdersTableDataStoreMeta::class)) {
+                $metaStore = wc_get_container()->get(\Automattic\WooCommerce\Internal\DataStores\Orders\OrdersTableDataStoreMeta::class);
+                if (method_exists($metaStore, 'clear_cached_data')) {
+                    $metaStore->clear_cached_data(array($id));
+                }
             }
         }
         $fresh = function_exists('wc_get_order') ? wc_get_order($id) : false;
