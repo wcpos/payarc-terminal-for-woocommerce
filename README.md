@@ -18,7 +18,7 @@ The plugin connects your WooCommerce site to PayArc Connect V3, sends sale reque
 ## Requirements
 
 - WordPress with WooCommerce installed and active.
-- WooCommerce POS Pro 2.0.0 or newer. Without it the plugin shows an admin notice and registers nothing.
+- WooCommerce POS Pro 2.0.0 or newer. Without it the plugin shows an admin notice and registers no gateway, actions or callback route.
 - PHP 7.4 or newer.
 - A PayArc merchant account with PayArc Connect access.
 - A PayArc-supported PAX terminal assigned to the merchant account.
@@ -86,7 +86,7 @@ The plugin verifies that the returned PayArc transaction belongs to the WooComme
 
 ## WCPOS Pro 2.0 payments base
 
-The plugin is Pro-only: everything it registers sits behind `wcpos_pro_requires('2.0.0')` from `plugins_loaded` at priority 30 (Pro defines its helpers at 20), and without a compatible Pro only an admin notice remains. With Pro 2.0 active, it registers a server adapter (`includes/Server/`) with Pro's shared payments base, so the POS app can drive a PayArc terminal through Pro's ledger: one sale per ledger row (the row id is the sale's `X-Idempotency-Key`, and its 16-character `transactionId` is derived from the order and the row), polling by PayArc's `traceId`, cancellation, refunds as terminal commands through `POST /v3/transactions/refund`, and callbacks delivered to Pro's route. The order-pay page described above is unchanged for now.
+The plugin is Pro-only: everything it registers sits behind `wcpos_pro_requires('2.0.0')` from `plugins_loaded` at priority 30 (Pro defines its helpers at 20), and without a compatible Pro only an admin notice remains (plus the HPOS compatibility declaration and the admin script). With Pro 2.0 active, it registers a server adapter (`includes/Server/`) with Pro's shared payments base, so the POS app can drive a PayArc terminal through Pro's ledger: one sale per ledger row (the row id is the sale's `X-Idempotency-Key`, and its 16-character `transactionId` is derived from the order and the row), polling by PayArc's `traceId`, cancellation, refunds as terminal commands through `POST /v3/transactions/refund`, and callbacks delivered to Pro's route. The order-pay page described above is unchanged for now.
 
 Facts the adapter rests on, and what they mean for the store:
 

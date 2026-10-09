@@ -9,8 +9,9 @@ define('ABSPATH', '/');
 define('PATWC_PLUGIN_DIR', dirname(__DIR__, 3) . '/');
 class WC_Payment_Gateway
 {
-    public $id = ''; public $enabled = 'yes'; public $form_fields = array(); public $settings = array();
-    public function init_settings(): void { $this->settings = get_option('woocommerce_' . $this->id . '_settings', array()); }
+    public $id = ''; public $enabled = 'no'; public $form_fields = array(); public $settings = array();
+    // As WooCommerce does: the saved checkbox value decides $enabled, 'no' when none; this plugin must ignore it.
+    public function init_settings(): void { $this->settings = get_option('woocommerce_' . $this->id . '_settings', array()); $this->enabled = ($this->settings['enabled'] ?? 'no') === 'yes' ? 'yes' : 'no'; }
     public function get_option($key, $default = null) { return $this->settings[$key] ?? $default; }
 }
 function get_option($k, $d = false) { return $GLOBALS['options'][$k] ?? $d; }
@@ -25,7 +26,7 @@ function check(bool $ok, string $what): void { if (!$ok) { fwrite(STDERR, 'FAILE
 require PATWC_PLUGIN_DIR . 'includes/Settings.php';
 require PATWC_PLUGIN_DIR . 'includes/Gateway.php';
 
-$configured = array('tenant_id' => '123456789012', 'default_terminal_id' => '1234567890', 'enabled' => 'yes'); // 'enabled' is the old web-checkout value: it counts for nothing.
+$configured = array('tenant_id' => '123456789012', 'default_terminal_id' => '1234567890', 'enabled' => 'no'); // The old web-checkout checkbox, as most sites saved it: it counts for nothing either way.
 function available(array $settings, array $ctx): bool
 {
     $GLOBALS['options'] = array('woocommerce_' . Settings::GATEWAY_ID . '_settings' => $settings);
@@ -41,5 +42,11 @@ check(!available($configured, array('pay_page' => true, 'pos_user' => true, 'swi
 check(!available($configured, array('pay_page' => true, 'pos_user' => false, 'switch' => true)), 'the order-pay page is for users who may run the POS');
 check(!available(array('tenant_id' => '', 'default_terminal_id' => '1234567890'), array('pos' => true)), 'unconfigured (no MID) is unavailable even to the POS');
 check(!available(array('tenant_id' => '123456789012', 'default_terminal_id' => ''), array('pos' => true)), 'unconfigured (no terminal) is unavailable even to the POS');
+check(!available($configured + array('enabled' => 'yes'), array('checkout' => true, 'pos_user' => true, 'switch' => true)) && available(array('enabled' => 'yes') + $configured, array('pos' => true)), 'a saved enabled=yes neither brings web checkout back nor is needed by the POS');
+// The connection checks follow the POS switch, not the old checkbox.
+$GLOBALS['ctx'] = array('switch' => false); Settings::reset_enabled_for_pos_cache();
+check(Gateway::validate_settings(array('tenant_id' => '', 'default_terminal_id' => '', 'tender_type' => 'CREDIT', 'print_receipt' => '0', 'enabled' => 'yes')) === array(), 'with the POS switch off, a saved enabled=yes does not make the connection checks apply');
+$GLOBALS['ctx'] = array('switch' => true); Settings::reset_enabled_for_pos_cache();
+check(count(Gateway::validate_settings(array('tenant_id' => '', 'default_terminal_id' => '', 'tender_type' => 'CREDIT', 'print_receipt' => '0'))) === 2, 'with the POS switch on, the MID and serial are required');
 check(!array_key_exists('enabled', (new Gateway())->form_fields) && isset((new Gateway())->form_fields['section_pos']), 'the web-checkout checkbox is gone; the settings page says where the switch is');
 echo "gateway availability cases passed\n";
