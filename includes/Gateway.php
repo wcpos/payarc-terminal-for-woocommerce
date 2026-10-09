@@ -416,7 +416,7 @@ trait GatewayImplementation
             $adopted = Legacy_Adoption::adopt_order($orderId);
             if (is_wp_error($adopted)) {
                 if ($adopted->get_error_code() === 'patwc_adoption_awaiting_trace') {
-                    $message = 'PayArc accepted an earlier payment on this order without a reference, so it cannot be followed from here; the terminal may have taken it. Reload the page in a moment.';
+                    $message = 'PayArc accepted an earlier payment on this order without a reference, so it cannot be followed from here. Check the terminal first: it may have taken the payment. Reload the page in a moment; after half an hour the attempt is closed and noted on the order.';
                 } elseif ($adopted->get_error_code() === 'patwc_adoption_unanswered') {
                     $message = 'PayArc did not answer when an earlier payment on this order was checked. Reload the page in a moment.';
                 } elseif (Legacy_Adoption::is_deferral($adopted)) {
@@ -424,7 +424,7 @@ trait GatewayImplementation
                 } elseif ($adopted->get_error_code() === 'patwc_adoption_conflict') {
                     $message = 'An earlier PayArc Terminal sale on this order does not match the order (see the order notes). Check it in the PayArc dashboard and settle the order by hand before taking payment again.';
                 } elseif ($adopted->get_error_code() === 'patwc_adoption_stale_attempt' || $adopted->get_error_code() === 'patwc_adoption_unreadable') {
-                    $message = 'An earlier PayArc Terminal payment on this order cannot be read under the current PayArc credentials. Check it in the PayArc dashboard under the mode that took it. To take payment here, switch PayArc back to that mode and reload; or take the payment another way.';
+                    $message = 'An earlier PayArc Terminal payment on this order cannot be read under the current PayArc credentials. Check it in the PayArc dashboard under the mode that took it. To take payment here, switch PayArc back to that mode, press Connect PayArc, and reload; or take the payment another way.';
                 } else {
                     $message = 'A PayArc Terminal payment is still open on this order and could not be handed to WooCommerce POS. Check it in the PayArc dashboard before taking payment again.';
                 }

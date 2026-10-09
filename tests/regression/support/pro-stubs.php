@@ -87,6 +87,7 @@ namespace {
     function wcpos_pro_adopt_legacy_attempt($order, $gateway_id, $ref, $amount, $currency)
     {
         if (!empty($GLOBALS['pro_refuses_adoption'])) { return new WP_Error('wcpos_adopt_unsupported', 'refused'); }
+        if (isset($GLOBALS['pro_adopt_answer'])) { return $GLOBALS['pro_adopt_answer']; }
         $row = array('id' => 'row-' . $ref, 'method_id' => $gateway_id, 'provider' => 'payarc', 'capture_mode' => 'server', 'source' => 'webview', 'amount' => $amount, 'currency' => $currency, 'status' => 'pending', 'provider_refs' => array('action' => $ref));
         $GLOBALS['ledger'][$order->get_id()][] = $row;
         $GLOBALS['adopted'][$ref] = $row['id'];
@@ -96,7 +97,7 @@ namespace {
     function patwc_reset_world(): void
     {
         $GLOBALS['orders'] = array(); $GLOBALS['options'] = array(); $GLOBALS['ledger'] = array(); $GLOBALS['adopted'] = array(); $GLOBALS['adoptions'] = array(); $GLOBALS['lookups'] = array();
-        $GLOBALS['free_lock_held'] = false; $GLOBALS['filters'] = array(); $GLOBALS['order_ids'] = array(); $GLOBALS['order_queries'] = array(); $GLOBALS['pro_refuses_adoption'] = false; $GLOBALS['pro_processed'] = array(); $GLOBALS['pro_refunds'] = array(); $GLOBALS['cache_cleared'] = array(); $GLOBALS['reads'] = array(); $GLOBALS['clone_orders'] = false;
+        $GLOBALS['free_lock_held'] = false; $GLOBALS['filters'] = array(); $GLOBALS['order_ids'] = array(); $GLOBALS['order_queries'] = array(); $GLOBALS['pro_refuses_adoption'] = false; $GLOBALS['pro_processed'] = array(); $GLOBALS['pro_refunds'] = array(); $GLOBALS['cache_cleared'] = array(); $GLOBALS['reads'] = array(); $GLOBALS['clone_orders'] = false; $GLOBALS['pro_adopt_answer'] = null;
         WCPOS\WooCommercePOS\PayArcTerminal\Legacy_Adoption::$reader = null;
     }
     function patwc_set_ledger_status(int $order_id, string $row_id, string $status): void

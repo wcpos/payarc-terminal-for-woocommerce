@@ -4,6 +4,7 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal;
 
 use Throwable;
 use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcClient;
+use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcNotSentException;
 use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcRequestException;
 
 /**
@@ -386,6 +387,10 @@ final class Legacy_Adoption
                 }
 
                 // Refused (credentials, mode, a bad request): asking again changes nothing; staff must look.
+                return new \WP_Error('patwc_adoption_unreadable', $e->getMessage());
+            } catch (PayArcNotSentException $e) {
+                // The client could not ask (no Connect state for this mode, credentials that do not match):
+                // asking again changes nothing until staff reconnect.
                 return new \WP_Error('patwc_adoption_unreadable', $e->getMessage());
             } catch (Throwable $e) {
                 return new \WP_Error('patwc_adoption_unanswered', $e->getMessage());

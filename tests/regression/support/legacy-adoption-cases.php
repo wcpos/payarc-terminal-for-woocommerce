@@ -130,6 +130,14 @@ check(Legacy_Adoption::owns_order($order), 'the adopted reference keeps ownershi
 $GLOBALS['ledger'][19] = array();
 check(!Legacy_Adoption::owns_order($order), 'an unreadable adopted row does not swallow a newer sale');
 
+patwc_reset_world(); $order = order_with_attempt(21, $live, false); Legacy_Adoption::$reader = reader_returning(new WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcNotSentException('PayArc Connect base URL is not configured.'));
+$r = Legacy_Adoption::adopt_order(21);
+check($r instanceof WP_Error && $r->get_error_code() === 'patwc_adoption_unreadable' && !Legacy_Adoption::is_deferral($r), 'a read the client could not send (no Connect state) is held, not retried');
+patwc_reset_world(); $order = order_with_attempt(22, $live); $GLOBALS['pro_adopt_answer'] = 'nonsense';
+$r = Legacy_Adoption::adopt_order(22);
+check($r instanceof WP_Error && $r->get_error_code() === 'patwc_adoption_failed' && !Legacy_Adoption::is_deferral($r) && $order->get_meta(Legacy_Adoption::META_ADOPTED) === '', 'an answer from Pro that is neither a row nor an error is a refusal with no record');
+$GLOBALS['pro_adopt_answer'] = null;
+
 // A sale that does not match the order (the old reconciler records the verification failure) is a final refusal, never a panel beside it.
 patwc_reset_world(); $order = order_with_attempt(20, $live, false); Legacy_Adoption::$reader = reader_returning(array('traceId' => 'trace-1', 'transactionId' => 'P1ABCDEF12345678', 'status' => 'APPROVED', 'chargeId' => 'ch_x', 'amount' => array('total' => 100, 'approved' => 100, 'currency' => 'USD')));
 $r = Legacy_Adoption::adopt_order(20);
