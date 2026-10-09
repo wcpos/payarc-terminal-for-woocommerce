@@ -83,6 +83,35 @@ PayArc terminal payments are asynchronous: a sale request can be accepted before
 
 The plugin verifies that the returned PayArc transaction belongs to the WooCommerce order before completing payment. It records PayArc transaction details such as trace ID, transaction ID, charge ID, card brand, entry mode, last four digits, and processor response details when PayArc provides them.
 
+## WCPOS Pro 2.0 payments base
+
+With WCPOS Pro 2.0 active, the plugin registers a server adapter (`includes/Server/`) with Pro's shared payments base, so the POS app can drive a PayArc terminal through Pro's ledger: one sale per ledger row (the row id is the sale's `X-Idempotency-Key`, and its 16-character `transactionId` is derived from the order and the row), polling by PayArc's `traceId`, cancellation, refunds as terminal commands through `POST /v3/transactions/refund`, and callbacks delivered to Pro's route. The adapter is inert without a compatible Pro; the order-pay page below is unchanged for now.
+
+Facts the adapter rests on, and what they mean for the store:
+
+- A sale is accepted at once and decided on the terminal. `APPROVED` is money; `DECLINE`, `DUP TRANSACTION` and a failure are failures with the processor's text; `TIMEOUT` (no card presented) ends the sale as expired; `ABORTED` follows a cancel. For a few seconds after a sale PayArc answers the read with `TRANSACTION_NOT_FOUND`, which the adapter treats as "not visible yet", never as gone.
+- A lost answer to a sale is not a refusal: the row stays pending and the replay carries the same key, which PayArc answers with the same sale ("reuse the same key only when retrying the same payload"). A `409 TERMINAL_OFFLINE` sent nothing and is final.
+- A cancel is confirmed by reading the sale back (`ABORTED`); one PayArc refuses because the card has begun processing leaves the next poll to decide.
+- Refunds are terminal commands linked to the sale by its `transactionId`, answered with a `traceId` and decided on the terminal; the WooCommerce refund stays pending until the terminal's callback, which is noted on the order. A refund request PayArc did not answer keeps its record pending under a key saved before the request and is asked again every two minutes (up to five times) under that key, so no second refund command results from a lost answer. The order's transaction id for a Pro payment is PayArc's `traceId`; a refund of a sale the plugin's own panel completed finds that sale through the attempt kept on the order.
+- The callback to Pro's route (`wcpos/v2/payments/webhook?provider=payarc`, with the plugin's own callback token in the URL) is authenticated by that token or by PayArc's callback bearer token, before anything is read; the authenticated read of the transaction, not the posted body, is the evidence. The URL token is minted when Connect PayArc runs; on a site that has not connected and has no bearer token, every callback is refused (401) and payments settle by polling alone.
+- While a sale may be on a terminal, the gateway's mode, credentials and Connect state cannot be changed or disconnected, as for the plugin's own panel; each sale holds its own marker (with the command as sent, so a replay of a lost answer is byte-identical whatever the settings say now), released when that sale ends and stale after thirty minutes. A refund request the client refused to send (missing credentials, a Connect state that does not match the mode) is a plain error, never a pending record.
+
+### Conformance suite
+
+Pro's provider conformance suite (`tests/conformance/`) runs the real adapter over a scripted PayArc (behind `pre_http_request`) under wp-env with the sibling Pro checkout and compares the recorded transcripts in `tests/conformance/transcripts/`. It needs Docker and a sibling checkout at `../woocommerce-pos-pro` on `next` with its Composer dependencies installed:
+
+```bash
+composer install
+npx wp-env start
+npx wp-env run --env-cwd="wp-content/plugins/$(basename "$PWD")" tests-cli -- vendor/bin/phpunit -c phpunit.conformance.xml.dist
+```
+
+A missing transcript fails. To record one, set the opt-in inside the PHPUnit process (wp-env forwards no host variables), review the JSON, rerun without it, then commit:
+
+```bash
+npx wp-env run --env-cwd="wp-content/plugins/$(basename "$PWD")" tests-cli -- env WCPOS_RECORD_TRANSCRIPTS=1 vendor/bin/phpunit -c phpunit.conformance.xml.dist
+```
+
 ## Live mode safety notes
 
 Live mode can process real payments. Before using it with customers:
