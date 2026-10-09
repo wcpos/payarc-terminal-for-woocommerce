@@ -17,6 +17,30 @@ class Settings
      */
     private $settings;
 
+    /** @var bool|null Memoized per request: WooCommerce asks is_available() of every gateway on the pay page. */
+    private static $enabled_for_pos = null;
+
+    /**
+     * Whether the POS has the gateway switched on (POS → Settings → Checkout). The only switch there is:
+     * the gateway is POS-only, and the Enabled toggle on WooCommerce's Payments list has no effect.
+     */
+    public static function enabled_for_pos(): bool
+    {
+        if (self::$enabled_for_pos === null) {
+            // wcpos_get_settings() is the maintained helper; woocommerce_pos_get_settings() its deprecated alias.
+            $getter = function_exists('wcpos_get_settings') ? 'wcpos_get_settings' : 'woocommerce_pos_get_settings';
+            $settings = function_exists($getter) ? $getter('payment_gateways') : array();
+            self::$enabled_for_pos = is_array($settings) && !empty($settings['gateways'][self::GATEWAY_ID]['enabled']);
+        }
+
+        return self::$enabled_for_pos;
+    }
+
+    public static function reset_enabled_for_pos_cache(): void
+    {
+        self::$enabled_for_pos = null;
+    }
+
     /**
      * @param array<string, mixed>|null $settings
      */

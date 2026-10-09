@@ -5,24 +5,18 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Server;
 use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
 
 /**
- * Registers the server adapter with WCPOS Pro when a compatible Pro is active. Pro defines its
- * helpers from its own plugins_loaded hook at priority 20, so this runs at 30.
+ * Registers the server adapter with WCPOS Pro. Called from the plugin's gate (patwc_init(), plugins_loaded
+ * at 30), which has already asked wcpos_pro_requires() for REQUIRED_PRO_VERSION; Pro defines its helpers
+ * from its own plugins_loaded hook at priority 20.
  */
 final class Registration
 {
-    /** First Pro release the adapter runs on: the shared payments base and its conformance suite. */
+    /** First Pro release the plugin runs on: the shared payments base and its conformance suite. */
     public const REQUIRED_PRO_VERSION = '2.0.0';
-
-    public static function pro_supported(): bool
-    {
-        return function_exists('wcpos_pro_register_server_provider')
-            && function_exists('wcpos_pro_requires')
-            && wcpos_pro_requires(self::REQUIRED_PRO_VERSION);
-    }
 
     public static function register(): bool
     {
-        if (!self::pro_supported()) {
+        if (!function_exists('wcpos_pro_register_server_provider')) {
             return false;
         }
 
