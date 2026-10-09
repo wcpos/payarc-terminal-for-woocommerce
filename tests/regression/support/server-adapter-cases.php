@@ -74,6 +74,21 @@ namespace {
     function get_option($k, $d = false) { return $GLOBALS['options'][$k] ?? $d; }
     function update_option($k, $v, $autoload = null) { $GLOBALS['options'][$k] = $v; return true; }
     function delete_option($k) { unset($GLOBALS['options'][$k]); return true; }
+    /** The one options-table query Sale_Guard runs: every option name under its prefix. */
+    class PatwcGuardWpdb
+    {
+        public $options = 'wp_options';
+        public function esc_like($s) { return addcslashes($s, '_%\\'); }
+        public function prepare($q, ...$a) { return json_encode(array($q, $a)); }
+        public function get_col($prepared)
+        {
+            list($sql, $args) = json_decode($prepared, true);
+            if ($sql !== "SELECT option_name FROM {$this->options} WHERE option_name LIKE %s") { throw new \RuntimeException('guard wpdb: unsupported query: ' . $sql); }
+            $prefix = stripcslashes(substr($args[0], 0, -1));
+            return array_values(array_filter(array_keys($GLOBALS['options']), static function ($k) use ($prefix) { return strpos((string) $k, $prefix) === 0; }));
+        }
+    }
+    $GLOBALS['wpdb'] = new PatwcGuardWpdb();
 
     $root = dirname(__DIR__, 3);
     foreach (array('Settings', 'Logger', 'PaymentAttempt', 'Utils/Money', 'Utils/PayArcIds', 'Services/PayArcRequestException', 'Services/PayArcNotSentException', 'Services/PayArcClient', 'Services/TerminalService', 'Server/Sale_Guard', 'Server/Refund_Reask', 'Server/PayArc_Server_Provider') as $file) {
@@ -136,6 +151,16 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     $c = new QueueClient(); $c->queue = array(array('traceId' => 't1', 'response' => array('status' => 'SUCCESS')));
     (new PayArc_Server_Provider(new Settings(array('mode' => 'test', 'connect_mid' => '123456789012', 'connect_secret_key' => 's', 'default_terminal_id' => '1234567890', 'terminal_registry' => array(array('terminal_id' => '1234567890', 'label' => 'Front')), 'tender_type' => 'DEBIT', 'print_receipt' => '3')), $c))->create_reader_action($row, '1234567890');
     check($c->calls[0][1][0] === $sent, 'the replay sends the first command byte for byte');
+    // Even with nothing current to build from: the held command is the whole of it.
+    $c = new QueueClient(); $c->queue = array(array('traceId' => 't1', 'response' => array('status' => 'SUCCESS')));
+    (new PayArc_Server_Provider(new Settings(array('mode' => 'test', 'default_terminal_id' => '')), $c))->create_reader_action($row, '1234567890');
+    check($c->calls[0][1][0] === $sent, 'a replay on a site whose terminal and MID are gone still sends the first command');
+    // Every held sale is found on its own, whatever else was held or released around it, and a stale one is swept.
+    Sale_Guard::hold('second-till', 7, array('y' => 2));
+    Sale_Guard::release('second-till');
+    check(Sale_Guard::any_live(), 'releasing another till\'s sale leaves this one holding the guard');
+    $GLOBALS['options']['patwc_pro_sale_' . md5('old')] = array('order_id' => 1, 'trace_id' => '', 'payload' => array(), 'updated_at' => time() - 1801);
+    check(!Sale_Guard::held('old') && Sale_Guard::any_live() && !isset($GLOBALS['options']['patwc_pro_sale_' . md5('old')]), 'a stale marker neither holds the guard nor survives the pass');
     // A replay the client cannot send is indeterminate: the first command may be on the terminal.
     $c = new QueueClient(); $c->queue = array(new PayArcNotSentException('PayArc Connect base URL is not configured.'));
     $r = adapter($c)->create_reader_action($row, '1234567890');

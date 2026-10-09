@@ -139,7 +139,6 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         }
     }
 
-
     /**
      * The sale command for a row, as first built: terminal, money, the store's own ids and the callback.
      *
@@ -168,7 +167,7 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
                 'tender_type' => $this->settings->tender_type(),
                 'mode' => $this->settings->mode(),
             ),
-            );
+        );
     }
 
     public function fetch(string $ref)
