@@ -41,6 +41,22 @@ class PayArcClient
     }
 
     /**
+     * A terminal refund command, linked to a sale by its transactionId; PayArc answers with a traceId
+     * and the terminal decides the outcome.
+     *
+     * @param array<string, mixed> $payload
+     * @return array<string, mixed>
+     */
+    public function refund(array $payload, string $idempotency_key): array
+    {
+        if (trim($idempotency_key) === '') {
+            throw new RuntimeException('PayArc idempotency key is required.');
+        }
+
+        return $this->request('POST', '/v3/transactions/refund', $payload, $idempotency_key);
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function get_transaction(string $trace_id): array

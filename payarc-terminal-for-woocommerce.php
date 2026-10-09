@@ -62,6 +62,10 @@ if (function_exists('add_action')) {
         }
     });
 
+    // WCPOS Pro 2.0 defines its provider registration from its own plugins_loaded hook at priority
+    // 20; the adapter registers after that, and not at all on a site without a compatible Pro.
+    add_action('plugins_loaded', array('WCPOS\\WooCommercePOS\\PayArcTerminal\\Server\\Registration', 'register'), 30);
+
     add_action('plugins_loaded', static function () {
         if (class_exists('WCPOS\\WooCommercePOS\\PayArcTerminal\\AjaxHandler')) {
             $ajaxHandler = new WCPOS\WooCommercePOS\PayArcTerminal\AjaxHandler();
