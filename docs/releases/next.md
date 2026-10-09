@@ -26,3 +26,11 @@
   saved value counts for nothing; the settings page says where the switch is. The connection checks
   on save (Connect after a mode or credential change, HTTPS callback in Live) apply when the POS
   switch is on.
+- **The order-pay page is WCPOS Pro's payment panel.** It renders, submits and refunds through Pro's
+  order-pay API; the plugin's own panel, its AJAX actions and its callback route stay only for
+  sales started before the upgrade. Those are adopted into Pro's ledger (once on upgrade, and on
+  render): a live sale PayArc still has becomes Pro's leg; one decided long ago is settled by the old
+  reconciler; one PayArc cannot see under the current credentials holds the panel back with a notice;
+  a start PayArc never answered is closed with a note after the in-flight window. While Pro owns a
+  sale the old poll, cancel and callback answer "handled by WooCommerce POS"; the old start is refused
+  under Pro's panel. WooCommerce refunds of a payment Pro's ledger holds reach the terminal.

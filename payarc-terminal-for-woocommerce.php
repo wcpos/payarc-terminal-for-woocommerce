@@ -123,4 +123,7 @@ function patwc_init(): void
     });
 
     $registration::register();
+
+    // Sales the old order-pay panel left mid-flight become Pro's, a page per request until done.
+    add_action('init', array('WCPOS\\WooCommercePOS\\PayArcTerminal\\Legacy_Adoption', 'upgrade'));
 }

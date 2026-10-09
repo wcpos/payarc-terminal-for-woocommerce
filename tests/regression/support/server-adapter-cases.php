@@ -232,6 +232,14 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     check($a->fetch('t1')['status'] === 'expired', 'TIMEOUT is expired');
     $d = $a->fetch('t1'); check($d['status'] === 'failed' && $d['failure_reason'] === 'Do not honor', 'DECLINE is failed with the processor text');
     check($a->fetch('t1')['status'] === 'cancelled', 'aborted is cancelled');
+    // A sale the old panel started carries no row id in its metadata; Pro's adoption record names the row to release.
+    Sale_Guard::hold('adopted-row', 99, array(), 'trace-adopted'); $GLOBALS['adopted']['trace-adopted'] = 'adopted-row';
+    $c2 = new QueueClient(); $c2->queue = array(array('traceId' => 'trace-adopted', 'status' => 'processing'), array('traceId' => 'trace-adopted', 'status' => 'TIMEOUT'));
+    $a2 = adapter($c2);
+    $a2->fetch('trace-adopted');
+    check(Sale_Guard::held('adopted-row') !== null, 'a sale still on the terminal keeps the marker its adoption holds');
+    $a2->fetch('trace-adopted');
+    check(Sale_Guard::held('adopted-row') === null, 'an adopted old-panel sale that ended releases the marker its adoption holds');
 
     // Cancel: 200 is confirmed by the read; a refusal leaves the read to decide.
     $c = new QueueClient(); $c->queue = array(array('metadata' => array('terminal_id' => '1234567890')), array('traceId' => 't1'), array('status' => 'aborted', 'traceId' => 't1'));

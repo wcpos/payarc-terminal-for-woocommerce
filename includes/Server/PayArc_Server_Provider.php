@@ -625,6 +625,11 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
             return;
         }
         $row_id = isset($transaction['metadata']['wcpos_payment_id']) ? (string) $transaction['metadata']['wcpos_payment_id'] : '';
+        if ($row_id === '' && function_exists('wcpos_pro_payment_id_for_action')) {
+            // A sale the old panel started carries no row id; Pro's adoption record names its row.
+            $trace = self::scalar($transaction, 'traceId');
+            $row_id = $trace !== '' ? (string) wcpos_pro_payment_id_for_action(self::PROVIDER, $trace) : '';
+        }
         if ($row_id !== '') {
             Sale_Guard::release($row_id);
         }
