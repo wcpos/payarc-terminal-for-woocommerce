@@ -24,20 +24,44 @@ trait GatewayImplementation
 
         $this->title = $this->gateway_option('title', 'PayArc Terminal');
         $this->description = $this->gateway_option('description', 'Pay in person at a PayArc PAX terminal.');
-        $this->enabled = $this->gateway_option('enabled', 'no');
+    }
+
+    /**
+     * The gateway is POS-only: a PayArc terminal is driven by staff, never by a shopper.
+     *
+     * Available on a POS request, and on the order-pay page to a user who may run the POS when the
+     * POS has the gateway switched on; never on the shop's checkout. The WooCommerce → Payments
+     * checkbox that governed the shop's checkout is gone, and a value a site saved for it counts
+     * for nothing.
+     *
+     * @return bool
+     */
+    public function is_available()
+    {
+        $settings = new Settings();
+        if ($settings->tenant_id() === '' || $settings->default_terminal_id() === '') {
+            return false;
+        }
+        if (function_exists('woocommerce_pos_request') && woocommerce_pos_request()) {
+            return true;
+        }
+
+        return function_exists('is_checkout_pay_page') && is_checkout_pay_page()
+            && function_exists('current_user_can') && current_user_can('access_woocommerce_pos')
+            && Settings::enabled_for_pos();
     }
 
     public function init_form_fields(): void
     {
         $settings = new Settings();
 
+        // No "enabled" checkbox: the gateway is POS-only (see is_available()), and the switch for that
+        // is in POS → Settings → Checkout. The web checkout the checkbox governed is gone.
         $this->form_fields = array(
-            'enabled' => array(
-                'title' => 'Enable/Disable',
-                'type' => 'checkbox',
-                'label' => 'Enable PayArc Terminal on the online checkout',
-                'description' => 'Most stores leave this unchecked. WooCommerce POS manages its own payment gateways for in-store terminal payments, so this setting only controls whether online shoppers see PayArc Terminal at the website checkout.',
-                'default' => 'no',
+            'section_pos' => array(
+                'title' => 'Where to switch it on',
+                'type' => 'title',
+                'description' => 'For staff on the POS only; never offered on the shop\'s checkout. Switch it on in POS → Settings → Checkout. The Enabled toggle on the Payments list has no effect.',
             ),
             'title' => array(
                 'title' => 'Title',
@@ -147,12 +171,16 @@ trait GatewayImplementation
 
     /**
      * @param array<string, mixed> $settings
+     * The connection checks apply when the POS has the gateway switched on (the only switch there is);
+     * a saved value of the old web-checkout checkbox counts for nothing.
+     *
+     * @param bool|null $enabled The POS switch; null reads it.
      * @return string[]
      */
-    public static function validate_settings(array $settings): array
+    public static function validate_settings(array $settings, ?bool $enabled = null): array
     {
         $errors = array();
-        $enabled = self::setting_string($settings, 'enabled') === 'yes';
+        $enabled = $enabled === null ? Settings::enabled_for_pos() : $enabled;
         $mode = self::setting_string($settings, 'mode', 'test');
         $tenantId = self::tenant_id_from_settings($settings);
         $terminalId = self::setting_string($settings, 'default_terminal_id');
@@ -186,11 +214,11 @@ trait GatewayImplementation
         }
 
         if ($enabled && $tenantId === '') {
-            $errors[] = 'PayArc MID (or tenant id) is required when the gateway is enabled.';
+            $errors[] = 'PayArc MID (or tenant id) is required when the POS has the gateway switched on.';
         }
 
         if ($enabled && $terminalId === '') {
-            $errors[] = 'Enter the PayArc terminal serial number before enabling the gateway.';
+            $errors[] = 'Enter the PayArc terminal serial number before switching the gateway on in the POS.';
         }
 
         if (!in_array($tenderType, array('CREDIT', 'DEBIT'), true)) {
@@ -412,10 +440,6 @@ trait GatewayImplementation
         foreach ($this->form_fields as $key => $field) {
             $postedKey = $prefix . $key;
             $value = array_key_exists($postedKey, $data) ? $data[$postedKey] : (array_key_exists($key, $data) ? $data[$key] : null);
-
-            if ($key === 'enabled' && $value === null) {
-                $value = 'no';
-            }
 
             if (is_scalar($value)) {
                 $settings[$key] = trim((string) $value);

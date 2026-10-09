@@ -36,6 +36,11 @@ spl_autoload_register(static function ($class) {
 if (function_exists('register_activation_hook')) {
     register_activation_hook(__FILE__, static function () {
         if (version_compare(PHP_VERSION, '7.4', '>=')) {
+            // Terminal extensions are Pro-only at 2.0; Pro records the requirement for its own notice.
+            if (function_exists('wcpos_pro_requires')) {
+                wcpos_pro_requires('2.0.0', __FILE__);
+            }
+
             return;
         }
 
@@ -62,30 +67,51 @@ if (function_exists('add_action')) {
         }
     });
 
-    // WCPOS Pro 2.0 defines its provider registration from its own plugins_loaded hook at priority
-    // 20; the adapter registers after that, and not at all on a site without a compatible Pro.
-    add_action('plugins_loaded', array('WCPOS\\WooCommercePOS\\PayArcTerminal\\Server\\Registration', 'register'), 30);
-
-    add_action('plugins_loaded', static function () {
-        if (class_exists('WCPOS\\WooCommercePOS\\PayArcTerminal\\AjaxHandler')) {
-            $ajaxHandler = new WCPOS\WooCommercePOS\PayArcTerminal\AjaxHandler();
-
-            if (method_exists($ajaxHandler, 'init')) {
-                $ajaxHandler->init();
-            }
-        }
-
-        if (class_exists('WCPOS\\WooCommercePOS\\PayArcTerminal\\WebhookHandler')) {
-            $webhookHandler = new WCPOS\WooCommercePOS\PayArcTerminal\WebhookHandler();
-
-            if (method_exists($webhookHandler, 'init')) {
-                $webhookHandler->init();
-            }
-        }
-    });
+    // Terminal extensions are Pro-only at 2.0. WCPOS Pro defines wcpos_pro_requires() and its provider
+    // registration from its own plugins_loaded hook at priority 20, so the gate runs at 30.
+    add_action('plugins_loaded', 'patwc_init', 30);
 }
 
-if (function_exists('add_filter')) {
+/**
+ * The notice shown when no compatible WCPOS Pro is active.
+ */
+function patwc_pro_requirement_notice(): void
+{
+    echo '<div class="notice notice-error"><p>' . esc_html__('PayArc Terminal for WooCommerce needs WooCommerce POS Pro 2.0.0 or newer.', 'payarc-terminal-for-woocommerce') . '</p></div>';
+}
+
+/**
+ * Register everything, or nothing but a notice without a compatible WCPOS Pro.
+ *
+ * The POS keypad tile and the order-pay page both rest on Pro's shared payments base, so without it
+ * the gateway, its AJAX actions, the legacy callback route and the server adapter all stay off.
+ */
+function patwc_init(): void
+{
+    $registration = 'WCPOS\\WooCommercePOS\\PayArcTerminal\\Server\\Registration';
+
+    if (!function_exists('wcpos_pro_requires') || !wcpos_pro_requires($registration::REQUIRED_PRO_VERSION, __FILE__)) {
+        add_action('admin_notices', 'patwc_pro_requirement_notice');
+
+        return;
+    }
+
+    if (class_exists('WCPOS\\WooCommercePOS\\PayArcTerminal\\AjaxHandler')) {
+        $ajaxHandler = new WCPOS\WooCommercePOS\PayArcTerminal\AjaxHandler();
+
+        if (method_exists($ajaxHandler, 'init')) {
+            $ajaxHandler->init();
+        }
+    }
+
+    if (class_exists('WCPOS\\WooCommercePOS\\PayArcTerminal\\WebhookHandler')) {
+        $webhookHandler = new WCPOS\WooCommercePOS\PayArcTerminal\WebhookHandler();
+
+        if (method_exists($webhookHandler, 'init')) {
+            $webhookHandler->init();
+        }
+    }
+
     add_filter('woocommerce_payment_gateways', static function ($gateways) {
         $gatewayClass = 'WCPOS\\WooCommercePOS\\PayArcTerminal\\Gateway';
 
@@ -95,4 +121,6 @@ if (function_exists('add_filter')) {
 
         return $gateways;
     });
+
+    $registration::register();
 }

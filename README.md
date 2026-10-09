@@ -6,11 +6,11 @@ The plugin connects your WooCommerce site to PayArc Connect V3, sends sale reque
 
 ## What the plugin does
 
-- Adds a **PayArc Terminal** payment gateway in WooCommerce.
+- Adds a **PayArc Terminal** payment gateway for staff on WooCommerce POS. It is never offered on the shop's checkout.
 - Supports **Live** and **Test** PayArc environments.
 - Uses **Connect PayArc** in the gateway settings to sign in to PayArc and store a server-side Connect access token.
 - Lets you enter the PAX terminal serial number (found on the back of the device, labeled S/N) that PayArc has confirmed for the merchant.
-- Starts in-person terminal payments from the WooCommerce order payment page.
+- Starts in-person terminal payments from the POS, and from the WooCommerce order payment page opened by a user who may run the POS.
 - Polls PayArc and accepts PayArc callbacks until the terminal transaction reaches a final status.
 - Marks the WooCommerce order paid only after PayArc returns a successful transaction result.
 - Stores sensitive PayArc credentials server-side and does not print them back into admin pages, AJAX responses, or terminal transaction payloads.
@@ -18,6 +18,7 @@ The plugin connects your WooCommerce site to PayArc Connect V3, sends sale reque
 ## Requirements
 
 - WordPress with WooCommerce installed and active.
+- WooCommerce POS Pro 2.0.0 or newer. Without it the plugin shows an admin notice and registers nothing.
 - PHP 7.4 or newer.
 - A PayArc merchant account with PayArc Connect access.
 - A PayArc-supported PAX terminal assigned to the merchant account.
@@ -59,7 +60,7 @@ Use values from one PayArc environment at a time. If the gateway is set to **Liv
 6. Enter the terminal serial number (found on the back of the device, labeled S/N) that PayArc has confirmed for this merchant.
 7. Confirm the displayed **Webhook URL** uses public HTTPS. Give this URL to PayArc if PayArc needs to configure callbacks for your merchant account.
 8. Click **Save changes**.
-9. Enable the gateway when you are ready to accept terminal payments.
+9. Switch the gateway on under **POS → Settings → Checkout** when you are ready to accept terminal payments. That is the only switch: the Enabled toggle on WooCommerce's Payments list has no effect, and the gateway never appears on the shop's checkout.
 
 After changing the mode or any PayArc credential, click **Connect PayArc** again and save the gateway settings. The plugin blocks terminal payments when the saved mode or credentials do not match the stored PayArc connection.
 
@@ -85,7 +86,7 @@ The plugin verifies that the returned PayArc transaction belongs to the WooComme
 
 ## WCPOS Pro 2.0 payments base
 
-With WCPOS Pro 2.0 active, the plugin registers a server adapter (`includes/Server/`) with Pro's shared payments base, so the POS app can drive a PayArc terminal through Pro's ledger: one sale per ledger row (the row id is the sale's `X-Idempotency-Key`, and its 16-character `transactionId` is derived from the order and the row), polling by PayArc's `traceId`, cancellation, refunds as terminal commands through `POST /v3/transactions/refund`, and callbacks delivered to Pro's route. The adapter is inert without a compatible Pro; the order-pay page below is unchanged for now.
+The plugin is Pro-only: everything it registers sits behind `wcpos_pro_requires('2.0.0')` from `plugins_loaded` at priority 30 (Pro defines its helpers at 20), and without a compatible Pro only an admin notice remains. With Pro 2.0 active, it registers a server adapter (`includes/Server/`) with Pro's shared payments base, so the POS app can drive a PayArc terminal through Pro's ledger: one sale per ledger row (the row id is the sale's `X-Idempotency-Key`, and its 16-character `transactionId` is derived from the order and the row), polling by PayArc's `traceId`, cancellation, refunds as terminal commands through `POST /v3/transactions/refund`, and callbacks delivered to Pro's route. The order-pay page described above is unchanged for now.
 
 Facts the adapter rests on, and what they mean for the store:
 
