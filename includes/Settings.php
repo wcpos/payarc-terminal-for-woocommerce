@@ -42,6 +42,17 @@ class Settings
     }
 
     /**
+     * Whether the order-pay page is WCPOS Pro's panel: always, behind the gate (this plugin has no
+     * channel Pro's panel cannot render). Filterable so tests can render the old panel.
+     */
+    public static function uses_pro_panel(): bool
+    {
+        $uses = function_exists('wcpos_pro_order_pay_panel');
+
+        return function_exists('apply_filters') ? (bool) apply_filters('patwc_uses_pro_panel', $uses) : $uses;
+    }
+
+    /**
      * @param array<string, mixed>|null $settings
      */
     public function __construct(?array $settings = null)

@@ -20,6 +20,7 @@ foreach (array(
     $root . '/includes/PaymentAttempt.php',
     $root . '/includes/PaymentLock.php',
     $root . '/includes/Services/TerminalService.php',
+    $root . '/includes/Legacy_Adoption.php',
     $root . '/includes/Services/PayArcPaymentService.php',
     $root . '/includes/WebhookHandler.php',
 ) as $file) {

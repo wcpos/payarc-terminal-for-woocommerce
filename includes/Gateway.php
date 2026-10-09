@@ -10,7 +10,8 @@ trait GatewayImplementation
         $this->method_title = 'PayArc Terminal';
         $this->method_description = 'PayArc PAX terminal payments for WooCommerce POS.';
         $this->has_fields = true;
-        $this->supports = array('products');
+        // Refunds of a payment WCPOS Pro's ledger holds go through Pro to PayArc's terminal refund.
+        $this->supports = array('products', 'refunds');
 
         if (function_exists('add_action')) {
             add_action('woocommerce_update_options_payment_gateways_' . $this->id, array($this, 'process_admin_options'));
@@ -370,6 +371,11 @@ trait GatewayImplementation
             return array('result' => 'failure');
         }
 
+        if (Settings::uses_pro_panel()) {
+            // Pro's panel drives the leg and reads the ledger; it answers the form submit.
+            return wcpos_pro_order_pay_process($order);
+        }
+
         if (method_exists($order, 'is_paid') && $order->is_paid()) {
             return array(
                 'result' => 'success',
@@ -395,6 +401,38 @@ trait GatewayImplementation
     {
         $order = $this->current_payment_order();
         $orderId = $order !== null ? $this->order_id($order) : 0;
+
+        if (Settings::uses_pro_panel()) {
+            if ($order === null) {
+                echo '<p class="patwc-payment__help">' . $this->escape_html('Open this page from the order to take a PayArc Terminal payment.') . '</p>';
+
+                return;
+            }
+            // A sale the old panel left on this order (the upgrade pass has not reached it) is Pro's
+            // before the panel can offer a second charge. Any refusal leaves that sale open and
+            // unowned, so no panel: while a till holds the order, a completion is in flight or PayArc
+            // has yet to answer, the page asks for a moment; a sale PayArc cannot see under the current
+            // credentials, or one Pro refused, is for staff to check.
+            $adopted = Legacy_Adoption::adopt_order($orderId);
+            if (is_wp_error($adopted)) {
+                if ($adopted->get_error_code() === 'patwc_adoption_awaiting_trace') {
+                    $message = 'PayArc has not confirmed the start of an earlier payment on this order. Reload the page in a moment; if it stays unconfirmed for half an hour it is closed and the order can be paid again.';
+                } elseif (Legacy_Adoption::is_deferral($adopted)) {
+                    $message = 'Another request is handling this order. Reload the page in a moment.';
+                } elseif ($adopted->get_error_code() === 'patwc_adoption_stale_attempt') {
+                    $message = 'An earlier PayArc Terminal payment on this order is not visible under the current PayArc credentials. Check it in the PayArc dashboard (under the mode that took it) before taking payment again.';
+                } else {
+                    $message = 'A PayArc Terminal payment is still open on this order and could not be handed to WooCommerce POS. Check it in the PayArc dashboard before taking payment again.';
+                }
+                echo '<p class="patwc-payment__help">' . $this->escape_html($message) . '</p>';
+
+                return;
+            }
+            wcpos_pro_order_pay_panel($this, $order);
+
+            return;
+        }
+
         $authorized = $order !== null && $this->viewer_can_access_order($order);
 
         if ($order !== null) {
@@ -426,6 +464,53 @@ trait GatewayImplementation
         echo '<div id="patwc-payment-log" class="patwc-payment-log" hidden="hidden" aria-live="polite" aria-label="' . $this->escape_attr('Payment activity log') . '"></div>';
         echo '</div>';
         echo '</div>';
+    }
+
+    /**
+     * Refund through WCPOS Pro when its ledger holds the payment.
+     *
+     * A leg Pro drove (server or device, authorized or captured) refunds through Pro to PayArc's
+     * terminal refund command. A payment the old panel completed is not in Pro's ledger as a
+     * refundable row, and this plugin never refunded from WooCommerce: as before, it is refunded
+     * from the PayArc dashboard or the terminal.
+     *
+     * @param int        $order_id
+     * @param float|null $amount
+     * @param string     $reason
+     * @return bool|\WP_Error
+     */
+    public function process_refund($order_id, $amount = null, $reason = '')
+    {
+        $order = function_exists('wc_get_order') ? wc_get_order($order_id) : null;
+        if (!is_object($order)) {
+            return new \WP_Error('patwc_invalid_order', 'Invalid order.');
+        }
+        if (self::has_counting_row($order) && function_exists('wcpos_pro_order_pay_refund')) {
+            return wcpos_pro_order_pay_refund($order, $amount, (string) $reason);
+        }
+
+        return new \WP_Error('patwc_refund_in_payarc', 'This PayArc payment was taken by the plugin\'s own order-pay panel; refund it from the PayArc dashboard or the terminal.');
+    }
+
+    /**
+     * Whether Pro's ledger holds a counting (authorized or captured) server or device row for this
+     * gateway: a leg Pro drove and can refund.
+     *
+     * @param object $order
+     */
+    private static function has_counting_row($order): bool
+    {
+        $ledger = '\\WCPOS\\WooCommercePOS\\Payments\\Contract\\Ledger';
+        if (!class_exists($ledger)) {
+            return false;
+        }
+        foreach ($ledger::instance()->read($order) as $row) {
+            if (($row['method_id'] ?? null) === Settings::GATEWAY_ID && in_array($row['status'] ?? '', $ledger::COUNTING_STATUSES, true) && in_array($row['capture_mode'] ?? '', array('server', 'device'), true)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
