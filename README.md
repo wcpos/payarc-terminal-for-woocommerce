@@ -18,7 +18,7 @@ The plugin connects your WooCommerce site to PayArc Connect V3, sends sale reque
 ## Requirements
 
 - WordPress with WooCommerce installed and active.
-- WooCommerce POS Pro 2.0.0 or newer. Without it the plugin shows an admin notice and registers no gateway, actions or callback route.
+- WooCommerce POS Pro 2.0.0 or newer. Without it the plugin shows an admin notice and registers no gateway, AJAX actions or callback route.
 - PHP 7.4 or newer.
 - A PayArc merchant account with PayArc Connect access.
 - A PayArc-supported PAX terminal assigned to the merchant account.

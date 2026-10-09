@@ -10,6 +10,7 @@ define('PATWC_PLUGIN_DIR', dirname(__DIR__, 3) . '/');
 class WC_Payment_Gateway
 {
     public $id = ''; public $enabled = 'no'; public $form_fields = array(); public $settings = array();
+    public $title = ''; public $description = ''; public $method_title = ''; public $method_description = ''; public $has_fields = false; public $supports = array();
     // As WooCommerce does: the saved checkbox value decides $enabled, 'no' when none; this plugin must ignore it.
     public function init_settings(): void { $this->settings = get_option('woocommerce_' . $this->id . '_settings', array()); $this->enabled = ($this->settings['enabled'] ?? 'no') === 'yes' ? 'yes' : 'no'; }
     public function get_option($key, $default = null) { return $this->settings[$key] ?? $default; }
@@ -42,7 +43,8 @@ check(!available($configured, array('pay_page' => true, 'pos_user' => true, 'swi
 check(!available($configured, array('pay_page' => true, 'pos_user' => false, 'switch' => true)), 'the order-pay page is for users who may run the POS');
 check(!available(array('tenant_id' => '', 'default_terminal_id' => '1234567890'), array('pos' => true)), 'unconfigured (no MID) is unavailable even to the POS');
 check(!available(array('tenant_id' => '123456789012', 'default_terminal_id' => ''), array('pos' => true)), 'unconfigured (no terminal) is unavailable even to the POS');
-check(!available($configured + array('enabled' => 'yes'), array('checkout' => true, 'pos_user' => true, 'switch' => true)) && available(array('enabled' => 'yes') + $configured, array('pos' => true)), 'a saved enabled=yes neither brings web checkout back nor is needed by the POS');
+$old_checkbox_on = array('enabled' => 'yes') + $configured; // array union keeps the left operand's keys
+check($old_checkbox_on['enabled'] === 'yes' && !available($old_checkbox_on, array('checkout' => true, 'pos_user' => true, 'switch' => true)) && available($old_checkbox_on, array('pos' => true)), 'a saved enabled=yes neither brings web checkout back nor is needed by the POS');
 // The connection checks follow the POS switch, not the old checkbox.
 $GLOBALS['ctx'] = array('switch' => false); Settings::reset_enabled_for_pos_cache();
 check(Gateway::validate_settings(array('tenant_id' => '', 'default_terminal_id' => '', 'tender_type' => 'CREDIT', 'print_receipt' => '0', 'enabled' => 'yes')) === array(), 'with the POS switch off, a saved enabled=yes does not make the connection checks apply');
