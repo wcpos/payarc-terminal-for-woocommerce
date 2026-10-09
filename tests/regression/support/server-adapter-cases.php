@@ -71,10 +71,11 @@ namespace {
     function wcpos_pro_payment_id_for_action($provider, $ref) { $GLOBALS['lookups'][] = $ref; return $GLOBALS['adopted'][$ref] ?? null; }
     function wp_json_encode($d) { return json_encode($d); }
     function apply_filters($h, $v) { return $v; }
-    function get_option($k, $d = false) { return $d; }
+    function get_option($k, $d = false) { return $GLOBALS['options'][$k] ?? $d; }
+    function update_option($k, $v) { $GLOBALS['options'][$k] = $v; return true; }
 
     $root = dirname(__DIR__, 3);
-    foreach (array('Settings', 'Logger', 'PaymentAttempt', 'Utils/Money', 'Utils/PayArcIds', 'Services/PayArcRequestException', 'Services/PayArcClient', 'Services/TerminalService', 'Server/Refund_Reask', 'Server/PayArc_Server_Provider') as $file) {
+    foreach (array('Settings', 'Logger', 'PaymentAttempt', 'Utils/Money', 'Utils/PayArcIds', 'Services/PayArcRequestException', 'Services/PayArcNotSentException', 'Services/PayArcClient', 'Services/TerminalService', 'Server/Order_Handle', 'Server/Refund_Reask', 'Server/PayArc_Server_Provider') as $file) {
         require_once $root . '/includes/' . $file . '.php';
     }
 }
@@ -84,6 +85,7 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     use WCPOS\WooCommercePOS\PayArcTerminal\Server\PayArc_Server_Provider;
     use WCPOS\WooCommercePOS\PayArcTerminal\Server\Refund_Reask;
     use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcClient;
+    use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcNotSentException;
     use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcRequestException;
     use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
 
@@ -117,7 +119,7 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     {
         return array('transactionId' => 'P1ABCDEF12345678', 'transType' => 'SALE', 'status' => 'APPROVED', 'chargeId' => 'ch_1', 'authCode' => 'A1', 'amount' => array('total' => 9295, 'subtotal' => 9295, 'approved' => 9295, 'currency' => 'USD'), 'card' => array('brand' => 'VISA', 'entryMode' => 'CHIP', 'last4' => '4242'), 'processor' => array('responseCode' => '00', 'responseText' => 'Approved'), 'traceId' => $trace, 'metadata' => array('wcpos_payment_id' => 'aaaaaaaa-1111-4222-8333-444455556666', 'terminal_id' => '1234567890')) + $extra;
     }
-    function reset(): void { $GLOBALS['orders'] = array(99 => new \PatwcOrder(99)); $GLOBALS['events'] = array(); $GLOBALS['adopted'] = array(); $GLOBALS['lookups'] = array(); $GLOBALS['uuid'] = 0; }
+    function reset(): void { $GLOBALS['orders'] = array(99 => new \PatwcOrder(99)); $GLOBALS['events'] = array(); $GLOBALS['adopted'] = array(); $GLOBALS['lookups'] = array(); $GLOBALS['uuid'] = 0; $GLOBALS['options'] = array(); }
     $row = array('id' => 'aaaaaaaa-1111-4222-8333-444455556666', 'order_id' => 99, 'amount' => '92.95', 'currency' => 'USD', 'provider_refs' => array());
 
     // Create: the row id is the key; a lost answer, a 5xx and a key conflict are indeterminate; a refusal is final.
@@ -156,13 +158,19 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
 
     // Refund: a Pro leg links by its own transaction id; a historical row by the old panel's attempt, else by reading the traceId.
     reset(); $refund = new \WC_Order_Refund(501); $refund->parent = 99; $GLOBALS['orders'][501] = $refund;
-    $leg = array('id' => 'r', 'order_id' => 99, 'currency' => 'USD', 'provider_refs' => array('action' => 't1', 'transaction_id' => 't1', 'payarc_transaction_id' => 'P1ABCDEF12345678', 'reader' => '1234567890'));
+    $leg = array('id' => 'r', 'order_id' => 99, 'currency' => 'USD', 'provider_refs' => array('action' => 't1', 'transaction_id' => 't1', 'payarc_transaction_id' => 'P1ABCDEF12345678', 'reader' => '1234567890', 'payarc_tender_type' => 'DEBIT'));
     $c = new QueueClient(); $c->queue = array(array('traceId' => 'rf1'), approved('rf1', array('transType' => 'REFUND')));
     $r = adapter($c)->refund($leg, 501, '5.00');
     check($r['status'] === 'succeeded' && $r['provider_ref'] === 'rf1', 'a refund the terminal already approved is succeeded');
     check($c->calls[0][1][0]['originalTransactionId'] === 'P1ABCDEF12345678' && $c->calls[0][1][0]['amount']['total'] === 500 && strlen($c->calls[0][1][0]['transactionId']) === 16, 'the refund links the sale by its transaction id, in cents');
-    $key = $refund->meta[Refund_Reask::META_ATTEMPT];
-    check($key !== '' && $c->calls[0][1][1] === $key && $refund->saves >= 1, 'the attempt key is saved on the record before the POST and sent');
+    $key = $refund->meta[Refund_Reask::key(Refund_Reask::META_ATTEMPT, 'r')];
+    check($key !== '' && $c->calls[0][1][1] === $key && $refund->saves >= 1, 'the attempt key is saved on the record, for this row, before the POST and sent');
+    check($c->calls[0][1][0]['tenderType'] === 'DEBIT', 'the refund names the tender the sale was taken with');
+    // The same refund record on a second payment row is a second command with its own key and id.
+    $leg2 = $leg; $leg2['id'] = 'r2'; $leg2['provider_refs']['payarc_transaction_id'] = 'P2ABCDEF12345678'; $leg2['provider_refs']['action'] = 't2'; $leg2['provider_refs']['transaction_id'] = 't2';
+    $c2 = new QueueClient(); $c2->queue = array(array('traceId' => 'rfB'), approved('rfB', array('transType' => 'REFUND')));
+    adapter($c2)->refund($leg2, 501, '3.00');
+    check($c2->calls[0][1][1] !== $key && $c2->calls[0][1][0]['transactionId'] !== $c->calls[0][1][0]['transactionId'] && $c2->calls[0][1][0]['originalTransactionId'] === 'P2ABCDEF12345678', 'a refund split across two payments is two commands with two keys and two ids');
     // Historical: the old panel's attempt on the order names the sale by its charge id.
     reset(); $refund = new \WC_Order_Refund(502); $refund->parent = 99; $GLOBALS['orders'][502] = $refund;
     $GLOBALS['orders'][99]->meta[PaymentAttempt::META_ATTEMPT_HISTORY] = array(array('transaction_id' => 'POLD000000000001', 'charge_id' => 'ch_old', 'trace_id' => 'told', 'terminal_id' => '1234567890', 'status' => 'success'));
@@ -173,18 +181,33 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     reset(); $refund = new \WC_Order_Refund(503); $refund->parent = 99; $GLOBALS['orders'][503] = $refund;
     $c = new QueueClient(); $c->queue = array(new \RuntimeException('PayArc request failed before receiving a response.'));
     $r = adapter($c)->refund($leg, 503, '5.00');
-    check($r === array('status' => 'pending', 'provider_ref' => null) && count($GLOBALS['events']) === 1 && $GLOBALS['events'][0][1] === array(503, 1, 99), 'an unanswered refund POST keeps the record pending and schedules the re-ask');
+    check($r === array('status' => 'pending', 'provider_ref' => null) && count($GLOBALS['events']) === 1 && $GLOBALS['events'][0][1] === array(503, 1, 99, 'r'), 'an unanswered refund POST keeps the record pending and schedules the re-ask for this row');
     check(strpos($GLOBALS['orders'][99]->notes[0], 'did not confirm refund #503') !== false, 'the order says so');
-    $key = $refund->meta[Refund_Reask::META_ATTEMPT];
+    $key = $refund->meta[Refund_Reask::key(Refund_Reask::META_ATTEMPT, 'r')];
+    // A conflict on the key, or nothing sent, keeps the question open; a refusal of the identical replay closes it.
+    $c = new QueueClient(); $c->queue = array(new PayArcRequestException('dup', 'DUPLICATE_REQUEST', 400));
+    Refund_Reask::run(503, 1, 99, 'r', adapter($c));
+    check(end($GLOBALS['events'])[1] === array(503, 2, 99, 'r') && count($GLOBALS['orders'][99]->notes) === 1, 'a key conflict on the re-ask proves nothing: asked again, no note');
+    $c = new QueueClient(); $c->queue = array(new PayArcNotSentException('not configured'));
+    Refund_Reask::run(503, 2, 99, 'r', adapter($c));
+    check(end($GLOBALS['events'])[1] === array(503, 3, 99, 'r'), 'a request that never left the server is asked again later');
     $c = new QueueClient(); $c->queue = array(array('traceId' => 'rf3'));
-    Refund_Reask::run(503, 1, 99, adapter($c));
-    check($c->calls[0][1][1] === $key && $c->calls[0][1][0]['originalTransactionId'] === 'P1ABCDEF12345678' && $refund->meta[Refund_Reask::META_TRACE] === 'rf3', 'the re-ask replays the identical request under the saved key and records the traceId');
-    Refund_Reask::run(503, 2, 99, adapter($c));
+    Refund_Reask::run(503, 3, 99, 'r', adapter($c));
+    check($c->calls[0][1][1] === $key && $c->calls[0][1][0]['originalTransactionId'] === 'P1ABCDEF12345678' && $refund->meta[Refund_Reask::key(Refund_Reask::META_TRACE, 'r')] === 'rf3', 'the re-ask replays the identical request under the saved key and records the traceId');
+    Refund_Reask::run(503, 4, 99, 'r', adapter($c));
     check(count($c->calls) === 1, 'an answered record is not asked again');
     reset(); $refund = new \WC_Order_Refund(504); $refund->parent = 99; $GLOBALS['orders'][504] = $refund;
     $c = new QueueClient(); $c->queue = array(new \RuntimeException('lost'));
     $r = adapter($c)->refund(array('id' => 'h', 'currency' => 'USD', 'provider_refs' => array('transaction_id' => '00000000-0000-4000-8000-000000000001')), 504, '5.00');
-    check($r instanceof \WP_Error && !empty($r->get_error_data()['indeterminate']) && $GLOBALS['events'] === array() && !isset($refund->meta[Refund_Reask::META_ATTEMPT]), 'a lost read before the POST is an error with nothing made or scheduled');
+    check($r instanceof \WP_Error && !empty($r->get_error_data()['indeterminate']) && $GLOBALS['events'] === array() && !isset($refund->meta[Refund_Reask::key(Refund_Reask::META_ATTEMPT, 'h')]), 'a lost read before the POST is an error with nothing made or scheduled');
+    // Nothing left the server (credentials or Connect state): a plain refusal, no record kept pending.
+    reset(); $refund = new \WC_Order_Refund(506); $refund->parent = 99; $GLOBALS['orders'][506] = $refund;
+    $c = new QueueClient(); $c->queue = array(new PayArcNotSentException('PayArc Live mode requires a Live Connect AccessToken.'));
+    $r = adapter($c)->refund($leg, 506, '5.00');
+    check($r instanceof \WP_Error && empty($r->get_error_data()['indeterminate']) && $GLOBALS['events'] === array(), 'a refund the client refused to send is a plain error');
+    $c = new QueueClient(); $c->queue = array(new PayArcNotSentException('PayArc Connect base URL is not configured.'));
+    $r = adapter($c)->create_reader_action($row, '1234567890');
+    check($r instanceof \WP_Error && empty($r->get_error_data()['indeterminate']), 'a sale the client refused to send is a plain error, not a pending leg');
 
     // Callback: the URL token or PayArc's bearer authenticates; neither is 401 before any call; adoption outranks the metadata.
     reset();
@@ -208,9 +231,12 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     check($r instanceof \WP_Error && $r->get_error_data()['status'] === 404, 'a transaction PayArc cannot see is unknown');
     // A refund callback is noted on the order, once.
     reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
-    $rb = json_encode(array('traceId' => '00000000-0000-4000-8000-000000000002', 'transType' => 'REFUND', 'status' => 'DECLINE'));
+    $rb = json_encode(array('traceId' => '00000000-0000-4000-8000-000000000002', 'transType' => 'SALE', 'status' => 'DECLINE')); // The body lies about the type; the read decides.
     $q = new \WP_REST_Request(); $q->set_body($rb); $q->set_query_params(array('patwc_cb' => 'urltok'));
-    $c = new QueueClient(); $c->queue = array(array('traceId' => '00000000-0000-4000-8000-000000000002', 'transType' => 'REFUND', 'status' => 'DECLINE', 'metadata' => array('wcpos_refund_id' => '505')), array('traceId' => '00000000-0000-4000-8000-000000000002', 'transType' => 'REFUND', 'status' => 'DECLINE', 'metadata' => array('wcpos_refund_id' => '505')));
+    $view = static function (string $status): array { return array('traceId' => '00000000-0000-4000-8000-000000000002', 'transType' => 'REFUND', 'status' => $status, 'metadata' => array('wcpos_refund_id' => '505', 'wcpos_payment_id' => 'r')); };
+    $c = new QueueClient(); $c->queue = array($view('processing'), $view('DECLINE'), $view('DECLINE'));
+    $r = adapter($c)->verify_webhook($q);
+    check($r instanceof \WP_Error && $r->get_error_data()['status'] === 200 && $GLOBALS['orders'][99]->notes === array() && $refund->meta[Refund_Reask::key(Refund_Reask::META_TRACE, 'r')] === '00000000-0000-4000-8000-000000000002', 'a refund still on the terminal is acknowledged without a note, and its trace recorded so no re-ask repeats it');
     $r = adapter($c)->verify_webhook($q);
     check($r instanceof \WP_Error && $r->get_error_data()['status'] === 200 && count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'refund #505 as DECLINE') !== false, 'a refund outcome is noted on the order');
     adapter($c)->verify_webhook($q);

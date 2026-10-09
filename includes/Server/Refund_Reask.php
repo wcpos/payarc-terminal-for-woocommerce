@@ -4,6 +4,7 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Server;
 
 use Throwable;
 use WCPOS\WooCommercePOS\PayArcTerminal\Logger;
+use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcNotSentException;
 use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcRequestException;
 
 /**
@@ -24,16 +25,26 @@ final class Refund_Reask
     public const DELAY = 120;
     /** Silent tries before staff are told to check the PayArc dashboard (about ten minutes). */
     public const LIMIT = 5;
-    /** The attempt id, PayArc's idempotency key for this record's refund; written before the POST. */
+    /**
+     * The attempt id, PayArc's idempotency key for this record's refund of ONE payment row; written before
+     * the POST. A refund split across two payments is two commands with two keys, so every key below is
+     * suffixed with the row id Pro passes (`:<row id>`).
+     */
     public const META_ATTEMPT = '_patwc_refund_attempt';
     /** The request replayed on each ask. */
     public const META_REQUEST = '_patwc_refund_request';
     /** The PayArc traceId once PayArc accepted the refund command. */
     public const META_TRACE = '_patwc_refund_trace_id';
 
+    /** A record's meta key for one payment row. */
+    public static function key(string $base, string $row_id): string
+    {
+        return $base . ':' . $row_id;
+    }
+
     public static function register(): void
     {
-        add_action(self::HOOK, array(__CLASS__, 'run'), 10, 3);
+        add_action(self::HOOK, array(__CLASS__, 'run'), 10, 4);
     }
 
     /**
@@ -42,13 +53,13 @@ final class Refund_Reask
      * @param object $refund
      * @param array<string, mixed> $request
      */
-    public static function attempt_key($refund, array $request): string
+    public static function attempt_key($refund, string $row_id, array $request): string
     {
-        $key = (string) $refund->get_meta(self::META_ATTEMPT, true);
+        $key = (string) $refund->get_meta(self::key(self::META_ATTEMPT, $row_id), true);
         if ($key === '') {
             $key = wp_generate_uuid4();
-            $refund->update_meta_data(self::META_ATTEMPT, $key);
-            $refund->update_meta_data(self::META_REQUEST, $request);
+            $refund->update_meta_data(self::key(self::META_ATTEMPT, $row_id), $key);
+            $refund->update_meta_data(self::key(self::META_REQUEST, $row_id), $request);
             $refund->save();
         }
 
@@ -60,7 +71,7 @@ final class Refund_Reask
      *
      * @param object $order
      */
-    public static function unanswered($order, int $refund_id): void
+    public static function unanswered($order, int $refund_id, string $row_id): void
     {
         $order->add_order_note(sprintf(
             /* translators: %d: refund id. */
@@ -68,12 +79,12 @@ final class Refund_Reask
             $refund_id
         ));
         $order->save();
-        self::schedule($refund_id, 1, (int) $order->get_id());
+        self::schedule($refund_id, 1, (int) $order->get_id(), $row_id);
     }
 
-    private static function schedule(int $refund_id, int $try, int $order_id): void
+    private static function schedule(int $refund_id, int $try, int $order_id, string $row_id): void
     {
-        wp_schedule_single_event(time() + self::DELAY, self::HOOK, array($refund_id, $try, $order_id));
+        wp_schedule_single_event(time() + self::DELAY, self::HOOK, array($refund_id, $try, $order_id, $row_id));
     }
 
     /**
@@ -81,7 +92,7 @@ final class Refund_Reask
      *
      * @param PayArc_Server_Provider|null $adapter Adapter override for tests.
      */
-    public static function run(int $refund_id, int $try = 1, int $order_id = 0, $adapter = null): void
+    public static function run(int $refund_id, int $try = 1, int $order_id = 0, string $row_id = '', $adapter = null): void
     {
         $refund = wc_get_order($refund_id);
         if (!$refund instanceof \WC_Order_Refund) {
@@ -94,20 +105,25 @@ final class Refund_Reask
             return;
         }
         $order = wc_get_order((int) $refund->get_parent_id());
-        if (!$order || (string) $refund->get_meta(self::META_TRACE, true) !== '') {
+        if (!$order || (string) $refund->get_meta(self::key(self::META_TRACE, $row_id), true) !== '') {
             return;
         }
-        $key = (string) $refund->get_meta(self::META_ATTEMPT, true);
-        $request = (array) $refund->get_meta(self::META_REQUEST, true);
+        $key = (string) $refund->get_meta(self::key(self::META_ATTEMPT, $row_id), true);
+        $request = (array) $refund->get_meta(self::key(self::META_REQUEST, $row_id), true);
         if ($key === '' || empty($request['originalTransactionId'])) {
             return;
         }
         $adapter = $adapter === null ? new PayArc_Server_Provider() : $adapter;
         try {
             $trace_id = $adapter->refund_once($request, $key);
+        } catch (PayArcNotSentException $e) {
+            // Nothing left the server (credentials, mode or Connect state): ask again later, when it may.
+            self::again($order, $refund_id, $try, $row_id);
+            return;
         } catch (PayArcRequestException $e) {
-            if (PayArc_Server_Provider::unanswered($e)) {
-                self::again($order, $refund_id, $try);
+            // Unanswered, or a conflict on the key: a command under this key may exist; the question stays open.
+            if (PayArc_Server_Provider::unanswered($e) || PayArc_Server_Provider::idempotency_conflict($e)) {
+                self::again($order, $refund_id, $try, $row_id);
                 return;
             }
             // Refused: had the first request been accepted, the identical replay would have been answered
@@ -121,10 +137,10 @@ final class Refund_Reask
             $order->save();
             return;
         } catch (Throwable $e) {
-            self::again($order, $refund_id, $try);
+            self::again($order, $refund_id, $try, $row_id);
             return;
         }
-        $refund->update_meta_data(self::META_TRACE, $trace_id);
+        $refund->update_meta_data(self::key(self::META_TRACE, $row_id), $trace_id);
         $refund->save();
         /* translators: 1: refund id, 2: PayArc traceId. */
         $order->add_order_note(sprintf(__('PayArc accepted refund #%1$d (trace %2$s); the terminal reports its outcome.', 'payarc-terminal-for-woocommerce'), $refund_id, $trace_id));
@@ -134,10 +150,10 @@ final class Refund_Reask
     /**
      * @param object $order
      */
-    private static function again($order, int $refund_id, int $try): void
+    private static function again($order, int $refund_id, int $try, string $row_id): void
     {
         if ($try < self::LIMIT) {
-            self::schedule($refund_id, $try + 1, (int) $order->get_id());
+            self::schedule($refund_id, $try + 1, (int) $order->get_id(), $row_id);
             return;
         }
         Logger::log('PayArc never answered a refund; staff asked to check the dashboard', array('refund_id' => $refund_id), null, 'warning');
