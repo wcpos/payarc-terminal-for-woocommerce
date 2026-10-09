@@ -96,27 +96,9 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         }
         $held = Sale_Guard::held((string) $row['id']);
         try {
-            $terminal = $this->terminals->validate_terminal($reader_id);
-            $amount = Money::to_payarc_amount_object((string) $row['amount'], (string) $row['currency']);
             // Free's replay of a lost answer must send the byte-identical command under the same key:
-            // the sale as first sent, whatever the settings say now.
-            $payload = $held !== null && isset($held['payload']) && is_array($held['payload']) ? $held['payload'] : array(
-                'tenantId' => $terminal['tenantId'],
-                'terminalId' => $terminal['terminalId'],
-                // The store's own id for the sale, which a linked refund names later; 16 characters.
-                'transactionId' => PayArcIds::transaction_id((int) $order->get_id(), (string) $row['id']),
-                'tenderType' => $this->settings->tender_type(),
-                'amount' => $amount,
-                'printReceipt' => $this->settings->print_receipt(),
-                'callbackURL' => self::webhook_url($this->settings),
-                'metadata' => array(
-                    'wcpos_payment_id' => (string) $row['id'],
-                    'order_id' => (string) $order->get_id(),
-                    'terminal_id' => $terminal['terminalId'],
-                    'tender_type' => $this->settings->tender_type(),
-                    'mode' => $this->settings->mode(),
-                ),
-            );
+            // the sale as first sent, whatever the settings say now, and built from nothing current.
+            $payload = $held !== null && isset($held['payload']) && is_array($held['payload']) ? $held['payload'] : $this->sale_payload($row, $reader_id, $order);
             // The row id is the idempotency key: a replay after a lost answer is the same command.
             try {
                 $response = $this->client->sale($payload, (string) $row['id']);
@@ -155,6 +137,38 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         } catch (Throwable $e) {
             return self::provider_error($e, 'payarc_configuration', 400); // Before the sale was built: nothing sent.
         }
+    }
+
+
+    /**
+     * The sale command for a row, as first built: terminal, money, the store's own ids and the callback.
+     *
+     * @param array<string, mixed> $row
+     * @param object $order
+     * @return array<string, mixed>
+     */
+    private function sale_payload(array $row, string $reader_id, $order): array
+    {
+        $terminal = $this->terminals->validate_terminal($reader_id);
+        $amount = Money::to_payarc_amount_object((string) $row['amount'], (string) $row['currency']);
+
+        return array(
+            'tenantId' => $terminal['tenantId'],
+            'terminalId' => $terminal['terminalId'],
+            // The store's own id for the sale, which a linked refund names later; 16 characters.
+            'transactionId' => PayArcIds::transaction_id((int) $order->get_id(), (string) $row['id']),
+            'tenderType' => $this->settings->tender_type(),
+            'amount' => $amount,
+            'printReceipt' => $this->settings->print_receipt(),
+            'callbackURL' => self::webhook_url($this->settings),
+            'metadata' => array(
+                'wcpos_payment_id' => (string) $row['id'],
+                'order_id' => (string) $order->get_id(),
+                'terminal_id' => $terminal['terminalId'],
+                'tender_type' => $this->settings->tender_type(),
+                'mode' => $this->settings->mode(),
+            ),
+            );
     }
 
     public function fetch(string $ref)
