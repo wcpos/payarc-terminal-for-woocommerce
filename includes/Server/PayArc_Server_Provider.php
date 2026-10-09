@@ -94,10 +94,13 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         if (!$order) {
             return new \WP_Error('wcpos_order_not_found', __('Order not found.', 'payarc-terminal-for-woocommerce'), array('status' => 404));
         }
+        $held = Sale_Guard::held((string) $row['id']);
         try {
             $terminal = $this->terminals->validate_terminal($reader_id);
             $amount = Money::to_payarc_amount_object((string) $row['amount'], (string) $row['currency']);
-            $payload = array(
+            // Free's replay of a lost answer must send the byte-identical command under the same key:
+            // the sale as first sent, whatever the settings say now.
+            $payload = $held !== null && isset($held['payload']) && is_array($held['payload']) ? $held['payload'] : array(
                 'tenantId' => $terminal['tenantId'],
                 'terminalId' => $terminal['terminalId'],
                 // The store's own id for the sale, which a linked refund names later; 16 characters.
@@ -118,24 +121,29 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
             try {
                 $response = $this->client->sale($payload, (string) $row['id']);
             } catch (PayArcNotSentException $e) {
+                if ($held !== null) {
+                    // A replay the client could not send: the first command may be on the terminal.
+                    return $this->indeterminate('payarc_unanswered', $e->getMessage());
+                }
+
                 return self::provider_error($e, 'payarc_configuration', 400); // Nothing left the server.
             } catch (PayArcRequestException $e) {
                 // A refused replay whose code speaks of the key or a duplicate means the first command exists.
                 if (self::unanswered($e) || self::idempotency_conflict($e)) {
-                    $this->guard($order, $payload['transactionId']);
+                    Sale_Guard::hold((string) $row['id'], (int) $order->get_id(), $payload);
                     return $this->indeterminate('payarc_unanswered', $e->getMessage());
                 }
 
                 return self::provider_error($e);
             } catch (Throwable $e) {
                 // Transport loss, or an answer that could not be read: the sale may be on the terminal.
-                $this->guard($order, $payload['transactionId']);
+                Sale_Guard::hold((string) $row['id'], (int) $order->get_id(), $payload);
                 return $this->indeterminate('payarc_unanswered', $e->getMessage());
             }
             $trace_id = self::scalar($response, 'traceId');
             // A sale may be on the terminal from here on: the settings guard (mode, credentials, Connect)
-            // holds until it ends, as it does for the old panel's attempts.
-            $this->guard($order, $payload['transactionId'], $trace_id);
+            // holds until it ends, and the command is kept for a byte-identical replay.
+            Sale_Guard::hold((string) $row['id'], (int) $order->get_id(), $payload, $trace_id);
             if ($trace_id === '') {
                 // Accepted without a handle: nothing to poll, and the terminal may have the sale.
                 return $this->indeterminate('payarc_unanswered', __('PayArc accepted the sale without a trace id.', 'payarc-terminal-for-woocommerce'));
@@ -152,8 +160,9 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
     public function fetch(string $ref)
     {
         try {
-            $observation = self::normalize($this->client->get_transaction($ref));
-            $this->release_guard_if_final($observation);
+            $transaction = $this->client->get_transaction($ref);
+            $observation = self::normalize($transaction);
+            $this->release_guard_if_final($transaction, $observation);
 
             return $observation;
         } catch (PayArcRequestException $e) {
@@ -184,7 +193,6 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
             // The store's own sale id, which a linked refund names.
             'payarc_transaction_id' => self::scalar($transaction, 'transactionId'),
             'reader' => isset($transaction['metadata']['terminal_id']) ? (string) $transaction['metadata']['terminal_id'] : '',
-            'order_id' => isset($transaction['metadata']['order_id']) ? (string) $transaction['metadata']['order_id'] : '',
             // The tender the sale was taken with; a linked refund must name the same one.
             'payarc_tender_type' => isset($transaction['metadata']['tender_type']) ? (string) $transaction['metadata']['tender_type'] : '',
         );
@@ -255,8 +263,9 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
                 }
                 // Refused: the card has begun processing, or the sale already ended. Only the read says which.
             }
-            $observation = self::normalize($this->client->get_transaction($ref));
-            $this->release_guard_if_final($observation);
+            $transaction = $this->client->get_transaction($ref);
+            $observation = self::normalize($transaction);
+            $this->release_guard_if_final($transaction, $observation);
 
             return $observation['status'] === 'cancelled' || $observation['status'] === 'expired' || $observation['status'] === 'failed' ? 'final' : 'requested';
         } catch (PayArcRequestException $e) {
@@ -297,7 +306,8 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
                 'reason' => (string) $refund->get_reason(),
                 'printReceipt' => $this->settings->print_receipt(),
                 'callbackURL' => self::webhook_url($this->settings),
-                'metadata' => array('wcpos_refund_id' => (string) $refund->get_id(), 'wcpos_payment_id' => $row_id, 'order_id' => (string) $order->get_id()),
+                // Never `wcpos_payment_id`: a refund's read must not be mistaken for the sale's.
+                'metadata' => array('wcpos_refund_id' => (string) $refund->get_id(), 'wcpos_refund_row' => $row_id, 'order_id' => (string) $order->get_id()),
             );
             // Saved before the POST: a replay of the record, for this row, asks under the same key.
             $key = Refund_Reask::attempt_key($refund, $row_id, $request);
@@ -455,14 +465,15 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         } catch (Throwable $e) {
             return self::provider_error($e);
         }
-        if (strtoupper(self::scalar($transaction, 'transType')) === 'REFUND') {
+        if (strtoupper(self::scalar($transaction, 'transType')) === 'REFUND' || isset($transaction['metadata']['wcpos_refund_id'])) {
+            // A refund, by its type or by the refund it names: never settled against a sale row.
             return $this->refund_callback($transaction, $trace_id);
         }
         $payment_id = $adopted !== null ? $adopted : (isset($transaction['metadata']['wcpos_payment_id']) ? (string) $transaction['metadata']['wcpos_payment_id'] : '');
         if (preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $payment_id) !== 1) {
             return new \WP_Error('payarc_webhook_ignored', __('Not a WCPOS payment.', 'payarc-terminal-for-woocommerce'), array('status' => 200));
         }
-        $this->release_guard_if_final(self::normalize($transaction));
+        $this->release_guard_if_final($transaction, self::normalize($transaction));
 
         return array('payment_id' => strtolower($payment_id), 'patch' => self::webhook_patch($transaction));
     }
@@ -507,7 +518,7 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
     private function refund_callback(array $transaction, string $trace_id): \WP_Error
     {
         $refund_id = isset($transaction['metadata']['wcpos_refund_id']) ? (int) $transaction['metadata']['wcpos_refund_id'] : 0;
-        $row_id = isset($transaction['metadata']['wcpos_payment_id']) ? (string) $transaction['metadata']['wcpos_payment_id'] : '';
+        $row_id = isset($transaction['metadata']['wcpos_refund_row']) ? (string) $transaction['metadata']['wcpos_refund_row'] : '';
         $refund = $refund_id ? wc_get_order($refund_id) : null;
         $order = $refund instanceof \WC_Order_Refund ? wc_get_order((int) $refund->get_parent_id()) : null;
         if (!$order) {
@@ -587,29 +598,19 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
     }
 
     /**
-     * Hold the settings guard (mode, credentials, Connect state cannot change) while a sale may be on
-     * the terminal, in the index the old panel's attempts use.
+     * A sale that ended releases the guard its create took: this sale's, by the row id its metadata carries.
      *
-     * @param object $order
+     * @param array<string, mixed> $transaction The read.
+     * @param array<string, mixed>|\WP_Error $observation Its projection.
      */
-    private function guard($order, string $transaction_id, string $trace_id = ''): void
-    {
-        PaymentAttempt::mark_in_flight($order, array('status' => $trace_id === '' ? 'created' : 'sent', 'trace_id' => $trace_id, 'transaction_id' => $transaction_id));
-    }
-
-    /**
-     * A sale that ended releases the guard its create took.
-     *
-     * @param array<string, mixed>|\WP_Error $observation
-     */
-    private function release_guard_if_final($observation): void
+    private function release_guard_if_final(array $transaction, $observation): void
     {
         if (!is_array($observation) || !in_array($observation['status'] ?? '', array('completed', 'failed', 'expired', 'cancelled'), true)) {
             return;
         }
-        $order_id = isset($observation['provider_refs']['order_id']) ? (int) $observation['provider_refs']['order_id'] : 0;
-        if ($order_id > 0) {
-            PaymentAttempt::clear_in_flight(new Order_Handle($order_id));
+        $row_id = isset($transaction['metadata']['wcpos_payment_id']) ? (string) $transaction['metadata']['wcpos_payment_id'] : '';
+        if ($row_id !== '') {
+            Sale_Guard::release($row_id);
         }
     }
 

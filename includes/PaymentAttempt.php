@@ -157,6 +157,11 @@ class PaymentAttempt
             return false;
         }
 
+        // A sale WCPOS Pro's base has on a terminal holds the same guard as the old panel's attempts.
+        if (class_exists('\\WCPOS\\WooCommercePOS\\PayArcTerminal\\Server\\Sale_Guard') && \WCPOS\WooCommercePOS\PayArcTerminal\Server\Sale_Guard::any_live()) {
+            return true;
+        }
+
         $index = get_option(self::OPTION_IN_FLIGHT_ATTEMPTS, array());
         if (!is_array($index)) {
             return false;
