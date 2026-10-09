@@ -31,8 +31,17 @@ final class Sale_Guard
      */
     public static function held(string $row_id): ?array
     {
+        global $wpdb;
         if (!function_exists('get_option')) {
             return null;
+        }
+        // From the table when there is one: a persistent object cache can list a marker another process
+        // just wrote as missing, and a replay must find its own command.
+        if (is_object($wpdb) && method_exists($wpdb, 'get_var')) {
+            $raw = $wpdb->get_var($wpdb->prepare("SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", self::option($row_id)));
+            if ($raw !== null) {
+                return self::fresh(is_serialized((string) $raw) ? @unserialize((string) $raw) : $raw);
+            }
         }
 
         return self::fresh(get_option(self::option($row_id), null));
@@ -49,7 +58,8 @@ final class Sale_Guard
      * Judged from the options table itself, never through get_option(): a persistent object cache
      * can list a marker as missing for a moment after it was written. A row is deleted only when
      * the value read from the table proved stale, and only if it is still that value. When the
-     * table cannot be read, a sale is assumed live: the guard fails closed.
+     * table cannot be read (wpdb answers with an empty array and last_error), a sale is assumed
+     * live: the guard fails closed.
      */
     public static function any_live(): bool
     {
@@ -59,7 +69,8 @@ final class Sale_Guard
         }
         $like = method_exists($wpdb, 'esc_like') ? $wpdb->esc_like(self::OPTION_PREFIX) : self::OPTION_PREFIX;
         $rows = $wpdb->get_results($wpdb->prepare("SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name LIKE %s", $like . '%'), 'ARRAY_A');
-        if (!is_array($rows)) {
+        // wpdb answers a failed SELECT with an empty array and sets last_error: unreadable counts as live.
+        if (!is_array($rows) || (string) ($wpdb->last_error ?? '') !== '') {
             return true;
         }
         $live = false;

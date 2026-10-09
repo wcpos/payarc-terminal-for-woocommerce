@@ -555,8 +555,11 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         $order->add_order_note($status === 'success'
             /* translators: 1: refund id, 2: PayArc traceId. */
             ? sprintf(__('PayArc confirmed refund #%1$d on the terminal (trace %2$s).', 'payarc-terminal-for-woocommerce'), $refund_id, $trace_id)
-            /* translators: 1: refund id, 2: PayArc status. */
-            : sprintf(__('PayArc reports refund #%1$d as %2$s: no money was returned. The record still counts as refunded here: delete it, then refund from the PayArc dashboard or the terminal if the money is owed.', 'payarc-terminal-for-woocommerce'), $refund_id, strtoupper($status)));
+            : Refund_Reask::part_not_returned_note($refund_id, $row_id, $refund, sprintf(
+                /* translators: %s: PayArc status. */
+                __('PayArc reports it as %s', 'payarc-terminal-for-woocommerce'),
+                strtoupper($status)
+            )));
         $order->save();
 
         return new \WP_Error('payarc_webhook_refund', __('Refund outcome recorded.', 'payarc-terminal-for-woocommerce'), array('status' => 200));

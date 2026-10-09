@@ -128,12 +128,11 @@ final class Refund_Reask
             }
             // Refused: had the first request been accepted, the identical replay would have been answered
             // with its traceId instead. No refund command reached the terminal.
-            $order->add_order_note(sprintf(
-                /* translators: 1: refund id, 2: PayArc error code. */
-                __('PayArc refused refund #%1$d: %2$s. No refund was sent to the terminal. The record still counts as refunded here: delete it, then refund from the PayArc dashboard or the terminal if the money is owed.', 'payarc-terminal-for-woocommerce'),
-                $refund_id,
+            $order->add_order_note(self::part_not_returned_note($refund_id, $row_id, $refund, sprintf(
+                /* translators: %s: PayArc error code. */
+                __('PayArc refused it (%s), so no command reached the terminal', 'payarc-terminal-for-woocommerce'),
                 $e->payarc_code() !== '' ? $e->payarc_code() : (string) $e->http_status()
-            ));
+            )));
             $order->save();
             return;
         } catch (Throwable $e) {
@@ -157,8 +156,71 @@ final class Refund_Reask
             return;
         }
         Logger::log('PayArc never answered a refund; staff asked to check the dashboard', array('refund_id' => $refund_id), null, 'warning');
-        /* translators: %d: refund id. */
-        $order->add_order_note(sprintf(__('PayArc has not confirmed refund #%d. Check the PayArc dashboard: if the refund is there, nothing more is needed; if not, delete this refund record and refund from the dashboard or the terminal.', 'payarc-terminal-for-woocommerce'), $refund_id));
+        $refund = wc_get_order($refund_id);
+        $order->add_order_note(sprintf(
+            /* translators: 1: the refund part, e.g. "refund #12 (92.95 USD)"; 2: the record's other parts, or empty. */
+            __('PayArc has not confirmed %1$s. Check the PayArc dashboard: if that refund is there, nothing more is needed; if not, that part was never returned.%2$s', 'payarc-terminal-for-woocommerce'),
+            self::part_label($refund_id, $row_id, $refund),
+            self::other_parts_hint($row_id, $refund)
+        ));
         $order->save();
+    }
+
+    /**
+     * The note for one part of a refund the terminal did not return: which part, why, and what the record
+     * now overstates. A refund of a split payment is one WooCommerce record with a command per payment row,
+     * so the advice never says to delete a record another part of which was returned.
+     *
+     * @param object|null $refund
+     */
+    public static function part_not_returned_note(int $refund_id, string $row_id, $refund, string $why): string
+    {
+        return sprintf(
+            /* translators: 1: the refund part, e.g. "refund #12 (92.95 USD)"; 2: why, e.g. "PayArc reports it as DECLINE"; 3: the record's other parts, or empty. */
+            __('%1$s was not returned: %2$s. The record still counts it as refunded here.%3$s', 'payarc-terminal-for-woocommerce'),
+            self::part_label($refund_id, $row_id, $refund),
+            $why,
+            self::other_parts_hint($row_id, $refund)
+        );
+    }
+
+    /**
+     * "refund #12 (92.95 USD, trace abc)" from the command saved for the part, or "refund #12" when no command was saved.
+     *
+     * @param object|null $refund
+     */
+    private static function part_label(int $refund_id, string $row_id, $refund): string
+    {
+        $request = is_object($refund) ? (array) $refund->get_meta(self::key(self::META_REQUEST, $row_id), true) : array();
+        $amount = isset($request['amount']['total'], $request['amount']['currency']) ? \WCPOS\WooCommercePOSPro\Payments\Server\Money_Units::major((int) $request['amount']['total'], (string) $request['amount']['currency']) . ' ' . $request['amount']['currency'] : '';
+        $trace = is_object($refund) ? (string) $refund->get_meta(self::key(self::META_TRACE, $row_id), true) : '';
+        $detail = implode(', ', array_filter(array($amount, $trace !== '' ? 'trace ' . $trace : '')));
+
+        /* translators: 1: refund id, 2: amount and trace, e.g. "92.95 USD, trace abc". */
+        return $detail === '' ? sprintf(__('refund #%d', 'payarc-terminal-for-woocommerce'), $refund_id) : sprintf(__('refund #%1$d (%2$s)', 'payarc-terminal-for-woocommerce'), $refund_id, $detail);
+    }
+
+    /**
+     * When the record has commands for other payment rows, the advice must keep them: those parts may have
+     * been returned.
+     *
+     * @param object|null $refund
+     */
+    private static function other_parts_hint(string $row_id, $refund): string
+    {
+        $others = 0;
+        if (is_object($refund) && method_exists($refund, 'get_meta_data')) {
+            foreach ($refund->get_meta_data() as $meta) {
+                $key = is_object($meta) && isset($meta->key) ? (string) $meta->key : '';
+                if (strpos($key, self::META_REQUEST . ':') === 0 && $key !== self::key(self::META_REQUEST, $row_id)) {
+                    ++$others;
+                }
+            }
+        }
+        if ($others === 0) {
+            return ' ' . __('Delete the record, then refund from the PayArc dashboard or the terminal if the money is owed.', 'payarc-terminal-for-woocommerce');
+        }
+
+        return ' ' . __('Other parts of this refund went to other payments and may have been returned: keep the record, note the amount not returned, and refund that amount from the PayArc dashboard or the terminal if it is owed.', 'payarc-terminal-for-woocommerce');
     }
 }

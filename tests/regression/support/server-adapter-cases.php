@@ -50,6 +50,7 @@ namespace {
         public function get_id() { return $this->id; }
         public function is_paid() { return $this->paid; }
         public function get_meta($k, $single = true) { return $this->meta[$k] ?? ($single ? '' : array()); }
+        public function get_meta_data() { $out = array(); foreach ($this->meta as $k => $v) { $out[] = (object) array('key' => $k, 'value' => $v); } return $out; }
         public function update_meta_data($k, $v) { $this->meta[$k] = $v; }
         public function add_order_note($n) { $this->notes[] = $n; }
         public function save() { $this->saves++; }
@@ -86,8 +87,15 @@ namespace {
         public $last_error = '';
         public function esc_like($s) { return addcslashes($s, '_%\\'); }
         public function prepare($q, ...$a) { return json_encode(array($q, $a)); }
+        public function get_var($prepared)
+        {
+            list($sql, $args) = json_decode($prepared, true);
+            if ($sql !== "SELECT option_value FROM {$this->options} WHERE option_name = %s") { throw new \RuntimeException('guard wpdb: unsupported query: ' . $sql); }
+            return isset($GLOBALS['options'][$args[0]]) ? serialize($GLOBALS['options'][$args[0]]) : null;
+        }
         public function get_results($prepared, $output = null)
         {
+            if ($this->last_error !== '') { return array(); } // What wpdb does on a failed query.
             list($sql, $args) = json_decode($prepared, true);
             if ($sql !== "SELECT option_name, option_value FROM {$this->options} WHERE option_name LIKE %s") { throw new \RuntimeException('guard wpdb: unsupported query: ' . $sql); }
             $prefix = stripcslashes(substr($args[0], 0, -1));
@@ -95,9 +103,11 @@ namespace {
             foreach ($GLOBALS['options'] as $k => $v) { if (strpos((string) $k, $prefix) === 0) { $rows[] = array('option_name' => (string) $k, 'option_value' => serialize($v)); } }
             return $rows;
         }
+        public $before_delete;
         public function query($prepared)
         {
             list($sql, $args) = json_decode($prepared, true);
+            if ($this->before_delete) { $cb = $this->before_delete; $this->before_delete = null; $cb(); }
             if ($sql !== "DELETE FROM {$this->options} WHERE option_name = %s AND option_value = %s") { throw new \RuntimeException('guard wpdb: unsupported query: ' . $sql); }
             if (isset($GLOBALS['options'][$args[0]]) && serialize($GLOBALS['options'][$args[0]]) === $args[1]) { unset($GLOBALS['options'][$args[0]]); return 1; }
             return 0;
@@ -179,6 +189,17 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     $GLOBALS['notoptions']['patwc_pro_sale_' . md5('other-process')] = true;
     Sale_Guard::release($row['id']);
     check(Sale_Guard::any_live() && isset($GLOBALS['options']['patwc_pro_sale_' . md5('other-process')]), 'a marker the object cache lists as missing still holds the guard, and is not deleted');
+    check(Sale_Guard::held('other-process') !== null, 'a replay finds its own marker in the table when the object cache lists it as missing');
+    // The table cannot be read: wpdb answers an empty array and sets last_error; the guard fails closed.
+    $GLOBALS['wpdb']->last_error = 'MySQL server has gone away';
+    check(Sale_Guard::any_live(), 'an unreadable options table counts as a sale on a terminal');
+    $GLOBALS['wpdb']->last_error = '';
+    // A stale marker re-held between the read and the delete is kept: the delete compares the value it read.
+    $GLOBALS['notoptions'] = array(); unset($GLOBALS['options']['patwc_pro_sale_' . md5('other-process')]); Sale_Guard::release($row['id']);
+    $GLOBALS['options']['patwc_pro_sale_' . md5('late')] = array('order_id' => 1, 'trace_id' => '', 'payload' => array(), 'updated_at' => time() - 1801);
+    $GLOBALS['wpdb']->before_delete = static function () { Sale_Guard::hold('late', 1, array('again' => true)); };
+    check(!Sale_Guard::any_live() && Sale_Guard::held('late') !== null, 'a marker held again between the read and the delete survives the sweep');
+    Sale_Guard::release('late');
     $GLOBALS['notoptions'] = array(); unset($GLOBALS['options']['patwc_pro_sale_' . md5('other-process')]);
     Sale_Guard::hold($row['id'], 99, $sent, 't1');
     $GLOBALS['options']['patwc_pro_sale_' . md5('old')] = array('order_id' => 1, 'trace_id' => '', 'payload' => array(), 'updated_at' => time() - 1801);
@@ -301,10 +322,18 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     $r = adapter($c)->verify_webhook($q);
     check($r instanceof \WP_Error && $r->get_error_data()['status'] === 200 && $GLOBALS['orders'][99]->notes === array() && $refund->meta[Refund_Reask::key(Refund_Reask::META_TRACE, 'r')] === '00000000-0000-4000-8000-000000000002', 'a refund still on the terminal is acknowledged without a note, and its trace recorded so no re-ask repeats it');
     $r = adapter($c)->verify_webhook($q);
-    check($r instanceof \WP_Error && $r->get_error_data()['status'] === 200 && count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'refund #505 as DECLINE') !== false, 'a refund outcome is noted on the order');
+    check($r instanceof \WP_Error && $r->get_error_data()['status'] === 200 && count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'refund #505 (trace 00000000-0000-4000-8000-000000000002) was not returned: PayArc reports it as DECLINE') !== false && strpos($GLOBALS['orders'][99]->notes[0], 'Delete the record') !== false, 'a refund outcome is noted on the order, naming the part and the trace');
+    // A refund of a split payment has a command per payment row: a failed part never tells staff to delete the whole record.
+    $refund->meta[Refund_Reask::key(Refund_Reask::META_REQUEST, 'other-row')] = array('amount' => array('total' => 100, 'currency' => 'USD'));
+    $refund->meta[Refund_Reask::key(Refund_Reask::META_REQUEST, 'r')] = array('amount' => array('total' => 9295, 'currency' => 'USD'));
+    unset($refund->meta[Refund_Reask::key('_patwc_refund_outcome', 'r')]);
+    $c->queue = array($view('DECLINE'));
+    adapter($c)->verify_webhook($q);
+    check(count($GLOBALS['orders'][99]->notes) === 2 && strpos($GLOBALS['orders'][99]->notes[1], 'refund #505 (92.95 USD, trace 00000000-0000-4000-8000-000000000002) was not returned') !== false && strpos($GLOBALS['orders'][99]->notes[1], 'Other parts of this refund') !== false && strpos($GLOBALS['orders'][99]->notes[1], 'Delete the record') === false, 'a failed part of a split refund names its amount and keeps the record');
+    unset($refund->meta[Refund_Reask::key(Refund_Reask::META_REQUEST, 'other-row')], $refund->meta[Refund_Reask::key(Refund_Reask::META_REQUEST, 'r')]);
     check($GLOBALS['orders'][99]->paid === false, 'a refund is never settled against a sale row');
     adapter($c)->verify_webhook($q);
-    check(count($GLOBALS['orders'][99]->notes) === 1, 'the same outcome is noted once');
+    check(count($GLOBALS['orders'][99]->notes) === 2, 'the same outcome is noted once');
 
     echo "server-adapter cases passed\n";
 }
