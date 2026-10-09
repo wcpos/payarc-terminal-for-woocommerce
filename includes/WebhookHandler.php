@@ -127,13 +127,7 @@ class WebhookHandler
             // Once Pro's leg has ended without money, this route acts again, as before.
             $order = PaymentReconciler::reload_order($order);
             if (Legacy_Adoption::owns_order($order)) {
-                $current = PaymentAttempt::current($order);
-                if (Legacy_Adoption::captured_by_pro($order, $traceId) && (string) ($current['trace_id'] ?? '') === $traceId && !$this->is_final_status((string) ($current['status'] ?? ''))) {
-                    // Pro captured it: the old attempt is finished too, so the in-flight guard lets go.
-                    PaymentAttempt::update_status($order, 'success', array('trace_id' => $traceId));
-                    $order->add_order_note('PayArc transaction completed through WooCommerce POS (trace ' . $traceId . ').');
-                    $order->save();
-                }
+                Legacy_Adoption::close_if_captured($order); // Pro captured it: the old attempt is finished too.
 
                 return $this->response(202, array('status' => 'handled_by_pos'));
             }
@@ -174,13 +168,6 @@ class WebhookHandler
         }
 
         return $this->response(200, array('status' => 'ok', 'result' => $result));
-    }
-
-    private function is_final_status(string $status): bool
-    {
-        $status = PaymentAttempt::normalize_status($status);
-
-        return $status === 'success' || PaymentAttempt::is_final_unpaid($status);
     }
 
     /**

@@ -44,19 +44,24 @@ check(Settings::uses_pro_panel() && in_array('refunds', $gateway->supports, true
 panel_order(1);
 $html = render($gateway, 1);
 check(strpos($html, 'id="wcpos-pro-panel" data-order="1"') !== false && strpos($html, 'patwc-start-payment') === false, 'an order with nothing to adopt renders Pro\'s panel and none of the old one');
-$order = panel_order(2, array_merge($live, array('trace_id' => 'trace-2')));
+$order = panel_order(2, array_merge($live, array('trace_id' => 'trace-2'))); $GLOBALS['clone_orders'] = true; // Every read a separate object, as WooCommerce gives.
 $html = render($gateway, 2);
-check(strpos($html, 'id="wcpos-pro-panel" data-order="2"') !== false && $order->get_meta(Legacy_Adoption::META_ADOPTED) === 'trace-2', 'a live sale the old panel left is adopted before Pro\'s panel renders');
+$GLOBALS['clone_orders'] = false;
+check(strpos($html, 'id="wcpos-pro-panel" data-order="2" data-adopted="trace-2"') !== false && $order->get_meta(Legacy_Adoption::META_ADOPTED) === '' && $GLOBALS['orders'][2]->get_meta(Legacy_Adoption::META_ADOPTED) === 'trace-2', 'a live sale the old panel left is adopted before Pro\'s panel renders, and the panel gets the reloaded order');
 panel_order(3, array_merge($live, array('trace_id' => 'trace-3'))); $GLOBALS['free_lock_held'] = true;
 $html = render($gateway, 3);
 check(strpos($html, 'Another request is handling this order') !== false && strpos($html, 'wcpos-pro-panel') === false, 'a held lock shows a reload notice and no panel');
 $GLOBALS['free_lock_held'] = false;
 panel_order(4, array('status' => 'created', 'transaction_id' => 'P1ABCDEF12345679', 'attempt_uuid' => 'u4'));
 $html = render($gateway, 4);
-check(strpos($html, 'has not confirmed the start') !== false && strpos($html, 'wcpos-pro-panel') === false, 'an unanswered start shows its notice and no panel');
+check(strpos($html, 'without a reference') !== false && strpos($html, 'paid again') === false && strpos($html, 'wcpos-pro-panel') === false, 'a start accepted without a reference shows its notice and no panel');
 panel_order(5, array_merge($live, array('trace_id' => 'trace-5')), false); Legacy_Adoption::$reader = static function (string $t): array { throw new PayArcRequestException('nf', 'TRANSACTION_NOT_FOUND', 400); };
 $html = render($gateway, 5);
-check(strpos($html, 'not visible under the current PayArc credentials') !== false && strpos($html, 'wcpos-pro-panel') === false, 'a sale PayArc cannot see holds the panel back with its notice');
+check(strpos($html, 'cannot be read under the current PayArc credentials') !== false && strpos($html, 'switch PayArc back') !== false && strpos($html, 'wcpos-pro-panel') === false, 'a sale PayArc cannot see holds the panel back with a notice naming the ways out');
+Legacy_Adoption::$reader = static function (string $t): array { throw new PayArcRequestException('down', 'SERVER_ERROR', 503); };
+panel_order(55, array_merge($live, array('trace_id' => 'trace-55')), false);
+$html = render($gateway, 55);
+check(strpos($html, 'did not answer') !== false && strpos($html, 'wcpos-pro-panel') === false, 'an unanswered read shows its own notice and no panel');
 Legacy_Adoption::$reader = null;
 panel_order(6, array_merge($live, array('trace_id' => 'trace-6'))); $GLOBALS['pro_refuses_adoption'] = true;
 $html = render($gateway, 6);

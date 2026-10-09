@@ -84,7 +84,7 @@ patwc_reset_world(); $order = order_with_attempt(8, array('status' => 'created',
 $r = Legacy_Adoption::adopt_order(8);
 check($r instanceof WP_Error && $r->get_error_code() === 'patwc_adoption_awaiting_trace' && Legacy_Adoption::is_deferral($r), 'a fresh trace-less start is waited out');
 $order = order_with_attempt(9, array('status' => 'created', 'transaction_id' => 'P1ABCDEF12345679', 'attempt_uuid' => 'u9'), false);
-check(Legacy_Adoption::adopt_order(9) === null && PaymentAttempt::current($order)['status'] === 'failure' && strpos($order->notes[0], 'never confirmed') !== false && !PaymentAttempt::is_in_flight($order), 'a stale trace-less start is closed with a note and the guard lets go');
+check(Legacy_Adoption::adopt_order(9) === null && PaymentAttempt::current($order)['status'] === 'failure' && strpos($order->notes[0], 'may have been charged') !== false && strpos($order->notes[0], 'P1ABCDEF12345679') !== false && !PaymentAttempt::is_in_flight($order), 'a stale start PayArc accepted without a reference is closed with a note naming its transaction id, and the guard lets go');
 
 // A stale pointer is read from PayArc once: final settles through the old reconciler, live is adopted, not found holds.
 $approved = array('traceId' => 'trace-1', 'transactionId' => 'P1ABCDEF12345678', 'status' => 'APPROVED', 'chargeId' => 'ch_1', 'amount' => array('total' => 9295, 'approved' => 9295, 'currency' => 'USD'));
@@ -100,6 +100,40 @@ check($r instanceof WP_Error && $r->get_error_code() === 'patwc_adoption_stale_a
 patwc_reset_world(); $order = order_with_attempt(14, $live, false); Legacy_Adoption::$reader = reader_returning(new PayArcRequestException('down', 'SERVER_ERROR', 503));
 $r = Legacy_Adoption::adopt_order(14);
 check($r instanceof WP_Error && $r->get_error_code() === 'patwc_adoption_unanswered' && Legacy_Adoption::is_deferral($r), 'a read PayArc did not answer defers');
+patwc_reset_world(); $order = order_with_attempt(15, $live, false); Legacy_Adoption::$reader = reader_returning(new PayArcRequestException('forbidden', 'UNAUTHORIZED', 403));
+$r = Legacy_Adoption::adopt_order(15);
+check($r instanceof WP_Error && $r->get_error_code() === 'patwc_adoption_unreadable' && !Legacy_Adoption::is_deferral($r), 'a read PayArc refused is held, not retried on every request');
+// The upgrade pass never reads from PayArc: a stale pointer is left to render time.
+patwc_reset_world(); $order = order_with_attempt(16, $live, false); Legacy_Adoption::$reader = reader_returning(array('traceId' => 'trace-1', 'status' => 'processing'));
+check(Legacy_Adoption::adopt_order(16, false) === null && $GLOBALS['reads'] === array() && $GLOBALS['adoptions'] === array() && PaymentAttempt::current($order)['status'] === 'processing', 'the pass leaves a stale pointer as it is, without a read');
+check(is_array(Legacy_Adoption::adopt_order(16)) && $GLOBALS['reads'] === array('trace-1'), 'render time reads it once and adopts');
+// A completion another request still holds the claim for is a deferral, never a panel beside it.
+patwc_reset_world(); $order = order_with_attempt(17, $live, false); Legacy_Adoption::$reader = reader_returning($approved);
+check(PaymentLock::acquire(17, 'complete_payment', 120), 'the completion claim can be taken for the case');
+$r = Legacy_Adoption::adopt_order(17);
+check($r instanceof WP_Error && $r->get_error_code() === 'patwc_adoption_completing' && Legacy_Adoption::is_deferral($r) && !$order->paid, 'a held completion claim defers');
+PaymentLock::release(17, 'complete_payment');
+// Adoption holds the settings guard for the sale Pro now drives.
+patwc_reset_world(); $order = order_with_attempt(18, $live);
+$row = Legacy_Adoption::adopt_order(18);
+$held = WCPOS\WooCommercePOS\PayArcTerminal\Server\Sale_Guard::held($row['id']); // any_live() needs $wpdb; the adapter suite covers it.
+check(is_array($row) && $held !== null && $held['trace_id'] === 'trace-1' && $held['payload'] === array(), 'an adopted sale holds the mode and credentials while Pro drives it, with no command to replay');
+// Pro's capture closes the old attempt at render time too, not only on the old callback.
+patwc_set_ledger_status(18, 'row-trace-1', 'captured'); $order->paid = true;
+check(Legacy_Adoption::adopt_order(18) === null && PaymentAttempt::current($order)['status'] === 'success' && !PaymentAttempt::is_in_flight($order) && strpos(end($order->notes), 'completed through WooCommerce POS') !== false, 'a captured adopted sale closes the old attempt when the order renders');
+// The adopted reference keeps ownership only through a row that reads live.
+patwc_reset_world(); $order = order_with_attempt(19, $live); Legacy_Adoption::adopt_order(19);
+patwc_set_ledger_status(19, 'row-trace-1', 'cancelled'); PaymentAttempt::record_new($order, array_merge($live, array('trace_id' => 'trace-new')));
+check(!Legacy_Adoption::owns_order($order), 'after Pro\'s leg ended, a newer old-panel sale is the old paths\' own');
+patwc_set_ledger_status(19, 'row-trace-1', 'pending');
+check(Legacy_Adoption::owns_order($order), 'the adopted reference keeps ownership while its row is live, whatever the current pointer says');
+$GLOBALS['ledger'][19] = array();
+check(!Legacy_Adoption::owns_order($order), 'an unreadable adopted row does not swallow a newer sale');
+
+// A sale that does not match the order (the old reconciler records the verification failure) is a final refusal, never a panel beside it.
+patwc_reset_world(); $order = order_with_attempt(20, $live, false); Legacy_Adoption::$reader = reader_returning(array('traceId' => 'trace-1', 'transactionId' => 'P1ABCDEF12345678', 'status' => 'APPROVED', 'chargeId' => 'ch_x', 'amount' => array('total' => 100, 'approved' => 100, 'currency' => 'USD')));
+$r = Legacy_Adoption::adopt_order(20);
+check($r instanceof WP_Error && $r->get_error_code() === 'patwc_adoption_conflict' && !Legacy_Adoption::is_deferral($r) && !$order->paid && $GLOBALS['adoptions'] === array() && strpos(implode(' ', $order->notes), 'verification failed') !== false, 'an approved sale for another amount is a conflict: held, not paid, not adopted, noted');
 
 // The upgrade pass: a snapshot of unpaid orders carrying an attempt, pages of 25, deferrals stay queued, done once.
 patwc_reset_world(); $GLOBALS['filters']['patwc_uses_pro_panel'] = false; $GLOBALS['order_ids'] = array(1);
@@ -115,6 +149,13 @@ check($q['status'] === Legacy_Adoption::UNPAID_STATUSES && $q['return'] === 'ids
 check(count($GLOBALS['adoptions']) === 25 && count($GLOBALS['options']['patwc_adoption_queue']) === 2, 'the first request adopts a page of 25 and queues the rest');
 $GLOBALS['free_lock_held'] = true; Legacy_Adoption::upgrade();
 check(count($GLOBALS['adoptions']) === 25 && count($GLOBALS['options']['patwc_adoption_queue']) === 2 && count($GLOBALS['order_queries']) === 1, 'a deferral keeps the order queued and the snapshot is not retaken');
+// One order a till keeps busy goes to the back of the queue, so the rest get their turn before it is tried again.
+$GLOBALS['options']['patwc_adoption_queue'] = array_fill_keys($ids, 1); $GLOBALS['adopted'] = array(); $GLOBALS['ledger'] = array(); $GLOBALS['adoptions'] = array(); $GLOBALS['free_lock_held'] = false;
+foreach ($ids as $i) { $GLOBALS['orders'][$i]->meta[Legacy_Adoption::META_ADOPTED] = ''; }
+PaymentLock::acquire(101, 'terminal');
+Legacy_Adoption::upgrade();
+check(array_keys($GLOBALS['options']['patwc_adoption_queue']) === array(126, 127, 101) && count($GLOBALS['adoptions']) === 24, 'a deferred order moves behind the orders not yet tried');
+PaymentLock::release(101, 'terminal');
 $GLOBALS['free_lock_held'] = false; Legacy_Adoption::upgrade();
 check(count($GLOBALS['adoptions']) === 27 && !isset($GLOBALS['options']['patwc_adoption_queue']) && $GLOBALS['options']['patwc_adoption_version'] === Legacy_Adoption::VERSION, 'the pass finishes and marks itself done');
 Legacy_Adoption::upgrade();

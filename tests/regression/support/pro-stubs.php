@@ -71,7 +71,7 @@ namespace {
         public function set_payment_method_title($t) { $this->meta['_payment_method_title'] = $t; }
         public function get_checkout_payment_url($on_checkout = false) { return 'https://store.test/pay/' . $this->id; }
     }
-    function wc_get_order($id) { return $GLOBALS['orders'][(int) $id] ?? false; }
+    function wc_get_order($id) { $o = $GLOBALS['orders'][(int) $id] ?? false; if ($o && !empty($GLOBALS['clone_orders'])) { $c = clone $o; $GLOBALS['orders'][(int) $id] = $c; return $c; } return $o; } // With clone_orders, each read is a separate object, as WooCommerce gives.
     function wc_get_orders($args) { $GLOBALS['order_queries'][] = $args; return $GLOBALS['order_ids'] ?? array(); }
     function get_option($k, $d = false) { return $GLOBALS['options'][$k] ?? $d; }
     function update_option($k, $v, $autoload = null) { $GLOBALS['options'][$k] = $v; return true; }
@@ -80,7 +80,7 @@ namespace {
     function apply_filters($hook, $value) { return $GLOBALS['filters'][$hook] ?? $value; }
     function add_action($h, $c, $p = 10, $a = 1) { $GLOBALS['actions'][$h][] = $c; }
     function clean_post_cache($id) { $GLOBALS['cache_cleared'][] = $id; }
-    function wcpos_pro_order_pay_panel($gateway, $order) { echo '<div id="wcpos-pro-panel" data-order="' . $order->get_id() . '"></div>'; }
+    function wcpos_pro_order_pay_panel($gateway, $order) { echo '<div id="wcpos-pro-panel" data-order="' . $order->get_id() . '" data-adopted="' . $order->get_meta(WCPOS\WooCommercePOS\PayArcTerminal\Legacy_Adoption::META_ADOPTED) . '"></div>'; }
     function wcpos_pro_order_pay_process($order) { $GLOBALS['pro_processed'][] = $order->get_id(); return array('result' => 'success', 'redirect' => 'https://store.test/received/' . $order->get_id()); }
     function wcpos_pro_order_pay_refund($order, $amount, $reason = '') { $GLOBALS['pro_refunds'][] = array($order->get_id(), $amount, $reason); return true; }
     function wcpos_pro_payment_id_for_action($provider, $ref) { $GLOBALS['lookups'][] = array($provider, $ref); return $GLOBALS['adopted'][$ref] ?? null; }
@@ -96,7 +96,7 @@ namespace {
     function patwc_reset_world(): void
     {
         $GLOBALS['orders'] = array(); $GLOBALS['options'] = array(); $GLOBALS['ledger'] = array(); $GLOBALS['adopted'] = array(); $GLOBALS['adoptions'] = array(); $GLOBALS['lookups'] = array();
-        $GLOBALS['free_lock_held'] = false; $GLOBALS['filters'] = array(); $GLOBALS['order_ids'] = array(); $GLOBALS['order_queries'] = array(); $GLOBALS['pro_refuses_adoption'] = false; $GLOBALS['pro_processed'] = array(); $GLOBALS['pro_refunds'] = array(); $GLOBALS['cache_cleared'] = array(); $GLOBALS['reads'] = array();
+        $GLOBALS['free_lock_held'] = false; $GLOBALS['filters'] = array(); $GLOBALS['order_ids'] = array(); $GLOBALS['order_queries'] = array(); $GLOBALS['pro_refuses_adoption'] = false; $GLOBALS['pro_processed'] = array(); $GLOBALS['pro_refunds'] = array(); $GLOBALS['cache_cleared'] = array(); $GLOBALS['reads'] = array(); $GLOBALS['clone_orders'] = false;
         WCPOS\WooCommercePOS\PayArcTerminal\Legacy_Adoption::$reader = null;
     }
     function patwc_set_ledger_status(int $order_id, string $row_id, string $status): void
@@ -105,7 +105,7 @@ namespace {
     }
     function check(bool $ok, string $what): void { if (!$ok) { fwrite(STDERR, 'FAILED: ' . $what . "\n"); exit(1); } }
 
-    foreach (array('Settings', 'Logger', 'Utils/Money', 'Utils/PayArcIds', 'PaymentAttempt', 'PaymentLock', 'PaymentReconciler', 'Legacy_Adoption', 'Services/PayArcRequestException', 'Services/PayArcNotSentException') as $file) {
+    foreach (array('Settings', 'Logger', 'Utils/Money', 'Utils/PayArcIds', 'PaymentAttempt', 'PaymentLock', 'PaymentReconciler', 'Legacy_Adoption', 'Server/Sale_Guard', 'Services/PayArcRequestException', 'Services/PayArcNotSentException') as $file) {
         require_once PATWC_PLUGIN_DIR . 'includes/' . $file . '.php';
     }
 }

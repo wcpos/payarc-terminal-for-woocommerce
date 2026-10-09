@@ -18,11 +18,12 @@ use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcRequestException;
  *
  * The old plugin has no sweeper: nothing reads an abandoned attempt except a poll or the callback.
  * So a pointer the in-flight guard no longer believes (older than its thirty-minute window, which
- * is also the window within which the mode and credentials cannot change) is read from PayArc once
- * here: a final answer settles it through the old reconciler, a sale still on the terminal is
- * adopted, and a sale PayArc cannot see under the current credentials holds the panel back. It is
- * never adopted: Pro's adopted row carries a five-minute deadline, and the adapter's cancel of a sale
- * PayArc cannot find answers "requested" for ever.
+ * is also the window within which the mode and credentials cannot change) is read from PayArc once,
+ * when Pro's panel renders that order (never from the upgrade pass, which runs on every request and
+ * makes no HTTP call): a final answer settles it through the old reconciler, a sale still on the
+ * terminal is adopted, and a sale PayArc cannot see under the current credentials, or refuses to
+ * show, holds the panel back. It is never adopted: Pro's adopted row carries a five-minute deadline,
+ * and the adapter's cancel of a sale PayArc cannot find answers "requested" for ever.
  */
 final class Legacy_Adoption
 {
@@ -170,8 +171,32 @@ final class Legacy_Adoption
         }
         $attempt = PaymentAttempt::current($order);
         $trace = isset($attempt['trace_id']) && is_scalar($attempt['trace_id']) ? trim((string) $attempt['trace_id']) : '';
+        if (self::owned_by_pro($order, $trace)) {
+            return true;
+        }
+        // The reference kept at adoption outlives the current pointer (a newer old-panel attempt may
+        // have replaced it), but only a row that reads live keeps ownership through it: an unreadable
+        // row must not make a newer sale's callback vanish.
+        $adopted = (string) $order->get_meta(self::META_ADOPTED, true);
+        if ($adopted === '' || $adopted === $trace || !class_exists(self::LEDGER)) {
+            return false;
+        }
+        $payment_id = wcpos_pro_payment_id_for_action(self::PROVIDER, $adopted);
+        if ($payment_id === null) {
+            return false;
+        }
+        $ledger = self::LEDGER;
+        $row = $ledger::instance()->find($order, (string) $payment_id);
 
-        return self::owned_by_pro($order, $trace) || self::owned_by_pro($order, (string) $order->get_meta(self::META_ADOPTED, true));
+        return $row !== null && in_array($row['status'] ?? '', $ledger::LIVE_STATUSES, true);
+    }
+
+    /** Transport loss, a 5xx or a 429: PayArc may answer the same question later. */
+    private static function unanswered(PayArcRequestException $e): bool
+    {
+        $status = (int) $e->http_status();
+
+        return $status === 0 || $status >= 500 || $status === 429;
     }
 
     /**
@@ -204,10 +229,14 @@ final class Legacy_Adoption
             update_option(self::QUEUE_OPTION, $queue, false);
         }
         foreach (array_slice($queue, 0, self::PAGE_SIZE, true) as $order_id => $unused) {
-            $result = self::adopt_order((int) $order_id);
+            // No PayArc read from the pass: a stale pointer is left to render time, which reads it once.
+            $result = self::adopt_order((int) $order_id, false);
             if (is_wp_error($result) && self::is_deferral($result)) {
-                // A held lock or an unanswered read is a passing state: the order stays in the queue.
+                // A held lock is a passing state: the order stays in the queue, at the back, so one
+                // order a till keeps busy does not stall the rest.
                 Logger::log('Legacy PayArc adoption deferred', array('order_id' => (int) $order_id, 'code' => $result->get_error_code()));
+                unset($queue[$order_id]);
+                $queue[$order_id] = 1;
                 continue;
             }
             if (is_wp_error($result)) {
@@ -232,20 +261,47 @@ final class Legacy_Adoption
     }
 
     /**
+     * A current attempt Pro has captured is finished: close it, so the in-flight guard lets go and the
+     * order says who completed it. PayArc's callback for an adopted sale usually arrives while Pro's
+     * row is still pending and Pro captures by polling, so the old callback route alone cannot be
+     * relied on to close it; the panel's render does it too. True when it closed the attempt.
+     *
+     * @param object $order
+     */
+    public static function close_if_captured($order): bool
+    {
+        $attempt = PaymentAttempt::current($order);
+        $trace = isset($attempt['trace_id']) && is_scalar($attempt['trace_id']) ? trim((string) $attempt['trace_id']) : '';
+        if ($trace === '' || !self::is_live_status((string) ($attempt['status'] ?? '')) || !self::captured_by_pro($order, $trace)) {
+            return false;
+        }
+        PaymentAttempt::update_status($order, 'success', array('trace_id' => $trace));
+        $order->add_order_note('PayArc transaction completed through WooCommerce POS (trace ' . $trace . ').');
+        $order->save();
+
+        return true;
+    }
+
+    /**
      * Adopt the order's live sale, if it has one Pro does not own yet: under Free's per-order lock,
      * on a fresh read, and under the old paths' own per-order locks (the start/cancel lock and the
      * reconciliation lock, so no old request completes or cancels the sale while it changes hands).
      * Run by the upgrade pass for each snapshotted order, and by Pro's panel before it renders, so
      * an attempt the pass has not reached yet is Pro's before the page can offer a second charge.
      *
+     * @param bool $read_stale Whether a pointer the guard no longer believes may be read from PayArc
+     *                         (render time); the upgrade pass passes false and leaves it as it is.
      * @return array|null|\WP_Error The row, null when nothing applied, or a refusal.
      */
-    public static function adopt_order(int $order_id)
+    public static function adopt_order(int $order_id, bool $read_stale = true)
     {
         // Nothing to adopt (no live attempt, or one Pro already has) is the common page load: answer
         // without taking the order lock, which a till may hold for a moment.
         $order = function_exists('wc_get_order') ? wc_get_order($order_id) : false;
         if (!$order) {
+            return null;
+        }
+        if (self::close_if_captured($order)) {
             return null;
         }
         if (!self::has_live_pointer($order) || self::is_adopted(self::action_ref($order)) || $order->is_paid() || !$order->needs_payment()) {
@@ -256,7 +312,7 @@ final class Legacy_Adoption
         }
         $lock = self::ORDER_LOCK;
 
-        return $lock::instance()->with_lock($order_id, static function () use ($order_id) {
+        return $lock::instance()->with_lock($order_id, static function () use ($order_id, $read_stale) {
             if (!PaymentLock::acquire($order_id, 'terminal')) {
                 return new \WP_Error('patwc_adoption_completing', 'A start or cancel of this payment is in progress.');
             }
@@ -270,7 +326,7 @@ final class Legacy_Adoption
                 // that held the old locks a moment ago has written its result by now.
                 $fresh = PaymentReconciler::reload_order(wc_get_order($order_id));
 
-                return is_object($fresh) ? self::judge($fresh) : null;
+                return is_object($fresh) ? self::judge($fresh, $read_stale) : null;
             } catch (Throwable $e) {
                 return new \WP_Error('patwc_adoption_failed', $e->getMessage());
             } finally {
@@ -286,7 +342,7 @@ final class Legacy_Adoption
      * @param object $fresh
      * @return array|null|\WP_Error
      */
-    private static function judge($fresh)
+    private static function judge($fresh, bool $read_stale)
     {
         if ($fresh->is_paid() || !$fresh->needs_payment() || !self::has_live_pointer($fresh)) {
             return null;
@@ -299,9 +355,13 @@ final class Legacy_Adoption
                 // sale may be on the terminal under a key nothing here can replay; wait it out.
                 return new \WP_Error('patwc_adoption_awaiting_trace', 'PayArc has not confirmed the start of this payment yet.');
             }
-            // Never answered, and older than any terminal sale lives: nothing is known to have been sent.
-            PaymentAttempt::update_status($fresh, 'failure', array('message' => 'PayArc never confirmed the start of this payment.'));
-            $fresh->add_order_note('An earlier PayArc Terminal attempt on this order was never confirmed by PayArc and is closed; nothing is known to have been charged. Check the PayArc dashboard before taking payment again.');
+            // PayArc accepted the sale but its answer carried no traceId, so nothing here can poll it, and
+            // older than any terminal sale lives. The terminal may have taken it: close the attempt so the
+            // order is not stuck, and name the sale's own id so staff can find it on the dashboard.
+            $attempt = PaymentAttempt::current($fresh);
+            $transaction_id = isset($attempt['transaction_id']) && is_scalar($attempt['transaction_id']) ? (string) $attempt['transaction_id'] : '';
+            PaymentAttempt::update_status($fresh, 'failure', array('message' => 'PayArc accepted this sale without a reference; it may have reached the terminal.'));
+            $fresh->add_order_note('An earlier PayArc Terminal sale on this order (transaction id ' . $transaction_id . ') was accepted by PayArc without a reference and could not be followed; it may have been charged. It is closed here. Check the PayArc dashboard for that transaction id before taking payment again.');
             $fresh->save();
 
             return null;
@@ -310,6 +370,9 @@ final class Legacy_Adoption
             return null;
         }
         if (!$believed) {
+            if (!$read_stale) {
+                return null; // The upgrade pass: left as it is for render time, which may read it.
+            }
             // Older than the guard's window: the mode or credentials may have changed since. One read
             // decides; a sale PayArc cannot see is never adopted (see the class comment).
             try {
@@ -318,24 +381,43 @@ final class Legacy_Adoption
                 if ($e->payarc_code() === 'TRANSACTION_NOT_FOUND') {
                     return new \WP_Error('patwc_adoption_stale_attempt', 'An earlier PayArc sale on this order is not visible under the current PayArc credentials.');
                 }
+                if (self::unanswered($e)) {
+                    return new \WP_Error('patwc_adoption_unanswered', $e->getMessage());
+                }
 
-                return new \WP_Error('patwc_adoption_unanswered', $e->getMessage());
+                // Refused (credentials, mode, a bad request): asking again changes nothing; staff must look.
+                return new \WP_Error('patwc_adoption_unreadable', $e->getMessage());
             } catch (Throwable $e) {
                 return new \WP_Error('patwc_adoption_unanswered', $e->getMessage());
             }
             $status = PaymentAttempt::normalize_status(isset($transaction['status']) && is_scalar($transaction['status']) ? (string) $transaction['status'] : '');
             if ($status === 'success' || PaymentAttempt::is_final_unpaid($status)) {
                 // Decided on the terminal long ago: the old reconciler settles it (paid, or the failure
-                // recorded), under its own completion claim. Nothing is adopted.
-                (new PaymentReconciler())->reconcile($fresh, $transaction, 'poll');
+                // recorded), under its own completion claim. Nothing is adopted. A completion another
+                // request still holds the claim for is a deferral: the panel must not render beside it.
+                $settled = (new PaymentReconciler())->reconcile($fresh, $transaction, 'poll');
+                if (($settled['status'] ?? '') === 'pending') {
+                    return new \WP_Error('patwc_adoption_completing', 'A completion of this payment is in progress.');
+                }
+                if (in_array($settled['status'] ?? '', array('conflict', 'verification_failed'), true)) {
+                    // The sale does not match the order (another transaction, another amount): the old
+                    // reconciler has noted it. Nothing here may offer a second charge beside it.
+                    return new \WP_Error('patwc_adoption_conflict', (string) ($settled['message'] ?? 'The sale does not match the order.'));
+                }
 
                 return null;
             }
         }
         $row = wcpos_pro_adopt_legacy_attempt($fresh, Settings::GATEWAY_ID, $trace, (string) $fresh->get_total(), (string) $fresh->get_currency());
-        if (is_array($row)) {
-            $fresh->update_meta_data(self::META_ADOPTED, $trace);
-            $fresh->save();
+        if (!is_array($row)) {
+            return is_wp_error($row) ? $row : new \WP_Error('patwc_adoption_failed', 'WCPOS Pro did not adopt the sale.');
+        }
+        $fresh->update_meta_data(self::META_ADOPTED, $trace);
+        $fresh->save();
+        if (class_exists(Server\Sale_Guard::class)) {
+            // While Pro drives the sale the mode and credentials must not change: Pro could then neither
+            // poll nor cancel it. The guard holds thirty minutes at most; no command is held for replay.
+            Server\Sale_Guard::hold((string) $row['id'], (int) $fresh->get_id(), array(), $trace);
         }
 
         return $row;
