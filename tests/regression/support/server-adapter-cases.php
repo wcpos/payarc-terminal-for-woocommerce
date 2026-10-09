@@ -59,6 +59,8 @@ namespace {
     {
         public $parent = 0; public $reason = 'why';
         public function get_parent_id() { return $this->parent; }
+        public $amount = '92.95';
+        public function get_amount() { return $this->amount; }
         public function get_reason() { return $this->reason; }
     }
     function is_wp_error($t) { return $t instanceof WP_Error; }
@@ -318,19 +320,20 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     $rb = json_encode(array('traceId' => '00000000-0000-4000-8000-000000000002', 'transType' => 'SALE', 'status' => 'DECLINE')); // The body lies about the type; the read decides.
     $q = new \WP_REST_Request(); $q->set_body($rb); $q->set_query_params(array('patwc_cb' => 'urltok'));
     $view = static function (string $status): array { return array('traceId' => '00000000-0000-4000-8000-000000000002', 'transType' => '', 'status' => $status, 'metadata' => array('wcpos_refund_id' => '505', 'wcpos_refund_row' => 'r')); }; // No transType on the read: the refund it names still routes it.
+    $refund->meta[Refund_Reask::key(Refund_Reask::META_REQUEST, 'r')] = array('amount' => array('total' => 9295, 'currency' => 'USD')); // The command attempt_key() saved before the POST.
     $c = new QueueClient(); $c->queue = array($view('processing'), $view('DECLINE'), $view('DECLINE'));
     $r = adapter($c)->verify_webhook($q);
     check($r instanceof \WP_Error && $r->get_error_data()['status'] === 200 && $GLOBALS['orders'][99]->notes === array() && $refund->meta[Refund_Reask::key(Refund_Reask::META_TRACE, 'r')] === '00000000-0000-4000-8000-000000000002', 'a refund still on the terminal is acknowledged without a note, and its trace recorded so no re-ask repeats it');
     $r = adapter($c)->verify_webhook($q);
-    check($r instanceof \WP_Error && $r->get_error_data()['status'] === 200 && count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'refund #505 (trace 00000000-0000-4000-8000-000000000002) was not returned: PayArc reports it as DECLINE') !== false && strpos($GLOBALS['orders'][99]->notes[0], 'Delete the record') !== false, 'a refund outcome is noted on the order, naming the part and the trace');
-    // A refund of a split payment has a command per payment row: a failed part never tells staff to delete the whole record.
-    $refund->meta[Refund_Reask::key(Refund_Reask::META_REQUEST, 'other-row')] = array('amount' => array('total' => 100, 'currency' => 'USD'));
-    $refund->meta[Refund_Reask::key(Refund_Reask::META_REQUEST, 'r')] = array('amount' => array('total' => 9295, 'currency' => 'USD'));
+    check($r instanceof \WP_Error && $r->get_error_data()['status'] === 200 && count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'refund #505 (92.95 USD, trace 00000000-0000-4000-8000-000000000002) was not returned: PayArc reports it as DECLINE') !== false && strpos($GLOBALS['orders'][99]->notes[0], 'Delete the record') !== false, 'a refund outcome is noted on the order, naming the part and the trace');
+    // A refund of a split payment is one record: when this part is less than the record (the rest went to
+    // another PayArc row, or to cash, which PayArc's meta cannot see), a failed part never says to delete it.
+    $refund->amount = '112.95';
     unset($refund->meta[Refund_Reask::key('_patwc_refund_outcome', 'r')]);
     $c->queue = array($view('DECLINE'));
     adapter($c)->verify_webhook($q);
     check(count($GLOBALS['orders'][99]->notes) === 2 && strpos($GLOBALS['orders'][99]->notes[1], 'refund #505 (92.95 USD, trace 00000000-0000-4000-8000-000000000002) was not returned') !== false && strpos($GLOBALS['orders'][99]->notes[1], 'Other parts of this refund') !== false && strpos($GLOBALS['orders'][99]->notes[1], 'Delete the record') === false, 'a failed part of a split refund names its amount and keeps the record');
-    unset($refund->meta[Refund_Reask::key(Refund_Reask::META_REQUEST, 'other-row')], $refund->meta[Refund_Reask::key(Refund_Reask::META_REQUEST, 'r')]);
+    $refund->amount = '92.95'; unset($refund->meta[Refund_Reask::key(Refund_Reask::META_REQUEST, 'r')]);
     check($GLOBALS['orders'][99]->paid === false, 'a refund is never settled against a sale row');
     adapter($c)->verify_webhook($q);
     check(count($GLOBALS['orders'][99]->notes) === 2, 'the same outcome is noted once');

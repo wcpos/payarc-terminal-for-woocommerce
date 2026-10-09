@@ -196,28 +196,34 @@ final class Refund_Reask
         $trace = is_object($refund) ? (string) $refund->get_meta(self::key(self::META_TRACE, $row_id), true) : '';
         $detail = implode(', ', array_filter(array($amount, $trace !== '' ? 'trace ' . $trace : '')));
 
+        if ($detail === '') {
+            /* translators: %d: refund id. */
+            return sprintf(__('refund #%d', 'payarc-terminal-for-woocommerce'), $refund_id);
+        }
+
         /* translators: 1: refund id, 2: amount and trace, e.g. "92.95 USD, trace abc". */
-        return $detail === '' ? sprintf(__('refund #%d', 'payarc-terminal-for-woocommerce'), $refund_id) : sprintf(__('refund #%1$d (%2$s)', 'payarc-terminal-for-woocommerce'), $refund_id, $detail);
+        return sprintf(__('refund #%1$d (%2$s)', 'payarc-terminal-for-woocommerce'), $refund_id, $detail);
     }
 
     /**
-     * When the record has commands for other payment rows, the advice must keep them: those parts may have
-     * been returned.
+     * The advice. "Delete the record" only when this part is the whole record: a refund of a split payment is
+     * one record whose other parts (another PayArc row, cash, any manual method) may have been returned, and
+     * PayArc's own meta cannot see a cash part, so the record's amount decides.
      *
      * @param object|null $refund
      */
     private static function other_parts_hint(string $row_id, $refund): string
     {
-        $others = 0;
-        if (is_object($refund) && method_exists($refund, 'get_meta_data')) {
-            foreach ($refund->get_meta_data() as $meta) {
-                $key = is_object($meta) && isset($meta->key) ? (string) $meta->key : '';
-                if (strpos($key, self::META_REQUEST . ':') === 0 && $key !== self::key(self::META_REQUEST, $row_id)) {
-                    ++$others;
-                }
+        $request = is_object($refund) ? (array) $refund->get_meta(self::key(self::META_REQUEST, $row_id), true) : array();
+        $whole = false;
+        if (is_object($refund) && method_exists($refund, 'get_amount') && isset($request['amount']['total'], $request['amount']['currency'])) {
+            try {
+                $whole = \WCPOS\WooCommercePOSPro\Payments\Server\Money_Units::minor((string) $refund->get_amount(), (string) $request['amount']['currency']) === (int) $request['amount']['total'];
+            } catch (Throwable $e) {
+                $whole = false;
             }
         }
-        if ($others === 0) {
+        if ($whole) {
             return ' ' . __('Delete the record, then refund from the PayArc dashboard or the terminal if the money is owed.', 'payarc-terminal-for-woocommerce');
         }
 
