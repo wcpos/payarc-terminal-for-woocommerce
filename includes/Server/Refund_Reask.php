@@ -158,8 +158,8 @@ final class Refund_Reask
         Logger::log('PayArc never answered a refund; staff asked to check the dashboard', array('refund_id' => $refund_id), null, 'warning');
         $refund = wc_get_order($refund_id);
         $order->add_order_note(sprintf(
-            /* translators: 1: the refund part, e.g. "refund #12 (92.95 USD)"; 2: the record's other parts, or empty. */
-            __('PayArc has not confirmed %1$s. Check the PayArc dashboard: if that refund is there, nothing more is needed; if not, that part was never returned.%2$s', 'payarc-terminal-for-woocommerce'),
+            /* translators: 1: the refund part, e.g. "refund #12 (92.95 USD)"; 2: the advice when the refund is not on the dashboard. */
+            __('PayArc has not confirmed %1$s. Check the PayArc dashboard. If that refund is there, nothing more is needed. Only if it is not there was that part never returned; the record still counts it as refunded here.%2$s', 'payarc-terminal-for-woocommerce'),
             self::part_label($refund_id, $row_id, $refund),
             self::other_parts_hint($row_id, $refund)
         ));
