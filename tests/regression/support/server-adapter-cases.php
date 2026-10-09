@@ -71,21 +71,36 @@ namespace {
     function wcpos_pro_payment_id_for_action($provider, $ref) { $GLOBALS['lookups'][] = $ref; return $GLOBALS['adopted'][$ref] ?? null; }
     function wp_json_encode($d) { return json_encode($d); }
     function apply_filters($h, $v) { return $v; }
-    function get_option($k, $d = false) { return $GLOBALS['options'][$k] ?? $d; }
+    function get_option($k, $d = false) { if (!empty($GLOBALS['notoptions'][$k])) { return $d; } return $GLOBALS['options'][$k] ?? $d; }
+    function is_serialized($d) { return is_string($d) && (strpos($d, 'a:') === 0 || strpos($d, 's:') === 0 || strpos($d, 'i:') === 0 || $d === 'b:0;' || strpos($d, 'b:') === 0 || strpos($d, 'd:') === 0 || $d === 'N;'); }
     function update_option($k, $v, $autoload = null) { $GLOBALS['options'][$k] = $v; return true; }
     function delete_option($k) { unset($GLOBALS['options'][$k]); return true; }
-    /** The one options-table query Sale_Guard runs: every option name under its prefix. */
+    /**
+     * The options table as Sale_Guard reads it: the rows under its prefix, and a compare-and-delete.
+     * $GLOBALS['options'] is the table; $GLOBALS['notoptions'] names rows the object cache wrongly
+     * lists as missing, which get_option() honours and the table does not.
+     */
     class PatwcGuardWpdb
     {
         public $options = 'wp_options';
+        public $last_error = '';
         public function esc_like($s) { return addcslashes($s, '_%\\'); }
         public function prepare($q, ...$a) { return json_encode(array($q, $a)); }
-        public function get_col($prepared)
+        public function get_results($prepared, $output = null)
         {
             list($sql, $args) = json_decode($prepared, true);
-            if ($sql !== "SELECT option_name FROM {$this->options} WHERE option_name LIKE %s") { throw new \RuntimeException('guard wpdb: unsupported query: ' . $sql); }
+            if ($sql !== "SELECT option_name, option_value FROM {$this->options} WHERE option_name LIKE %s") { throw new \RuntimeException('guard wpdb: unsupported query: ' . $sql); }
             $prefix = stripcslashes(substr($args[0], 0, -1));
-            return array_values(array_filter(array_keys($GLOBALS['options']), static function ($k) use ($prefix) { return strpos((string) $k, $prefix) === 0; }));
+            $rows = array();
+            foreach ($GLOBALS['options'] as $k => $v) { if (strpos((string) $k, $prefix) === 0) { $rows[] = array('option_name' => (string) $k, 'option_value' => serialize($v)); } }
+            return $rows;
+        }
+        public function query($prepared)
+        {
+            list($sql, $args) = json_decode($prepared, true);
+            if ($sql !== "DELETE FROM {$this->options} WHERE option_name = %s AND option_value = %s") { throw new \RuntimeException('guard wpdb: unsupported query: ' . $sql); }
+            if (isset($GLOBALS['options'][$args[0]]) && serialize($GLOBALS['options'][$args[0]]) === $args[1]) { unset($GLOBALS['options'][$args[0]]); return 1; }
+            return 0;
         }
     }
     $GLOBALS['wpdb'] = new PatwcGuardWpdb();
@@ -136,7 +151,7 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     {
         return array('transactionId' => 'P1ABCDEF12345678', 'transType' => 'SALE', 'status' => 'APPROVED', 'chargeId' => 'ch_1', 'authCode' => 'A1', 'amount' => array('total' => 9295, 'subtotal' => 9295, 'approved' => 9295, 'currency' => 'USD'), 'card' => array('brand' => 'VISA', 'entryMode' => 'CHIP', 'last4' => '4242'), 'processor' => array('responseCode' => '00', 'responseText' => 'Approved'), 'traceId' => $trace, 'metadata' => array('wcpos_payment_id' => 'aaaaaaaa-1111-4222-8333-444455556666', 'terminal_id' => '1234567890')) + $extra;
     }
-    function reset(): void { $GLOBALS['orders'] = array(99 => new \PatwcOrder(99)); $GLOBALS['events'] = array(); $GLOBALS['adopted'] = array(); $GLOBALS['lookups'] = array(); $GLOBALS['uuid'] = 0; $GLOBALS['options'] = array(); }
+    function reset(): void { $GLOBALS['orders'] = array(99 => new \PatwcOrder(99)); $GLOBALS['events'] = array(); $GLOBALS['adopted'] = array(); $GLOBALS['lookups'] = array(); $GLOBALS['uuid'] = 0; $GLOBALS['options'] = array(); $GLOBALS['notoptions'] = array(); }
     $row = array('id' => 'aaaaaaaa-1111-4222-8333-444455556666', 'order_id' => 99, 'amount' => '92.95', 'currency' => 'USD', 'provider_refs' => array());
 
     // Create: the row id is the key; a lost answer, a 5xx and a key conflict are indeterminate; a refusal is final.
@@ -159,6 +174,13 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     Sale_Guard::hold('second-till', 7, array('y' => 2));
     Sale_Guard::release('second-till');
     check(Sale_Guard::any_live(), 'releasing another till\'s sale leaves this one holding the guard');
+    // A marker only the table knows of (another process wrote it, and this one's object cache lists it as missing) holds the guard and survives.
+    $GLOBALS['options']['patwc_pro_sale_' . md5('other-process')] = array('order_id' => 5, 'trace_id' => '', 'payload' => array('z' => 1), 'updated_at' => time());
+    $GLOBALS['notoptions']['patwc_pro_sale_' . md5('other-process')] = true;
+    Sale_Guard::release($row['id']);
+    check(Sale_Guard::any_live() && isset($GLOBALS['options']['patwc_pro_sale_' . md5('other-process')]), 'a marker the object cache lists as missing still holds the guard, and is not deleted');
+    $GLOBALS['notoptions'] = array(); unset($GLOBALS['options']['patwc_pro_sale_' . md5('other-process')]);
+    Sale_Guard::hold($row['id'], 99, $sent, 't1');
     $GLOBALS['options']['patwc_pro_sale_' . md5('old')] = array('order_id' => 1, 'trace_id' => '', 'payload' => array(), 'updated_at' => time() - 1801);
     check(!Sale_Guard::held('old') && Sale_Guard::any_live() && !isset($GLOBALS['options']['patwc_pro_sale_' . md5('old')]), 'a stale marker neither holds the guard nor survives the pass');
     // A replay the client cannot send is indeterminate: the first command may be on the terminal.

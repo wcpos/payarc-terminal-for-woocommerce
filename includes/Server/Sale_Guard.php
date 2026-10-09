@@ -7,7 +7,7 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Server;
  * answer is the byte-identical command under the same key), and a hold on the gateway's mode,
  * credentials and Connect state until the sale ends (PaymentAttempt::has_in_flight_attempts() reads
  * any_live()). Each marker is its own option and nothing indexes them: two tills never overwrite
- * each other's, and any_live() finds every marker by its option-name prefix. A marker goes stale
+ * each other's, and any_live() finds every marker by its option-name prefix in the table itself. A marker goes stale
  * after thirty minutes, well past Free's deadline, so none holds for ever; stale ones are deleted
  * as any_live() passes them.
  */
@@ -43,16 +43,39 @@ final class Sale_Guard
         delete_option(self::option($row_id));
     }
 
-    /** Whether any Pro sale may still be on a terminal. */
+    /**
+     * Whether any Pro sale may still be on a terminal.
+     *
+     * Judged from the options table itself, never through get_option(): a persistent object cache
+     * can list a marker as missing for a moment after it was written. A row is deleted only when
+     * the value read from the table proved stale, and only if it is still that value. When the
+     * table cannot be read, a sale is assumed live: the guard fails closed.
+     */
     public static function any_live(): bool
     {
+        global $wpdb;
+        if (!function_exists('get_option') || !is_object($wpdb) || !method_exists($wpdb, 'get_results')) {
+            return false; // Plain PHP, no WordPress: nothing can be on a terminal.
+        }
+        $like = method_exists($wpdb, 'esc_like') ? $wpdb->esc_like(self::OPTION_PREFIX) : self::OPTION_PREFIX;
+        $rows = $wpdb->get_results($wpdb->prepare("SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name LIKE %s", $like . '%'), 'ARRAY_A');
+        if (!is_array($rows)) {
+            return true;
+        }
         $live = false;
-        foreach (self::option_names() as $name) {
-            if (self::fresh(get_option($name, null)) !== null) {
+        foreach ($rows as $row) {
+            $raw = (string) ($row['option_value'] ?? '');
+            $value = is_serialized($raw) ? @unserialize($raw) : $raw;
+            if (self::fresh($value) !== null) {
                 $live = true;
                 continue;
             }
-            delete_option($name); // Stale, or not a marker at all: housekeeping on the way past.
+            // Stale: housekeeping on the way past, and only if the row is still what was read.
+            $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s", (string) $row['option_name'], $raw));
+            if (function_exists('wp_cache_delete')) {
+                wp_cache_delete((string) $row['option_name'], 'options');
+                wp_cache_delete('notoptions', 'options');
+            }
         }
 
         return $live;
@@ -74,22 +97,5 @@ final class Sale_Guard
         }
 
         return $entry;
-    }
-
-    /**
-     * Every marker's option name, straight from the options table (option_name is indexed).
-     *
-     * @return string[]
-     */
-    private static function option_names(): array
-    {
-        global $wpdb;
-        if (!function_exists('get_option') || !is_object($wpdb) || !method_exists($wpdb, 'get_col')) {
-            return array();
-        }
-        $like = method_exists($wpdb, 'esc_like') ? $wpdb->esc_like(self::OPTION_PREFIX) : self::OPTION_PREFIX;
-        $names = $wpdb->get_col($wpdb->prepare("SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s", $like . '%'));
-
-        return is_array($names) ? array_map('strval', $names) : array();
     }
 }
