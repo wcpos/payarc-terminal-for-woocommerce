@@ -327,9 +327,10 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
             $trace_id = $this->refund_once($request, $key);
             $refund->update_meta_data(Refund_Reask::key(Refund_Reask::META_TRACE, $row_id), $trace_id);
             $refund->save();
+            Refund_Reask::schedule_outcome($refund, $row_id);
             // The terminal decides; a quick read may already know.
             try {
-                $observation = self::normalize($this->client->get_transaction($trace_id));
+                $observation = $this->read_refund($trace_id);
             } catch (Throwable $e) {
                 $observation = array('status' => 'pending');
             }
@@ -354,6 +355,15 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
             // A read before the POST that went unanswered made nothing; an unanswered POST may have.
             return $key !== null ? $this->refund_unanswered($order, $refund_id, $row_id, $e) : $this->indeterminate('payarc_unanswered', $e->getMessage());
         }
+    }
+
+    /** Authenticated status read, sharing the callback's refund outcome handling. */
+    public function read_refund(string $trace_id): array
+    {
+        $transaction = $this->client->get_transaction($trace_id);
+        $this->refund_callback($transaction, $trace_id);
+
+        return self::normalize($transaction);
     }
 
     /**
@@ -544,6 +554,7 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         }
         $status = PaymentAttempt::normalize_status(self::scalar($transaction, 'status'));
         if (!($status === 'success' || PaymentAttempt::is_final_unpaid($status))) {
+            Refund_Reask::schedule_outcome($refund, $row_id);
             return new \WP_Error('payarc_webhook_ignored', __('Refund still on the terminal.', 'payarc-terminal-for-woocommerce'), array('status' => 200)); // Not decided yet: nothing to tell staff.
         }
         $outcome_key = Refund_Reask::key('_patwc_refund_outcome', $row_id);

@@ -16,11 +16,15 @@ use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcRequestException;
  * sent as X-Idempotency-Key; when the POST goes unanswered the record stands as pending, the order
  * says so, and this cron replays the identical request under the same key (PayArc: "reuse the same
  * key only when retrying the same payload") until PayArc answers with the refund's traceId or the
- * tries run out with a note for staff. The refund's outcome itself arrives on the callback.
+ * tries run out with a note for staff. A trace starts bounded outcome reads in case no callback arrives.
  */
 final class Refund_Reask
 {
     public const HOOK = 'patwc_reask_refund';
+    public const OUTCOME_HOOK = 'patwc_reconcile_refund';
+    /** Bounded status reads after acceptance, backing off to allow the terminal to finish. */
+    public const OUTCOME_DELAYS = array(60, 300, 900, 3600);
+    public const META_RECONCILE = '_patwc_refund_reconcile';
     /** Seconds between asks. */
     public const DELAY = 120;
     /** Silent tries before staff are told to check the PayArc dashboard (about ten minutes). */
@@ -45,6 +49,50 @@ final class Refund_Reask
     public static function register(): void
     {
         add_action(self::HOOK, array(__CLASS__, 'run'), 10, 4);
+        add_action(self::OUTCOME_HOOK, array(__CLASS__, 'reconcile'), 10, 3);
+    }
+
+    /** Schedule only reads once a trace exists; a callback or exhausted budget prevents restarting. */
+    public static function schedule_outcome($refund, string $row_id, int $try = 1): void
+    {
+        $key = self::key(self::META_RECONCILE, $row_id);
+        if ((string) $refund->get_meta(self::key('_patwc_refund_outcome', $row_id), true) !== ''
+            || ($try === 1 && (string) $refund->get_meta($key, true) !== '')) {
+            return;
+        }
+        $delay = self::OUTCOME_DELAYS[$try - 1] ?? null;
+        $refund->update_meta_data($key, $delay === null ? 'exhausted' : (string) $try);
+        $refund->save();
+        if ($delay !== null && !wp_schedule_single_event(time() + $delay, self::OUTCOME_HOOK, array((int) $refund->get_id(), $row_id, $try))) {
+            $refund->update_meta_data($key, 'schedule_failed');
+            $refund->save();
+        }
+    }
+
+    /** Re-read the accepted refund, never resend it; the callback path owns all final order updates. */
+    public static function reconcile(int $refund_id, string $row_id, int $try = 1, $adapter = null): void
+    {
+        $refund = wc_get_order($refund_id);
+        if (!$refund instanceof \WC_Order_Refund
+            || (string) $refund->get_meta(self::key('_patwc_refund_outcome', $row_id), true) !== ''
+            || (string) $refund->get_meta(self::key(self::META_RECONCILE, $row_id), true) !== (string) $try) {
+            return;
+        }
+        $trace_id = (string) $refund->get_meta(self::key(self::META_TRACE, $row_id), true);
+        if ($trace_id === '') {
+            return;
+        }
+        try {
+            $adapter = $adapter === null ? new PayArc_Server_Provider() : $adapter;
+            $adapter->read_refund($trace_id);
+        } catch (Throwable $e) {
+            // A lost read is not evidence of failure; consume this try and ask again within the budget.
+        }
+        // The callback handler may have saved the outcome through another order instance.
+        $refund = wc_get_order($refund_id);
+        if ($refund instanceof \WC_Order_Refund) {
+            self::schedule_outcome($refund, $row_id, $try + 1);
+        }
     }
 
     /**
@@ -105,7 +153,11 @@ final class Refund_Reask
             return;
         }
         $order = wc_get_order((int) $refund->get_parent_id());
-        if (!$order || (string) $refund->get_meta(self::key(self::META_TRACE, $row_id), true) !== '') {
+        if (!$order) {
+            return;
+        }
+        if ((string) $refund->get_meta(self::key(self::META_TRACE, $row_id), true) !== '') {
+            self::schedule_outcome($refund, $row_id);
             return;
         }
         $key = (string) $refund->get_meta(self::key(self::META_ATTEMPT, $row_id), true);
@@ -141,6 +193,7 @@ final class Refund_Reask
         }
         $refund->update_meta_data(self::key(self::META_TRACE, $row_id), $trace_id);
         $refund->save();
+        self::schedule_outcome($refund, $row_id);
         /* translators: 1: refund id, 2: PayArc traceId. */
         $order->add_order_note(sprintf(__('PayArc accepted refund #%1$d (trace %2$s); the terminal reports its outcome.', 'payarc-terminal-for-woocommerce'), $refund_id, $trace_id));
         $order->save();

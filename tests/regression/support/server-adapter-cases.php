@@ -67,7 +67,7 @@ namespace {
     function __($t, $d = '') { return $t; }
     function wc_get_order($id) { return $GLOBALS['orders'][$id] ?? false; }
     function add_action($h, $c, $p = 10, $a = 1) { $GLOBALS['actions'][$h][] = $c; }
-    function wp_schedule_single_event($t, $h, $args = array()) { $GLOBALS['events'][] = array($h, $args); return true; }
+    function wp_schedule_single_event($t, $h, $args = array()) { $GLOBALS['event_times'][] = $t; $GLOBALS['events'][] = array($h, $args); return true; }
     function wp_generate_uuid4() { return sprintf('%08x-0000-4000-8000-%012x', ++$GLOBALS['uuid'], $GLOBALS['uuid']); }
     function rest_url($p = '') { return 'https://store.test/wp-json/' . $p; }
     function add_query_arg($args, $url = '') { return $url . '?' . http_build_query($args); }
@@ -271,6 +271,8 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     $c = new QueueClient(); $c->queue = array(array('traceId' => 'rf2'), array('status' => 'processing', 'traceId' => 'rf2'));
     $r = adapter($c)->refund(array('id' => 'h', 'currency' => 'USD', 'provider_refs' => array('transaction_id' => 'ch_old')), 502, '5.00');
     check($r['status'] === 'pending' && $r['provider_ref'] === 'rf2' && $c->calls[0][1][0]['originalTransactionId'] === 'POLD000000000001', 'a historical row refunds through the old attempt that carries its charge id, pending until the terminal answers');
+    check(end($GLOBALS['events']) === array('patwc_reconcile_refund', array(502, 'h', 1)), 'immediate_pending_schedules_reconciliation');
+    check(abs(end($GLOBALS['event_times']) - time() - 60) <= 1, 'first_read_waits_one_minute');
     // Unanswered POST: pending, note, re-ask under the same key; a read before the POST is an error with nothing scheduled.
     reset(); $refund = new \WC_Order_Refund(503); $refund->parent = 99; $GLOBALS['orders'][503] = $refund;
     $c = new QueueClient(); $c->queue = array(new \RuntimeException('PayArc request failed before receiving a response.'));
@@ -288,6 +290,7 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     $c = new QueueClient(); $c->queue = array(array('traceId' => 'rf3'));
     Refund_Reask::run(503, 3, 99, 'r', adapter($c));
     check($c->calls[0][1][1] === $key && $c->calls[0][1][0]['originalTransactionId'] === 'P1ABCDEF12345678' && $refund->meta[Refund_Reask::key(Refund_Reask::META_TRACE, 'r')] === 'rf3', 'the re-ask replays the identical request under the saved key and records the traceId');
+    check(end($GLOBALS['events']) === array('patwc_reconcile_refund', array(503, 'r', 1)), 'saved_trace_schedules_reconciliation');
     Refund_Reask::run(503, 4, 99, 'r', adapter($c));
     check(count($c->calls) === 1, 'an answered record is not asked again');
     reset(); $refund = new \WC_Order_Refund(504); $refund->parent = 99; $GLOBALS['orders'][504] = $refund;
@@ -345,6 +348,48 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     check($GLOBALS['orders'][99]->paid === false, 'a refund is never settled against a sale row');
     adapter($c)->verify_webhook($q);
     check(count($GLOBALS['orders'][99]->notes) === 2, 'the same outcome is noted once');
+
+    // Bounded reads use the callback's real outcome path, never a refund POST.
+    Refund_Reask::register();
+    check(isset($GLOBALS['actions']['patwc_reconcile_refund']), 'reconciliation_hook_registered');
+    $callback_notes = $GLOBALS['orders'][99]->notes;
+    $calls = count($c->calls); $event_count = count($GLOBALS['events']);
+    Refund_Reask::reconcile(505, 'r', 1, adapter($c));
+    check(count($c->calls) === $calls && count($GLOBALS['events']) === $event_count && $GLOBALS['orders'][99]->notes === $callback_notes, 'callback_first_skips_read_and_note');
+    foreach (array('APPROVED' => 'success', 'DECLINE' => 'decline') as $status => $outcome) {
+        reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+        $c = new QueueClient(); $c->queue = array(array('traceId' => $view($status)['traceId']), new \RuntimeException('lost read'));
+        check(adapter($c)->refund($leg, 505, '5.00')['status'] === 'pending', 'failed_immediate_read_stays_pending');
+        check(end($GLOBALS['events']) === array('patwc_reconcile_refund', array(505, 'r', 1)), 'failed_immediate_read_schedules_reconciliation');
+        $GLOBALS['events'] = array(); $c = new QueueClient(); $c->queue = array($view($status));
+        Refund_Reask::reconcile(505, 'r', 1, adapter($c));
+        check($refund->get_meta('_patwc_refund_outcome:r') === $outcome && count($GLOBALS['orders'][99]->notes) === 1 && $GLOBALS['events'] === array(), 'scheduled_final_records_outcome_and_stops_' . $status);
+        $notes = $GLOBALS['orders'][99]->notes;
+        unset($refund->meta['_patwc_refund_outcome:r']); $GLOBALS['orders'][99]->notes = array();
+        $c->queue = array($view($status)); adapter($c)->verify_webhook($q);
+        check($GLOBALS['orders'][99]->notes === $notes, 'scheduled_final_matches_callback_' . $status);
+        Refund_Reask::reconcile(505, 'r', 1, adapter($c));
+        check($c->calls === array(array('get', array($view($status)['traceId'])), array('get', array($view($status)['traceId']))), 'final_replay_never_reads_or_resends_refund');
+        reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+        $c = new QueueClient(); $c->queue = array(array('traceId' => $view($status)['traceId']), $view($status));
+        adapter($c)->refund($leg, 505, '5.00');
+        Refund_Reask::reconcile(505, 'r', 1, adapter($c));
+        check(count($c->calls) === 2 && $refund->get_meta('_patwc_refund_outcome:r') === $outcome, 'immediate_final_prevents_scheduled_read_' . $status);
+    }
+    reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+    $c = new QueueClient(); $c->queue = array(array('traceId' => $view('processing')['traceId']), $view('processing'));
+    adapter($c)->refund($leg, 505, '5.00');
+    $c = new QueueClient(); $c->queue = array($view('processing'), new \RuntimeException('lost'), $view('processing'), $view('processing'));
+    for ($try = 1; $try <= 4; $try++) {
+        $GLOBALS['events'] = array();
+        Refund_Reask::reconcile(505, 'r', $try, adapter($c));
+        check($GLOBALS['events'] === ($try < 4 ? array(array('patwc_reconcile_refund', array(505, 'r', $try + 1))) : array()), 'pending_or_failed_read_has_bounded_backoff_' . $try);
+        if ($try < 4) { check(abs(end($GLOBALS['event_times']) - time() - array(300, 900, 3600)[$try - 1]) <= 1, 'backoff_delay_' . $try); }
+    }
+    check($refund->get_meta('_patwc_refund_reconcile:r') === 'exhausted' && $refund->get_meta('_patwc_refund_outcome:r') === '', 'exhaustion_records_reason_without_inventing_outcome');
+    Refund_Reask::reconcile(505, 'r', 4, adapter($c));
+    Refund_Reask::run(505, 1, 99, 'r', adapter($c));
+    check(array_column($c->calls, 0) === array('get', 'get', 'get', 'get') && $GLOBALS['events'] === array(), 'exhausted_trace_never_restarts_or_resends');
 
     echo "server-adapter cases passed\n";
 }
