@@ -65,9 +65,11 @@ namespace {
     }
     function is_wp_error($t) { return $t instanceof WP_Error; }
     function __($t, $d = '') { return $t; }
-    function wc_get_order($id) { return $GLOBALS['orders'][$id] ?? false; }
+    function wc_get_order($id) { return $GLOBALS['stale_orders'][$id] ?? $GLOBALS['orders'][$id] ?? false; }
+    function clean_post_cache($id) { unset($GLOBALS['stale_orders'][$id]); }
     function add_action($h, $c, $p = 10, $a = 1) { $GLOBALS['actions'][$h][] = $c; }
-    function wp_schedule_single_event($t, $h, $args = array()) { $GLOBALS['event_times'][] = $t; $GLOBALS['events'][] = array($h, $args); return true; }
+    function wp_schedule_single_event($t, $h, $args = array()) { if (!empty($GLOBALS['schedule_false'])) { return false; } $GLOBALS['event_times'][] = $t; $GLOBALS['events'][] = array($h, $args); return true; }
+    function wp_next_scheduled($h, $args = array()) { return in_array(array($h, $args), $GLOBALS['events'], true) ? time() + 60 : false; }
     function wp_generate_uuid4() { return sprintf('%08x-0000-4000-8000-%012x', ++$GLOBALS['uuid'], $GLOBALS['uuid']); }
     function rest_url($p = '') { return 'https://store.test/wp-json/' . $p; }
     function add_query_arg($args, $url = '') { return $url . '?' . http_build_query($args); }
@@ -118,7 +120,7 @@ namespace {
     $GLOBALS['wpdb'] = new PatwcGuardWpdb();
 
     $root = dirname(__DIR__, 3);
-    foreach (array('Settings', 'Logger', 'PaymentAttempt', 'Utils/Money', 'Utils/PayArcIds', 'Services/PayArcRequestException', 'Services/PayArcNotSentException', 'Services/PayArcClient', 'Services/TerminalService', 'Server/Sale_Guard', 'Server/Refund_Reask', 'Server/PayArc_Server_Provider') as $file) {
+    foreach (array('Settings', 'Logger', 'PaymentAttempt', 'PaymentReconciler', 'Utils/Money', 'Utils/PayArcIds', 'Services/PayArcRequestException', 'Services/PayArcNotSentException', 'Services/PayArcClient', 'Services/TerminalService', 'Server/Sale_Guard', 'Server/Refund_Reask', 'Server/PayArc_Server_Provider') as $file) {
         require_once $root . '/includes/' . $file . '.php';
     }
 }
@@ -163,7 +165,7 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     {
         return array('transactionId' => 'P1ABCDEF12345678', 'transType' => 'SALE', 'status' => 'APPROVED', 'chargeId' => 'ch_1', 'authCode' => 'A1', 'amount' => array('total' => 9295, 'subtotal' => 9295, 'approved' => 9295, 'currency' => 'USD'), 'card' => array('brand' => 'VISA', 'entryMode' => 'CHIP', 'last4' => '4242'), 'processor' => array('responseCode' => '00', 'responseText' => 'Approved'), 'traceId' => $trace, 'metadata' => array('wcpos_payment_id' => 'aaaaaaaa-1111-4222-8333-444455556666', 'terminal_id' => '1234567890')) + $extra;
     }
-    function reset(): void { $GLOBALS['orders'] = array(99 => new \PatwcOrder(99)); $GLOBALS['events'] = array(); $GLOBALS['adopted'] = array(); $GLOBALS['lookups'] = array(); $GLOBALS['uuid'] = 0; $GLOBALS['options'] = array(); $GLOBALS['notoptions'] = array(); }
+    function reset(): void { $GLOBALS['stale_orders'] = array(); $GLOBALS['schedule_false'] = false; $GLOBALS['orders'] = array(99 => new \PatwcOrder(99)); $GLOBALS['events'] = array(); $GLOBALS['adopted'] = array(); $GLOBALS['lookups'] = array(); $GLOBALS['uuid'] = 0; $GLOBALS['options'] = array(); $GLOBALS['notoptions'] = array(); }
     $row = array('id' => 'aaaaaaaa-1111-4222-8333-444455556666', 'order_id' => 99, 'amount' => '92.95', 'currency' => 'USD', 'provider_refs' => array());
 
     // Create: the row id is the key; a lost answer, a 5xx and a key conflict are indeterminate; a refusal is final.
@@ -390,6 +392,58 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     Refund_Reask::reconcile(505, 'r', 4, adapter($c));
     Refund_Reask::run(505, 1, 99, 'r', adapter($c));
     check(array_column($c->calls, 0) === array('get', 'get', 'get', 'get') && $GLOBALS['events'] === array(), 'exhausted_trace_never_restarts_or_resends');
+    check(count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'refund #505') !== false && strpos($GLOBALS['orders'][99]->notes[0], 'still unknown; verify it manually') !== false, 'exhaustion_warns_staff_once_with_refund_identity');
+
+    // False can mean an identical event already exists, or a genuine scheduling failure.
+    foreach (array(false, true) as $duplicate) {
+        reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+        $refund->meta['_patwc_refund_trace_id:r'] = $view('processing')['traceId'];
+        $GLOBALS['schedule_false'] = true;
+        $GLOBALS['events'] = array(array('patwc_reconcile_refund', array(505, 'r', $duplicate ? 1 : 2)));
+        Refund_Reask::schedule_outcome($refund, 'r');
+        check($refund->get_meta('_patwc_refund_reconcile:r') === ($duplicate ? '1' : 'schedule_failed'), 'schedule_false_preserves_only_identical_event_' . (int) $duplicate);
+        check(count($GLOBALS['orders'][99]->notes) === ($duplicate ? 0 : 1), 'only_genuine_schedule_failure_warns_staff');
+        $GLOBALS['schedule_false'] = false;
+        if (!$duplicate) {
+            $GLOBALS['events'] = array(); Refund_Reask::run(505, 1, 99, 'r');
+            check($refund->get_meta('_patwc_refund_reconcile:r') === '1' && count($GLOBALS['events']) === 1, 'trace_retries_failed_schedule');
+            $refund->meta['_patwc_refund_reconcile:r'] = 'schedule_failed'; $GLOBALS['events'] = array();
+            $c = new QueueClient(); $c->queue = array($view('processing')); adapter($c)->verify_webhook($q);
+            check($refund->get_meta('_patwc_refund_reconcile:r') === '1' && count($GLOBALS['events']) === 1, 'callback_retries_failed_schedule');
+        }
+    }
+
+    foreach (array('schedule', 'reconcile', 'callback') as $entry) {
+        reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+        $refund->meta = array('_patwc_refund_trace_id:r' => $view('APPROVED')['traceId'], '_patwc_refund_reconcile:r' => '1');
+        $GLOBALS['stale_orders'][505] = clone $refund; $refund->meta['_patwc_refund_outcome:r'] = 'success';
+        $c = new QueueClient(); $c->queue = array($view('APPROVED'));
+        if ($entry === 'schedule') { Refund_Reask::schedule_outcome($GLOBALS['stale_orders'][505], 'r', 2); }
+        elseif ($entry === 'reconcile') { Refund_Reask::reconcile(505, 'r', 1, adapter($c)); }
+        else { adapter($c)->verify_webhook($q); }
+        check(count($c->calls) === ($entry === 'callback' ? 1 : 0) && $GLOBALS['events'] === array() && $GLOBALS['orders'][99]->notes === array(), 'fresh_final_prevents_repeat_' . $entry);
+    }
+
+    // A read can omit metadata: only a matching saved trace supplies the refund identity.
+    foreach (array('immediate', 'scheduled', 'mismatch', 'missing', 'refused') as $case) {
+        reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+        $final = $view('APPROVED'); unset($final['metadata']);
+        if ($case === 'refused') { $final['metadata'] = array('wcpos_refund_id' => '999', 'wcpos_refund_row' => 'r'); }
+        $refund->meta = array('_patwc_refund_trace_id:r' => $case === 'mismatch' ? 'other-trace' : $final['traceId'], '_patwc_refund_reconcile:r' => '1');
+        $c = new QueueClient(); $c->queue = array($final);
+        if ($case === 'immediate') { array_unshift($c->queue, array('traceId' => $final['traceId'])); $result = adapter($c)->refund($leg, 505, '5.00'); }
+        elseif ($case === 'scheduled') { Refund_Reask::reconcile(505, 'r', 1, adapter($c)); }
+        else { $result = adapter($c)->read_refund($final['traceId'], $case === 'missing' ? 999 : 505, 'r'); }
+        if (in_array($case, array('immediate', 'scheduled'), true)) {
+            check($refund->get_meta('_patwc_refund_outcome:r') === 'success' && count($GLOBALS['orders'][99]->notes) === 1, 'metadata_free_final_correlates_' . $case);
+            check($case === 'immediate' ? $result['status'] === 'succeeded' : $GLOBALS['events'] === array(), 'correlated_final_stops_' . $case);
+            $c->queue = array($final);
+            check(adapter($c)->read_refund($final['traceId'], 505, 'r')['status'] === 'completed' && count($GLOBALS['orders'][99]->notes) === 1, 'already_recorded_read_is_final_without_duplicate_note');
+        } else {
+            check($result['status'] === 'pending' && $refund->get_meta('_patwc_refund_outcome:r') === '', 'unrecorded_final_stays_pending_' . $case);
+            if ($case === 'mismatch') { check(count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'still unknown') !== false, 'uncorrelated_final_warns_staff'); }
+        }
+    }
 
     echo "server-adapter cases passed\n";
 }

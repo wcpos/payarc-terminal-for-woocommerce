@@ -4,6 +4,7 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Server;
 
 use Throwable;
 use WCPOS\WooCommercePOS\PayArcTerminal\Logger;
+use WCPOS\WooCommercePOS\PayArcTerminal\PaymentReconciler;
 use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcNotSentException;
 use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcRequestException;
 
@@ -55,17 +56,35 @@ final class Refund_Reask
     /** Schedule only reads once a trace exists; a callback or exhausted budget prevents restarting. */
     public static function schedule_outcome($refund, string $row_id, int $try = 1): void
     {
+        $refund = PaymentReconciler::reload_order($refund);
         $key = self::key(self::META_RECONCILE, $row_id);
         if ((string) $refund->get_meta(self::key('_patwc_refund_outcome', $row_id), true) !== ''
-            || ($try === 1 && (string) $refund->get_meta($key, true) !== '')) {
+            || (string) $refund->get_meta($key, true) === 'exhausted'
+            || ($try === 1 && !in_array((string) $refund->get_meta($key, true), array('', 'schedule_failed'), true))) {
             return;
         }
         $delay = self::OUTCOME_DELAYS[$try - 1] ?? null;
         $refund->update_meta_data($key, $delay === null ? 'exhausted' : (string) $try);
         $refund->save();
-        if ($delay !== null && !wp_schedule_single_event(time() + $delay, self::OUTCOME_HOOK, array((int) $refund->get_id(), $row_id, $try))) {
+        if ($delay === null) {
+            self::note_unknown($refund, $row_id, __('Automatic outcome checks are exhausted.', 'payarc-terminal-for-woocommerce'));
+        }
+        $args = array((int) $refund->get_id(), $row_id, $try);
+        if ($delay !== null && !wp_schedule_single_event(time() + $delay, self::OUTCOME_HOOK, $args) && !wp_next_scheduled(self::OUTCOME_HOOK, $args)) {
             $refund->update_meta_data($key, 'schedule_failed');
             $refund->save();
+            self::note_unknown($refund, $row_id, __('Automatic outcome checks could not be scheduled.', 'payarc-terminal-for-woocommerce'));
+        }
+    }
+
+    /** Tell staff which refund part still needs verification, without implying it failed. */
+    public static function note_unknown($refund, string $row_id, string $reason): void
+    {
+        $order = wc_get_order((int) $refund->get_parent_id());
+        if ($order) {
+            /* translators: 1: refund id, amount and trace; 2: why automatic confirmation stopped. */
+            $order->add_order_note(sprintf(__('The PayArc outcome for %1$s is still unknown; verify it manually in PayArc. %2$s', 'payarc-terminal-for-woocommerce'), self::part_label((int) $refund->get_id(), $row_id, $refund), $reason));
+            $order->save();
         }
     }
 
@@ -73,6 +92,7 @@ final class Refund_Reask
     public static function reconcile(int $refund_id, string $row_id, int $try = 1, $adapter = null): void
     {
         $refund = wc_get_order($refund_id);
+        $refund = $refund instanceof \WC_Order_Refund ? PaymentReconciler::reload_order($refund) : $refund;
         if (!$refund instanceof \WC_Order_Refund
             || (string) $refund->get_meta(self::key('_patwc_refund_outcome', $row_id), true) !== ''
             || (string) $refund->get_meta(self::key(self::META_RECONCILE, $row_id), true) !== (string) $try) {
@@ -84,7 +104,7 @@ final class Refund_Reask
         }
         try {
             $adapter = $adapter === null ? new PayArc_Server_Provider() : $adapter;
-            $adapter->read_refund($trace_id);
+            $adapter->read_refund($trace_id, $refund_id, $row_id);
         } catch (Throwable $e) {
             // A lost read is not evidence of failure; consume this try and ask again within the budget.
         }

@@ -7,6 +7,7 @@ use RuntimeException;
 use Throwable;
 use WCPOS\WooCommercePOS\PayArcTerminal\Logger;
 use WCPOS\WooCommercePOS\PayArcTerminal\PaymentAttempt;
+use WCPOS\WooCommercePOS\PayArcTerminal\PaymentReconciler;
 use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcClient;
 use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcNotSentException;
 use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcRequestException;
@@ -330,7 +331,7 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
             Refund_Reask::schedule_outcome($refund, $row_id);
             // The terminal decides; a quick read may already know.
             try {
-                $observation = $this->read_refund($trace_id);
+                $observation = $this->read_refund($trace_id, $refund_id, $row_id);
             } catch (Throwable $e) {
                 $observation = array('status' => 'pending');
             }
@@ -358,12 +359,27 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
     }
 
     /** Authenticated status read, sharing the callback's refund outcome handling. */
-    public function read_refund(string $trace_id): array
+    public function read_refund(string $trace_id, int $refund_id = 0, string $row_id = ''): array
     {
         $transaction = $this->client->get_transaction($trace_id);
-        $this->refund_callback($transaction, $trace_id);
+        $refund = $refund_id ? wc_get_order($refund_id) : null;
+        $refund = $refund instanceof \WC_Order_Refund ? PaymentReconciler::reload_order($refund) : $refund;
+        // The caller knows the saved trace's refund even when PayArc omits the request metadata.
+        if (empty($transaction['metadata']['wcpos_refund_id']) && $refund instanceof \WC_Order_Refund
+            && (string) $refund->get_meta(Refund_Reask::key(Refund_Reask::META_TRACE, $row_id), true) === $trace_id) {
+            $transaction['metadata']['wcpos_refund_id'] = (string) $refund_id;
+            $transaction['metadata']['wcpos_refund_row'] = $row_id;
+        }
+        $recorded = $this->refund_callback($transaction, $trace_id);
+        $observation = self::normalize($transaction);
+        if (in_array($observation['status'], array('completed', 'failed', 'cancelled', 'expired'), true) && $recorded->get_error_code() !== 'payarc_webhook_refund') {
+            $observation['status'] = 'pending';
+            if ($refund instanceof \WC_Order_Refund) {
+                Refund_Reask::note_unknown($refund, $row_id, __('The final read could not be correlated with a refund record.', 'payarc-terminal-for-woocommerce'));
+            }
+        }
 
-        return self::normalize($transaction);
+        return $observation;
     }
 
     /**
@@ -543,6 +559,7 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         $refund_id = isset($transaction['metadata']['wcpos_refund_id']) ? (int) $transaction['metadata']['wcpos_refund_id'] : 0;
         $row_id = isset($transaction['metadata']['wcpos_refund_row']) ? (string) $transaction['metadata']['wcpos_refund_row'] : '';
         $refund = $refund_id ? wc_get_order($refund_id) : null;
+        $refund = $refund instanceof \WC_Order_Refund ? PaymentReconciler::reload_order($refund) : $refund;
         $order = $refund instanceof \WC_Order_Refund ? wc_get_order((int) $refund->get_parent_id()) : null;
         if (!$order) {
             return new \WP_Error('payarc_webhook_ignored', __('Not a WCPOS refund.', 'payarc-terminal-for-woocommerce'), array('status' => 200));
@@ -559,7 +576,7 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         }
         $outcome_key = Refund_Reask::key('_patwc_refund_outcome', $row_id);
         if ((string) $refund->get_meta($outcome_key, true) === $status) {
-            return new \WP_Error('payarc_webhook_ignored', __('Refund outcome already recorded.', 'payarc-terminal-for-woocommerce'), array('status' => 200));
+            return new \WP_Error('payarc_webhook_refund', __('Refund outcome already recorded.', 'payarc-terminal-for-woocommerce'), array('status' => 200));
         }
         $refund->update_meta_data($outcome_key, $status);
         $refund->save();
