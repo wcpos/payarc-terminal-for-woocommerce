@@ -68,8 +68,9 @@ namespace {
     function wc_get_order($id) { return $GLOBALS['stale_orders'][$id] ?? $GLOBALS['orders'][$id] ?? false; }
     function clean_post_cache($id) { unset($GLOBALS['stale_orders'][$id]); }
     function add_action($h, $c, $p = 10, $a = 1) { $GLOBALS['actions'][$h][] = $c; }
-    function wp_schedule_single_event($t, $h, $args = array()) { if (!empty($GLOBALS['schedule_false'])) { return false; } $GLOBALS['event_times'][] = $t; $GLOBALS['events'][] = array($h, $args); return true; }
+    function wp_schedule_single_event($t, $h, $args = array()) { if (!empty($GLOBALS['interrupt_schedule'])) { throw new \RuntimeException('interrupted'); } if (!empty($GLOBALS['schedule_false'])) { return false; } $GLOBALS['event_times'][] = $t; $GLOBALS['events'][] = array($h, $args); return true; }
     function wp_next_scheduled($h, $args = array()) { return in_array(array($h, $args), $GLOBALS['events'], true) ? time() + 60 : false; }
+    function wp_clear_scheduled_hook($h, $args) { $GLOBALS['events'] = array_values(array_filter($GLOBALS['events'], static function ($event) use ($h, $args) { return $event !== array($h, $args); })); }
     function wp_generate_uuid4() { return sprintf('%08x-0000-4000-8000-%012x', ++$GLOBALS['uuid'], $GLOBALS['uuid']); }
     function rest_url($p = '') { return 'https://store.test/wp-json/' . $p; }
     function add_query_arg($args, $url = '') { return $url . '?' . http_build_query($args); }
@@ -425,6 +426,28 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     check($refund->get_meta('_patwc_refund_outcome:r') === 'success' && $refund->get_meta('_patwc_refund_reconcile:r') === '4', 'final_callback_before_exhaustion_prevents_exhausted_marker');
     check(count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'confirmed refund') !== false && $GLOBALS['events'] === array() && $GLOBALS['wpdb']->locks === array(), 'final_callback_before_exhaustion_leaves_only_definitive_note');
 
+    // A stalled callback must not swallow the exhaustion check or trigger another provider read.
+    reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+    $refund->meta = array('_patwc_refund_trace_id:r' => $view('processing')['traceId'], '_patwc_refund_reconcile:r' => '4');
+    \WCPOS\WooCommercePOS\PayArcTerminal\PaymentLock::acquire(505, 'refund_outcome_r');
+    Refund_Reask::schedule_outcome($refund, 'r', 5);
+    check($GLOBALS['events'] === array(array('patwc_reconcile_refund', array(505, 'r', 5))), 'locked_exhaustion_queues_one_check');
+    Refund_Reask::schedule_outcome($refund, 'r', 5);
+    check(count($GLOBALS['events']) === 1 && abs(end($GLOBALS['event_times']) - time() - 60) <= 1, 'locked_exhaustion_retry_is_bounded_and_delayed');
+    \WCPOS\WooCommercePOS\PayArcTerminal\PaymentLock::release(505, 'refund_outcome_r');
+    $GLOBALS['events'] = array(); $c = new QueueClient();
+    Refund_Reask::reconcile(505, 'r', 5, adapter($c)); Refund_Reask::reconcile(505, 'r', 5, adapter($c));
+    check($c->calls === array() && $GLOBALS['events'] === array() && $refund->get_meta('_patwc_refund_reconcile:r') === 'exhausted' && count($GLOBALS['orders'][99]->notes) === 1, 'unlocked_exhaustion_notes_once_without_read');
+
+    reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+    $GLOBALS['interrupt_schedule'] = true;
+    try { Refund_Reask::schedule_outcome($refund, 'r'); } catch (\RuntimeException $e) { check($e->getMessage() === 'interrupted', 'schedule_interruption'); }
+    unset($GLOBALS['interrupt_schedule']);
+    check($refund->get_meta('_patwc_refund_reconcile:r') === '', 'interrupted_schedule_does_not_persist_attempt');
+    $refund->meta['_patwc_refund_reconcile:r'] = '3';
+    Refund_Reask::schedule_outcome($refund, 'r');
+    check($GLOBALS['events'] === array(array('patwc_reconcile_refund', array(505, 'r', 3))) && $refund->get_meta('_patwc_refund_reconcile:r') === '3', 'orphan_attempt_reschedules_without_restarting_budget');
+
     // False can mean an identical event already exists, or a genuine scheduling failure.
     foreach (array(false, true) as $duplicate) {
         reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
@@ -498,6 +521,13 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
             if ($case === 'mismatch') { check(count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'still unknown') !== false, 'uncorrelated_final_warns_staff'); }
         }
     }
+
+    reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+    $refund->meta['_patwc_refund_trace_id:r'] = $view('APPROVED')['traceId'];
+    $final = $view('APPROVED'); $final['metadata']['wcpos_refund_row'] = 'other';
+    $c = new QueueClient(); $c->queue = array($final); adapter($c)->verify_webhook($q);
+    check($refund->get_meta('_patwc_refund_outcome:other') === '' && $GLOBALS['orders'][99]->notes === array(), 'webhook_conflicting_row_writes_nothing');
+    check(count($GLOBALS['warnings']) === 1 && $GLOBALS['warnings'][0]['row_id'] === 'r' && $GLOBALS['warnings'][0]['metadata_row_id'] === 'other' && $GLOBALS['warnings'][0]['refund_id'] === 505 && $GLOBALS['warnings'][0]['metadata_refund_id'] === '505', 'webhook_conflicting_row_warns_with_both_identities');
 
     echo "server-adapter cases passed\n";
 }

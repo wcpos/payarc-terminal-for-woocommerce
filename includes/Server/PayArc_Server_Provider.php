@@ -368,14 +368,11 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         // The caller knows the saved trace's refund even when PayArc omits the request metadata.
         if ($refund instanceof \WC_Order_Refund
             && (string) $refund->get_meta(Refund_Reask::key(Refund_Reask::META_TRACE, $row_id), true) === $trace_id) {
-            $metadata_id = self::scalar($transaction['metadata'] ?? array(), 'wcpos_refund_id');
-            $metadata_row = self::scalar($transaction['metadata'] ?? array(), 'wcpos_refund_row');
-            if (($metadata_id !== '' && $metadata_id !== (string) $refund_id) || ($metadata_row !== '' && $metadata_row !== $row_id)) {
-                Logger::log('PayArc refund read conflicts with the saved refund identity', array('refund_id' => $refund_id, 'row_id' => $row_id, 'metadata_refund_id' => $metadata_id, 'metadata_row_id' => $metadata_row), null, 'warning');
+            $transaction = self::restore_refund_identity($transaction, $trace_id, $refund);
+            if ($transaction === null) {
                 Refund_Reask::schedule_outcome($refund, $row_id);
                 return self::normalize(array('traceId' => $trace_id));
             }
-            $transaction = self::restore_refund_identity($transaction, $trace_id, $refund);
         }
         $recorded = $this->refund_callback($transaction, $trace_id);
         $observation = self::normalize($transaction);
@@ -556,12 +553,20 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
     }
 
     /** Restore missing identity fields from the saved trace before either entry point writes. */
-    private static function restore_refund_identity(array $transaction, string $trace_id, $refund): array
+    private static function restore_refund_identity(array $transaction, string $trace_id, $refund): ?array
     {
         if ($refund instanceof \WC_Order_Refund) {
             $prefix = Refund_Reask::META_TRACE . ':';
             foreach ($refund->get_meta_data() as $meta) {
                 if (strpos($meta->key, $prefix) === 0 && (string) $meta->value === $trace_id) {
+                    $refund_id = (int) $refund->get_id();
+                    $row_id = substr($meta->key, strlen($prefix));
+                    $metadata_id = self::scalar($transaction['metadata'] ?? array(), 'wcpos_refund_id');
+                    $metadata_row = self::scalar($transaction['metadata'] ?? array(), 'wcpos_refund_row');
+                    if (($metadata_id !== '' && $metadata_id !== (string) $refund_id) || ($metadata_row !== '' && $metadata_row !== $row_id)) {
+                        Logger::log('PayArc refund read conflicts with the saved refund identity', array('refund_id' => $refund_id, 'row_id' => $row_id, 'metadata_refund_id' => $metadata_id, 'metadata_row_id' => $metadata_row), null, 'warning');
+                        return null;
+                    }
                     $transaction['metadata']['wcpos_refund_id'] = self::scalar($transaction['metadata'] ?? array(), 'wcpos_refund_id') ?: (string) $refund->get_id();
                     $transaction['metadata']['wcpos_refund_row'] = self::scalar($transaction['metadata'] ?? array(), 'wcpos_refund_row') ?: substr($meta->key, strlen($prefix));
                     break;
@@ -583,6 +588,9 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         $refund = $refund_id ? wc_get_order($refund_id) : null;
         $refund = $refund instanceof \WC_Order_Refund ? PaymentReconciler::reload_order($refund) : $refund;
         $transaction = self::restore_refund_identity($transaction, $trace_id, $refund);
+        if ($transaction === null) {
+            return new \WP_Error('payarc_webhook_ignored', __('Conflicting refund identity.', 'payarc-terminal-for-woocommerce'), array('status' => 200));
+        }
         $row_id = (string) ($transaction['metadata']['wcpos_refund_row'] ?? '');
         $order = $refund instanceof \WC_Order_Refund ? wc_get_order((int) $refund->get_parent_id()) : null;
         if (!$order) {

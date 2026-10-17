@@ -63,7 +63,7 @@ final class Refund_Reask
         $attempt = (string) $refund->get_meta($key, true);
         if ((string) $refund->get_meta(self::key('_patwc_refund_outcome', $row_id), true) !== ''
             || $attempt === 'exhausted'
-            || ($try === 1 && $attempt !== '' && !$refund->get_meta($failure_key, true))) {
+            || ($try === 1 && $attempt !== '' && wp_next_scheduled(self::OUTCOME_HOOK, array((int) $refund->get_id(), $row_id, (int) $attempt)))) {
             return;
         }
         if ($try === 1 && $attempt !== '') {
@@ -71,7 +71,7 @@ final class Refund_Reask
         }
         $delay = self::OUTCOME_DELAYS[$try - 1] ?? null;
         if ($delay === null) {
-            PaymentLock::with_lock((int) $refund->get_id(), 'refund_outcome_' . $row_id, static function () use ($refund, $row_id, $key, $failure_key): void {
+            $result = PaymentLock::with_lock((int) $refund->get_id(), 'refund_outcome_' . $row_id, static function () use ($refund, $row_id, $key, $failure_key): void {
                 $refund = PaymentReconciler::reload_order($refund);
                 if ($refund->get_meta(self::key('_patwc_refund_outcome', $row_id), true) !== '' || $refund->get_meta($key, true) === 'exhausted') {
                     return;
@@ -81,15 +81,17 @@ final class Refund_Reask
                 $refund->save();
                 self::note_unknown($refund, $row_id, __('Automatic outcome checks are exhausted.', 'payarc-terminal-for-woocommerce'));
             });
-            return;
+            if ($result['status'] !== 'conflict' || $attempt === (string) $try) {
+                return;
+            }
+            $delay = self::OUTCOME_DELAYS[0]; // One exhaustion-only retry, after the callback lock's TTL.
         }
-        $refund->update_meta_data($key, (string) $try);
-        $refund->update_meta_data($failure_key, false);
-        $refund->save();
         $args = array((int) $refund->get_id(), $row_id, $try);
-        if ($delay !== null && !wp_schedule_single_event(time() + $delay, self::OUTCOME_HOOK, $args) && !wp_next_scheduled(self::OUTCOME_HOOK, $args)) {
-            $refund->update_meta_data($failure_key, true);
-            $refund->save();
+        $failed = !wp_schedule_single_event(time() + $delay, self::OUTCOME_HOOK, $args) && !wp_next_scheduled(self::OUTCOME_HOOK, $args);
+        $refund->update_meta_data($key, (string) $try);
+        $refund->update_meta_data($failure_key, $failed);
+        $refund->save();
+        if ($failed) {
             self::note_unknown($refund, $row_id, __('Automatic outcome checks could not be scheduled.', 'payarc-terminal-for-woocommerce'));
         }
     }
@@ -115,6 +117,10 @@ final class Refund_Reask
             || (string) $refund->get_meta(self::key(self::META_RECONCILE, $row_id), true) !== (string) $try) {
             return;
         }
+        if ($try > count(self::OUTCOME_DELAYS)) {
+            self::schedule_outcome($refund, $row_id, $try);
+            return;
+        }
         $trace_id = (string) $refund->get_meta(self::key(self::META_TRACE, $row_id), true);
         if ($trace_id === '') {
             return;
@@ -125,6 +131,7 @@ final class Refund_Reask
         } catch (Throwable $e) {
             // A lost read is not evidence of failure; consume this try and ask again within the budget.
         }
+        wp_clear_scheduled_hook(self::OUTCOME_HOOK, array($refund_id, $row_id, $try)); // Discard any same-attempt recovery queued by the read's callback.
         // The callback handler may have saved the outcome through another order instance.
         $refund = wc_get_order($refund_id);
         if ($refund instanceof \WC_Order_Refund) {
