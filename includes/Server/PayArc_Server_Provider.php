@@ -609,7 +609,7 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         // Share the payment path's atomic options-row claim, scoped to this refund part.
         $operation = 'refund_outcome_' . $row_id;
         if (!PaymentLock::acquire($refund_id, $operation)) {
-            return new \WP_Error('payarc_webhook_refund_busy', __('Refund outcome recording is in progress.', 'payarc-terminal-for-woocommerce'), array('status' => 202));
+            return new \WP_Error('payarc_webhook_refund_busy', __('Refund outcome recording is in progress.', 'payarc-terminal-for-woocommerce'), array('status' => 503));
         }
         try {
             return $this->record_refund_outcome(PaymentReconciler::reload_order($refund), $order, $row_id, $trace_id, $status);

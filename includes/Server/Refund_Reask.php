@@ -51,7 +51,7 @@ final class Refund_Reask
     public static function register(): void
     {
         add_action(self::HOOK, array(__CLASS__, 'run'), 10, 4);
-        add_action(self::OUTCOME_HOOK, array(__CLASS__, 'reconcile'), 10, 3);
+        add_action(self::OUTCOME_HOOK, array(__CLASS__, 'reconcile'), 10, 4);
     }
 
     /** Schedule only reads once a trace exists; a callback or exhausted budget prevents restarting. */
@@ -63,7 +63,7 @@ final class Refund_Reask
         $attempt = (string) $refund->get_meta($key, true);
         if ((string) $refund->get_meta(self::key('_patwc_refund_outcome', $row_id), true) !== ''
             || $attempt === 'exhausted'
-            || ($try === 1 && $attempt !== '' && wp_next_scheduled(self::OUTCOME_HOOK, array((int) $refund->get_id(), $row_id, (int) $attempt)))) {
+            || ($try === 1 && $attempt !== '' && wp_next_scheduled(self::OUTCOME_HOOK, array((int) $refund->get_id(), $row_id, (int) $attempt, (int) $refund->get_parent_id())))) {
             return;
         }
         if ($try === 1 && $attempt !== '') {
@@ -86,12 +86,13 @@ final class Refund_Reask
             }
             $delay = self::OUTCOME_DELAYS[0]; // One exhaustion-only retry, after the callback lock's TTL.
         }
-        $args = array((int) $refund->get_id(), $row_id, $try);
+        $args = array((int) $refund->get_id(), $row_id, $try, (int) $refund->get_parent_id());
         $failed = !wp_schedule_single_event(time() + $delay, self::OUTCOME_HOOK, $args) && !wp_next_scheduled(self::OUTCOME_HOOK, $args);
         $refund->update_meta_data($key, (string) $try);
+        $was_failed = (bool) $refund->get_meta($failure_key, true);
         $refund->update_meta_data($failure_key, $failed);
         $refund->save();
-        if ($failed) {
+        if ($failed && !$was_failed) {
             self::note_unknown($refund, $row_id, __('Automatic outcome checks could not be scheduled.', 'payarc-terminal-for-woocommerce'));
         }
     }
@@ -108,12 +109,20 @@ final class Refund_Reask
     }
 
     /** Re-read the accepted refund, never resend it; the callback path owns all final order updates. */
-    public static function reconcile(int $refund_id, string $row_id, int $try = 1, $adapter = null): void
+    public static function reconcile(int $refund_id, string $row_id, int $try = 1, int $order_id = 0, $adapter = null): void
     {
         $refund = wc_get_order($refund_id);
         $refund = $refund instanceof \WC_Order_Refund ? PaymentReconciler::reload_order($refund) : $refund;
-        if (!$refund instanceof \WC_Order_Refund
-            || (string) $refund->get_meta(self::key('_patwc_refund_outcome', $row_id), true) !== ''
+        if (!$refund instanceof \WC_Order_Refund) {
+            $order = $order_id ? wc_get_order($order_id) : null;
+            if ($order) {
+                /* translators: %d: missing refund id. */
+                $order->add_order_note(sprintf(__('The refund record for terminal refund #%d is missing; verify the terminal before refunding again.', 'payarc-terminal-for-woocommerce'), $refund_id));
+                $order->save();
+            }
+            return;
+        }
+        if ((string) $refund->get_meta(self::key('_patwc_refund_outcome', $row_id), true) !== ''
             || (string) $refund->get_meta(self::key(self::META_RECONCILE, $row_id), true) !== (string) $try) {
             return;
         }
@@ -131,7 +140,7 @@ final class Refund_Reask
         } catch (Throwable $e) {
             // A lost read is not evidence of failure; consume this try and ask again within the budget.
         }
-        wp_clear_scheduled_hook(self::OUTCOME_HOOK, array($refund_id, $row_id, $try)); // Discard any same-attempt recovery queued by the read's callback.
+        wp_clear_scheduled_hook(self::OUTCOME_HOOK, array($refund_id, $row_id, $try, (int) $refund->get_parent_id())); // Discard any same-attempt recovery queued by the read's callback.
         // The callback handler may have saved the outcome through another order instance.
         $refund = wc_get_order($refund_id);
         if ($refund instanceof \WC_Order_Refund) {
