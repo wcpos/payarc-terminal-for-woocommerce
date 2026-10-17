@@ -448,6 +448,22 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     call_user_func_array($GLOBALS['actions'][$event[0]][0], $event[1]);
     check(count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'refund #505') !== false && strpos($GLOBALS['orders'][99]->notes[0], 'missing') !== false && strpos($GLOBALS['orders'][99]->notes[0], 'verify the terminal') !== false, 'missing_refund_event_warns_parent_order');
 
+    // Cron can queue an event before the request dies without saving its attempt marker.
+    foreach (array('older' => array('1', 2), 'missing' => array('', 1), 'newer' => array('2', 1)) as $case => $attempts) {
+        list($marker, $try) = $attempts;
+        reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+        $refund->meta = array('_patwc_refund_trace_id:r' => $view('APPROVED')['traceId']);
+        if ($marker !== '') { $refund->meta['_patwc_refund_reconcile:r'] = $marker; }
+        $c = new QueueClient(); $c->queue = array($view('APPROVED'));
+        Refund_Reask::reconcile(505, 'r', $try, 99, adapter($c)); // Cron removes the queued event before dispatch.
+        if ($case === 'newer') {
+            check($c->calls === array() && $refund->get_meta('_patwc_refund_reconcile:r') === '2' && $refund->get_meta('_patwc_refund_outcome:r') === '' && $GLOBALS['orders'][99]->notes === array(), 'stale_event_preserves_newer_attempt');
+        } else {
+            check($c->calls === array(array('get', array($view('APPROVED')['traceId']))) && $refund->get_meta('_patwc_refund_reconcile:r') === (string) $try && $refund->get_meta('_patwc_refund_outcome:r') === 'success' && count($GLOBALS['orders'][99]->notes) === 1, 'queued_event_adopts_' . $case . '_marker_and_records_outcome');
+        }
+        check($GLOBALS['events'] === array(), 'recovered_final_or_stale_event_does_not_reschedule_' . $case);
+    }
+
     // A stalled callback must not swallow the exhaustion check or trigger another provider read.
     reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
     $refund->meta = array('_patwc_refund_trace_id:r' => $view('processing')['traceId'], '_patwc_refund_reconcile:r' => '4');

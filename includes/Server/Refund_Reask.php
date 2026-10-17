@@ -122,9 +122,16 @@ final class Refund_Reask
             }
             return;
         }
+        $key = self::key(self::META_RECONCILE, $row_id);
+        $attempt = (string) $refund->get_meta($key, true);
         if ((string) $refund->get_meta(self::key('_patwc_refund_outcome', $row_id), true) !== ''
-            || (string) $refund->get_meta(self::key(self::META_RECONCILE, $row_id), true) !== (string) $try) {
+            || $attempt === 'exhausted' || (int) $attempt > $try) {
             return;
+        }
+        if ($attempt === '' || (int) $attempt < $try) {
+            // The event may have been queued before its request died without saving the marker.
+            $refund->update_meta_data($key, (string) $try);
+            $refund->save();
         }
         if ($try > count(self::OUTCOME_DELAYS)) {
             self::schedule_outcome($refund, $row_id, $try);
