@@ -49,7 +49,7 @@ namespace {
         public function __construct(int $id) { $this->id = $id; }
         public function get_id() { return $this->id; }
         public function is_paid() { return $this->paid; }
-        public function get_meta($k, $single = true) { return $this->meta[$k] ?? ($single ? '' : array()); }
+        public function get_meta($k, $single = true) { $value = $this->meta[$k] ?? ($single ? '' : array()); if (isset($GLOBALS['after_meta_read'])) { ($GLOBALS['after_meta_read'])($k); } return $value; }
         public function get_meta_data() { $out = array(); foreach ($this->meta as $k => $v) { $out[] = (object) array('key' => $k, 'value' => $v); } return $out; }
         public function update_meta_data($k, $v) { if (strpos($k, '_patwc_refund_outcome:') === 0 && !empty($GLOBALS['before_outcome_write'])) { $cb = $GLOBALS['before_outcome_write']; unset($GLOBALS['before_outcome_write']); $cb(); } $this->meta[$k] = $v; }
         public function add_order_note($n) { $this->notes[] = $n; }
@@ -412,6 +412,19 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     check(array_column($c->calls, 0) === array('get', 'get', 'get', 'get') && $GLOBALS['events'] === array(), 'exhausted_trace_never_restarts_or_resends');
     check(count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'refund #505') !== false && strpos($GLOBALS['orders'][99]->notes[0], 'still unknown; verify it manually') !== false, 'exhaustion_warns_staff_once_with_refund_identity');
 
+    // A final callback lands after the last scheduler's entry check, before exhaustion is saved.
+    reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+    $refund->meta = array('_patwc_refund_trace_id:r' => $view('APPROVED')['traceId'], '_patwc_refund_reconcile:r' => '4');
+    $c = new QueueClient(); $c->queue = array($view('processing'), $view('APPROVED')); $reads = 0;
+    $GLOBALS['after_meta_read'] = static function ($key) use (&$reads, $c, $q): void {
+        if ($key === '_patwc_refund_outcome:r' && ++$reads === 3) {
+            unset($GLOBALS['after_meta_read']); adapter($c)->verify_webhook($q);
+        }
+    };
+    Refund_Reask::reconcile(505, 'r', 4, adapter($c));
+    check($refund->get_meta('_patwc_refund_outcome:r') === 'success' && $refund->get_meta('_patwc_refund_reconcile:r') === '4', 'final_callback_before_exhaustion_prevents_exhausted_marker');
+    check(count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'confirmed refund') !== false && $GLOBALS['events'] === array() && $GLOBALS['wpdb']->locks === array(), 'final_callback_before_exhaustion_leaves_only_definitive_note');
+
     // False can mean an identical event already exists, or a genuine scheduling failure.
     foreach (array(false, true) as $duplicate) {
         reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
@@ -456,10 +469,10 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     check($GLOBALS['wpdb']->locks === array(), 'final_writer_releases_claim');
 
     // A read can omit metadata: only a matching saved trace supplies the refund identity.
-    foreach (array('immediate', 'scheduled', 'id_only', 'row_only', 'mismatch', 'missing', 'refused', 'row_conflict') as $case) {
+    foreach (array('immediate', 'scheduled', 'id_only', 'webhook_id_only', 'row_only', 'mismatch', 'missing', 'refused', 'row_conflict') as $case) {
         reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
         $final = $view('APPROVED'); unset($final['metadata']);
-        if ($case === 'id_only') { $final['metadata'] = array('wcpos_refund_id' => '505'); }
+        if (in_array($case, array('id_only', 'webhook_id_only'), true)) { $final['metadata'] = array('wcpos_refund_id' => '505'); }
         if ($case === 'row_only') { $final['metadata'] = array('wcpos_refund_row' => 'r'); }
         $other = new \WC_Order_Refund(999); $other->parent = 99; $GLOBALS['orders'][999] = $other;
         if ($case === 'row_conflict') { $final['metadata'] = array('wcpos_refund_id' => '505', 'wcpos_refund_row' => 'other'); }
@@ -467,10 +480,12 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
         $refund->meta = array('_patwc_refund_trace_id:r' => $case === 'mismatch' ? 'other-trace' : $final['traceId'], '_patwc_refund_reconcile:r' => '1');
         $c = new QueueClient(); $c->queue = array($final);
         if ($case === 'immediate') { array_unshift($c->queue, array('traceId' => $final['traceId'])); $result = adapter($c)->refund($leg, 505, '5.00'); }
+        elseif ($case === 'webhook_id_only') { adapter($c)->verify_webhook($q); Refund_Reask::reconcile(505, 'r', 1, adapter($c)); }
         elseif (in_array($case, array('scheduled', 'id_only', 'row_only'), true)) { Refund_Reask::reconcile(505, 'r', 1, adapter($c)); }
         else { $result = adapter($c)->read_refund($final['traceId'], $case === 'missing' ? 998 : 505, 'r'); }
-        if (in_array($case, array('immediate', 'scheduled', 'id_only', 'row_only'), true)) {
+        if (in_array($case, array('immediate', 'scheduled', 'id_only', 'webhook_id_only', 'row_only'), true)) {
             check($refund->get_meta('_patwc_refund_outcome:r') === 'success' && count($GLOBALS['orders'][99]->notes) === 1, 'metadata_free_final_correlates_' . $case);
+            if ($case === 'webhook_id_only') { check($refund->get_meta('_patwc_refund_outcome:') === '' && count($c->calls) === 1, 'webhook_restores_row_before_write_and_scheduled_read_is_noop'); }
             check($case === 'immediate' ? $result['status'] === 'succeeded' : $GLOBALS['events'] === array(), 'correlated_final_stops_' . $case);
             $c->queue = array($final);
             check(adapter($c)->read_refund($final['traceId'], 505, 'r')['status'] === 'completed' && count($GLOBALS['orders'][99]->notes) === 1, 'already_recorded_read_is_final_without_duplicate_note');

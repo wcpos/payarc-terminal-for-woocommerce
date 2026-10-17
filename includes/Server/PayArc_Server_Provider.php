@@ -375,12 +375,7 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
                 Refund_Reask::schedule_outcome($refund, $row_id);
                 return self::normalize(array('traceId' => $trace_id));
             }
-            if (empty($transaction['metadata']['wcpos_refund_id'])) {
-                $transaction['metadata']['wcpos_refund_id'] = (string) $refund_id;
-            }
-            if (empty($transaction['metadata']['wcpos_refund_row'])) {
-                $transaction['metadata']['wcpos_refund_row'] = $row_id;
-            }
+            $transaction = self::restore_refund_identity($transaction, $trace_id, $refund);
         }
         $recorded = $this->refund_callback($transaction, $trace_id);
         $observation = self::normalize($transaction);
@@ -560,6 +555,22 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         return $patch;
     }
 
+    /** Restore missing identity fields from the saved trace before either entry point writes. */
+    private static function restore_refund_identity(array $transaction, string $trace_id, $refund): array
+    {
+        if ($refund instanceof \WC_Order_Refund) {
+            $prefix = Refund_Reask::META_TRACE . ':';
+            foreach ($refund->get_meta_data() as $meta) {
+                if (strpos($meta->key, $prefix) === 0 && (string) $meta->value === $trace_id) {
+                    $transaction['metadata']['wcpos_refund_id'] = self::scalar($transaction['metadata'] ?? array(), 'wcpos_refund_id') ?: (string) $refund->get_id();
+                    $transaction['metadata']['wcpos_refund_row'] = self::scalar($transaction['metadata'] ?? array(), 'wcpos_refund_row') ?: substr($meta->key, strlen($prefix));
+                    break;
+                }
+            }
+        }
+        return $transaction;
+    }
+
     /**
      * A refund's outcome, from the terminal: noted on the order and the refund record. Pro's ledger holds
      * the refund as pending (nothing in Pro re-reads a pending refund); the note is what staff see.
@@ -569,9 +580,10 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
     private function refund_callback(array $transaction, string $trace_id): \WP_Error
     {
         $refund_id = isset($transaction['metadata']['wcpos_refund_id']) ? (int) $transaction['metadata']['wcpos_refund_id'] : 0;
-        $row_id = isset($transaction['metadata']['wcpos_refund_row']) ? (string) $transaction['metadata']['wcpos_refund_row'] : '';
         $refund = $refund_id ? wc_get_order($refund_id) : null;
         $refund = $refund instanceof \WC_Order_Refund ? PaymentReconciler::reload_order($refund) : $refund;
+        $transaction = self::restore_refund_identity($transaction, $trace_id, $refund);
+        $row_id = (string) ($transaction['metadata']['wcpos_refund_row'] ?? '');
         $order = $refund instanceof \WC_Order_Refund ? wc_get_order((int) $refund->get_parent_id()) : null;
         if (!$order) {
             return new \WP_Error('payarc_webhook_ignored', __('Not a WCPOS refund.', 'payarc-terminal-for-woocommerce'), array('status' => 200));

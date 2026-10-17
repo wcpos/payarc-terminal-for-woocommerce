@@ -3,6 +3,7 @@
 namespace WCPOS\WooCommercePOS\PayArcTerminal\Server;
 
 use Throwable;
+use WCPOS\WooCommercePOS\PayArcTerminal\PaymentLock;
 use WCPOS\WooCommercePOS\PayArcTerminal\Logger;
 use WCPOS\WooCommercePOS\PayArcTerminal\PaymentReconciler;
 use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcNotSentException;
@@ -69,12 +70,22 @@ final class Refund_Reask
             $try = (int) $attempt; // Resume the unscheduled attempt, never restart its read budget.
         }
         $delay = self::OUTCOME_DELAYS[$try - 1] ?? null;
-        $refund->update_meta_data($key, $delay === null ? 'exhausted' : (string) $try);
+        if ($delay === null) {
+            PaymentLock::with_lock((int) $refund->get_id(), 'refund_outcome_' . $row_id, static function () use ($refund, $row_id, $key, $failure_key): void {
+                $refund = PaymentReconciler::reload_order($refund);
+                if ($refund->get_meta(self::key('_patwc_refund_outcome', $row_id), true) !== '' || $refund->get_meta($key, true) === 'exhausted') {
+                    return;
+                }
+                $refund->update_meta_data($key, 'exhausted');
+                $refund->update_meta_data($failure_key, false);
+                $refund->save();
+                self::note_unknown($refund, $row_id, __('Automatic outcome checks are exhausted.', 'payarc-terminal-for-woocommerce'));
+            });
+            return;
+        }
+        $refund->update_meta_data($key, (string) $try);
         $refund->update_meta_data($failure_key, false);
         $refund->save();
-        if ($delay === null) {
-            self::note_unknown($refund, $row_id, __('Automatic outcome checks are exhausted.', 'payarc-terminal-for-woocommerce'));
-        }
         $args = array((int) $refund->get_id(), $row_id, $try);
         if ($delay !== null && !wp_schedule_single_event(time() + $delay, self::OUTCOME_HOOK, $args) && !wp_next_scheduled(self::OUTCOME_HOOK, $args)) {
             $refund->update_meta_data($failure_key, true);
