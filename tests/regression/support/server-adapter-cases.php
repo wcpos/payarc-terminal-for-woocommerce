@@ -373,8 +373,10 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
         Refund_Reask::reconcile(505, 'r', 1, adapter($c));
         check($c->calls === array(array('get', array($view($status)['traceId'])), array('get', array($view($status)['traceId']))), 'final_replay_never_reads_or_resends_refund');
         reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+        $GLOBALS['schedule_false'] = true;
         $c = new QueueClient(); $c->queue = array(array('traceId' => $view($status)['traceId']), $view($status));
         adapter($c)->refund($leg, 505, '5.00');
+        check(count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'still unknown') === false && $GLOBALS['events'] === array(), 'immediate_final_never_warns_unknown_' . $status);
         Refund_Reask::reconcile(505, 'r', 1, adapter($c));
         check(count($c->calls) === 2 && $refund->get_meta('_patwc_refund_outcome:r') === $outcome, 'immediate_final_prevents_scheduled_read_' . $status);
     }
@@ -399,17 +401,21 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
         reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
         $refund->meta['_patwc_refund_trace_id:r'] = $view('processing')['traceId'];
         $GLOBALS['schedule_false'] = true;
-        $GLOBALS['events'] = array(array('patwc_reconcile_refund', array(505, 'r', $duplicate ? 1 : 2)));
-        Refund_Reask::schedule_outcome($refund, 'r');
-        check($refund->get_meta('_patwc_refund_reconcile:r') === ($duplicate ? '1' : 'schedule_failed'), 'schedule_false_preserves_only_identical_event_' . (int) $duplicate);
+        $GLOBALS['events'] = array(array('patwc_reconcile_refund', array(505, 'r', $duplicate ? 3 : 2)));
+        Refund_Reask::schedule_outcome($refund, 'r', 3);
+        check($refund->get_meta('_patwc_refund_reconcile:r') === '3', 'schedule_false_preserves_only_identical_event_' . (int) $duplicate);
         check(count($GLOBALS['orders'][99]->notes) === ($duplicate ? 0 : 1), 'only_genuine_schedule_failure_warns_staff');
         $GLOBALS['schedule_false'] = false;
         if (!$duplicate) {
             $GLOBALS['events'] = array(); Refund_Reask::run(505, 1, 99, 'r');
-            check($refund->get_meta('_patwc_refund_reconcile:r') === '1' && count($GLOBALS['events']) === 1, 'trace_retries_failed_schedule');
-            $refund->meta['_patwc_refund_reconcile:r'] = 'schedule_failed'; $GLOBALS['events'] = array();
+            check($refund->get_meta('_patwc_refund_reconcile:r') === '3' && $GLOBALS['events'] === array(array('patwc_reconcile_refund', array(505, 'r', 3))), 'trace_resumes_failed_schedule_at_same_attempt');
+            $GLOBALS['events'] = array(); $GLOBALS['schedule_false'] = true;
+            Refund_Reask::schedule_outcome($refund, 'r', 4); $GLOBALS['schedule_false'] = false;
             $c = new QueueClient(); $c->queue = array($view('processing')); adapter($c)->verify_webhook($q);
-            check($refund->get_meta('_patwc_refund_reconcile:r') === '1' && count($GLOBALS['events']) === 1, 'callback_retries_failed_schedule');
+            check($refund->get_meta('_patwc_refund_reconcile:r') === '4' && $GLOBALS['events'] === array(array('patwc_reconcile_refund', array(505, 'r', 4))), 'callback_resumes_failed_schedule_at_same_attempt');
+            $GLOBALS['events'] = array(); $c->queue = array($view('processing'));
+            Refund_Reask::reconcile(505, 'r', 4, adapter($c));
+            check($refund->get_meta('_patwc_refund_reconcile:r') === 'exhausted' && $GLOBALS['events'] === array(), 'resumed_schedule_exhausts_original_budget');
         }
     }
 
@@ -425,16 +431,18 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     }
 
     // A read can omit metadata: only a matching saved trace supplies the refund identity.
-    foreach (array('immediate', 'scheduled', 'mismatch', 'missing', 'refused') as $case) {
+    foreach (array('immediate', 'scheduled', 'id_only', 'row_only', 'mismatch', 'missing', 'refused') as $case) {
         reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
         $final = $view('APPROVED'); unset($final['metadata']);
+        if ($case === 'id_only') { $final['metadata'] = array('wcpos_refund_id' => '505'); }
+        if ($case === 'row_only') { $final['metadata'] = array('wcpos_refund_row' => 'r'); }
         if ($case === 'refused') { $final['metadata'] = array('wcpos_refund_id' => '999', 'wcpos_refund_row' => 'r'); }
         $refund->meta = array('_patwc_refund_trace_id:r' => $case === 'mismatch' ? 'other-trace' : $final['traceId'], '_patwc_refund_reconcile:r' => '1');
         $c = new QueueClient(); $c->queue = array($final);
         if ($case === 'immediate') { array_unshift($c->queue, array('traceId' => $final['traceId'])); $result = adapter($c)->refund($leg, 505, '5.00'); }
-        elseif ($case === 'scheduled') { Refund_Reask::reconcile(505, 'r', 1, adapter($c)); }
+        elseif (in_array($case, array('scheduled', 'id_only', 'row_only'), true)) { Refund_Reask::reconcile(505, 'r', 1, adapter($c)); }
         else { $result = adapter($c)->read_refund($final['traceId'], $case === 'missing' ? 999 : 505, 'r'); }
-        if (in_array($case, array('immediate', 'scheduled'), true)) {
+        if (in_array($case, array('immediate', 'scheduled', 'id_only', 'row_only'), true)) {
             check($refund->get_meta('_patwc_refund_outcome:r') === 'success' && count($GLOBALS['orders'][99]->notes) === 1, 'metadata_free_final_correlates_' . $case);
             check($case === 'immediate' ? $result['status'] === 'succeeded' : $GLOBALS['events'] === array(), 'correlated_final_stops_' . $case);
             $c->queue = array($final);

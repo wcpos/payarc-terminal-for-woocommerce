@@ -328,7 +328,6 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
             $trace_id = $this->refund_once($request, $key);
             $refund->update_meta_data(Refund_Reask::key(Refund_Reask::META_TRACE, $row_id), $trace_id);
             $refund->save();
-            Refund_Reask::schedule_outcome($refund, $row_id);
             // The terminal decides; a quick read may already know.
             try {
                 $observation = $this->read_refund($trace_id, $refund_id, $row_id);
@@ -342,6 +341,7 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
                 return array('status' => 'failed', 'provider_ref' => $trace_id);
             }
 
+            Refund_Reask::schedule_outcome($refund, $row_id);
             return array('status' => 'pending', 'provider_ref' => $trace_id);
         } catch (PayArcNotSentException $e) {
             return self::provider_error($e, 'payarc_configuration', 400); // Nothing left the server, key or no key.
@@ -365,10 +365,14 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         $refund = $refund_id ? wc_get_order($refund_id) : null;
         $refund = $refund instanceof \WC_Order_Refund ? PaymentReconciler::reload_order($refund) : $refund;
         // The caller knows the saved trace's refund even when PayArc omits the request metadata.
-        if (empty($transaction['metadata']['wcpos_refund_id']) && $refund instanceof \WC_Order_Refund
+        if ($refund instanceof \WC_Order_Refund
             && (string) $refund->get_meta(Refund_Reask::key(Refund_Reask::META_TRACE, $row_id), true) === $trace_id) {
-            $transaction['metadata']['wcpos_refund_id'] = (string) $refund_id;
-            $transaction['metadata']['wcpos_refund_row'] = $row_id;
+            if (empty($transaction['metadata']['wcpos_refund_id'])) {
+                $transaction['metadata']['wcpos_refund_id'] = (string) $refund_id;
+            }
+            if (empty($transaction['metadata']['wcpos_refund_row'])) {
+                $transaction['metadata']['wcpos_refund_row'] = $row_id;
+            }
         }
         $recorded = $this->refund_callback($transaction, $trace_id);
         $observation = self::normalize($transaction);
