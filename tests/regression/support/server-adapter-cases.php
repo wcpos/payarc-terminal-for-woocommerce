@@ -51,7 +51,7 @@ namespace {
         public function is_paid() { return $this->paid; }
         public function get_meta($k, $single = true) { return $this->meta[$k] ?? ($single ? '' : array()); }
         public function get_meta_data() { $out = array(); foreach ($this->meta as $k => $v) { $out[] = (object) array('key' => $k, 'value' => $v); } return $out; }
-        public function update_meta_data($k, $v) { $this->meta[$k] = $v; }
+        public function update_meta_data($k, $v) { if (strpos($k, '_patwc_refund_outcome:') === 0 && !empty($GLOBALS['before_outcome_write'])) { $cb = $GLOBALS['before_outcome_write']; unset($GLOBALS['before_outcome_write']); $cb(); } $this->meta[$k] = $v; }
         public function add_order_note($n) { $this->notes[] = $n; }
         public function save() { $this->saves++; }
     }
@@ -76,6 +76,10 @@ namespace {
     function wcpos_pro_payment_id_for_action($provider, $ref) { $GLOBALS['lookups'][] = $ref; return $GLOBALS['adopted'][$ref] ?? null; }
     function wp_json_encode($d) { return json_encode($d); }
     function apply_filters($h, $v) { return $v; }
+    function wc_get_logger() { return new class {
+        public function warning($message, $context) { $GLOBALS['warnings'][] = $context; }
+        public function info($message, $context) {}
+    }; }
     function get_option($k, $d = false) { if (!empty($GLOBALS['notoptions'][$k])) { return $d; } return $GLOBALS['options'][$k] ?? $d; }
     function is_serialized($d) { return is_string($d) && (strpos($d, 'a:') === 0 || strpos($d, 's:') === 0 || strpos($d, 'i:') === 0 || $d === 'b:0;' || strpos($d, 'b:') === 0 || strpos($d, 'd:') === 0 || $d === 'N;'); }
     function update_option($k, $v, $autoload = null) { $GLOBALS['options'][$k] = $v; return true; }
@@ -89,12 +93,14 @@ namespace {
     {
         public $options = 'wp_options';
         public $last_error = '';
+        public $locks = array();
         public function esc_like($s) { return addcslashes($s, '_%\\'); }
         public function prepare($q, ...$a) { return json_encode(array($q, $a)); }
         public function get_var($prepared)
         {
             list($sql, $args) = json_decode($prepared, true);
             if ($sql !== "SELECT option_value FROM {$this->options} WHERE option_name = %s") { throw new \RuntimeException('guard wpdb: unsupported query: ' . $sql); }
+            if (isset($this->locks[$args[0]])) { return $this->locks[$args[0]]; }
             return isset($GLOBALS['options'][$args[0]]) ? serialize($GLOBALS['options'][$args[0]]) : null;
         }
         public function get_results($prepared, $output = null)
@@ -111,8 +117,10 @@ namespace {
         public function query($prepared)
         {
             list($sql, $args) = json_decode($prepared, true);
+            if (strpos($sql, 'INSERT IGNORE INTO') === 0) { if (isset($this->locks[$args[0]])) { return 0; } $this->locks[$args[0]] = $args[1]; return 1; }
             if ($this->before_delete) { $cb = $this->before_delete; $this->before_delete = null; $cb(); }
             if ($sql !== "DELETE FROM {$this->options} WHERE option_name = %s AND option_value = %s") { throw new \RuntimeException('guard wpdb: unsupported query: ' . $sql); }
+            if (($this->locks[$args[0]] ?? null) === $args[1]) { unset($this->locks[$args[0]]); return 1; }
             if (isset($GLOBALS['options'][$args[0]]) && serialize($GLOBALS['options'][$args[0]]) === $args[1]) { unset($GLOBALS['options'][$args[0]]); return 1; }
             return 0;
         }
@@ -120,7 +128,7 @@ namespace {
     $GLOBALS['wpdb'] = new PatwcGuardWpdb();
 
     $root = dirname(__DIR__, 3);
-    foreach (array('Settings', 'Logger', 'PaymentAttempt', 'PaymentReconciler', 'Utils/Money', 'Utils/PayArcIds', 'Services/PayArcRequestException', 'Services/PayArcNotSentException', 'Services/PayArcClient', 'Services/TerminalService', 'Server/Sale_Guard', 'Server/Refund_Reask', 'Server/PayArc_Server_Provider') as $file) {
+    foreach (array('Settings', 'Logger', 'PaymentLock', 'PaymentAttempt', 'PaymentReconciler', 'Utils/Money', 'Utils/PayArcIds', 'Services/PayArcRequestException', 'Services/PayArcNotSentException', 'Services/PayArcClient', 'Services/TerminalService', 'Server/Sale_Guard', 'Server/Refund_Reask', 'Server/PayArc_Server_Provider') as $file) {
         require_once $root . '/includes/' . $file . '.php';
     }
 }
@@ -165,7 +173,7 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     {
         return array('transactionId' => 'P1ABCDEF12345678', 'transType' => 'SALE', 'status' => 'APPROVED', 'chargeId' => 'ch_1', 'authCode' => 'A1', 'amount' => array('total' => 9295, 'subtotal' => 9295, 'approved' => 9295, 'currency' => 'USD'), 'card' => array('brand' => 'VISA', 'entryMode' => 'CHIP', 'last4' => '4242'), 'processor' => array('responseCode' => '00', 'responseText' => 'Approved'), 'traceId' => $trace, 'metadata' => array('wcpos_payment_id' => 'aaaaaaaa-1111-4222-8333-444455556666', 'terminal_id' => '1234567890')) + $extra;
     }
-    function reset(): void { $GLOBALS['stale_orders'] = array(); $GLOBALS['schedule_false'] = false; $GLOBALS['orders'] = array(99 => new \PatwcOrder(99)); $GLOBALS['events'] = array(); $GLOBALS['adopted'] = array(); $GLOBALS['lookups'] = array(); $GLOBALS['uuid'] = 0; $GLOBALS['options'] = array(); $GLOBALS['notoptions'] = array(); }
+    function reset(): void { $GLOBALS['warnings'] = array(); $GLOBALS['stale_orders'] = array(); $GLOBALS['schedule_false'] = false; $GLOBALS['orders'] = array(99 => new \PatwcOrder(99)); $GLOBALS['events'] = array(); $GLOBALS['adopted'] = array(); $GLOBALS['lookups'] = array(); $GLOBALS['uuid'] = 0; $GLOBALS['options'] = array(); $GLOBALS['notoptions'] = array(); }
     $row = array('id' => 'aaaaaaaa-1111-4222-8333-444455556666', 'order_id' => 99, 'amount' => '92.95', 'currency' => 'USD', 'provider_refs' => array());
 
     // Create: the row id is the key; a lost answer, a 5xx and a key conflict are indeterminate; a refusal is final.
@@ -358,6 +366,14 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     $calls = count($c->calls); $event_count = count($GLOBALS['events']);
     Refund_Reask::reconcile(505, 'r', 1, adapter($c));
     check(count($c->calls) === $calls && count($GLOBALS['events']) === $event_count && $GLOBALS['orders'][99]->notes === $callback_notes, 'callback_first_skips_read_and_note');
+    foreach (array(true, false) as $fails) {
+        reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+        $GLOBALS['schedule_false'] = $fails;
+        $c = new QueueClient(); $c->queue = array(array('traceId' => $view('processing')['traceId']), $view('processing'));
+        check(adapter($c)->refund($leg, 505, '5.00')['status'] === 'pending', 'nonfinal_immediate_stays_pending');
+        check(count($GLOBALS['orders'][99]->notes) === ($fails ? 1 : 0) && count($GLOBALS['events']) === ($fails ? 0 : 1), 'nonfinal_immediate_schedules_once_' . (int) $fails);
+    }
+
     foreach (array('APPROVED' => 'success', 'DECLINE' => 'decline') as $status => $outcome) {
         reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
         $c = new QueueClient(); $c->queue = array(array('traceId' => $view($status)['traceId']), new \RuntimeException('lost read'));
@@ -430,18 +446,29 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
         check(count($c->calls) === ($entry === 'callback' ? 1 : 0) && $GLOBALS['events'] === array() && $GLOBALS['orders'][99]->notes === array(), 'fresh_final_prevents_repeat_' . $entry);
     }
 
+    // Pause a scheduled final writer after its outcome check; an authenticated callback interleaves.
+    reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+    $refund->meta = array('_patwc_refund_trace_id:r' => $view('APPROVED')['traceId'], '_patwc_refund_reconcile:r' => '1');
+    $c = new QueueClient(); $c->queue = array($view('APPROVED'), $view('APPROVED'));
+    $GLOBALS['before_outcome_write'] = static function () use ($c, $q): void { adapter($c)->verify_webhook($q); };
+    Refund_Reask::reconcile(505, 'r', 1, adapter($c));
+    check(count($GLOBALS['orders'][99]->notes) === 1 && $refund->get_meta('_patwc_refund_outcome:r') === 'success', 'interleaved_final_writers_record_once');
+    check($GLOBALS['wpdb']->locks === array(), 'final_writer_releases_claim');
+
     // A read can omit metadata: only a matching saved trace supplies the refund identity.
-    foreach (array('immediate', 'scheduled', 'id_only', 'row_only', 'mismatch', 'missing', 'refused') as $case) {
+    foreach (array('immediate', 'scheduled', 'id_only', 'row_only', 'mismatch', 'missing', 'refused', 'row_conflict') as $case) {
         reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
         $final = $view('APPROVED'); unset($final['metadata']);
         if ($case === 'id_only') { $final['metadata'] = array('wcpos_refund_id' => '505'); }
         if ($case === 'row_only') { $final['metadata'] = array('wcpos_refund_row' => 'r'); }
+        $other = new \WC_Order_Refund(999); $other->parent = 99; $GLOBALS['orders'][999] = $other;
+        if ($case === 'row_conflict') { $final['metadata'] = array('wcpos_refund_id' => '505', 'wcpos_refund_row' => 'other'); }
         if ($case === 'refused') { $final['metadata'] = array('wcpos_refund_id' => '999', 'wcpos_refund_row' => 'r'); }
         $refund->meta = array('_patwc_refund_trace_id:r' => $case === 'mismatch' ? 'other-trace' : $final['traceId'], '_patwc_refund_reconcile:r' => '1');
         $c = new QueueClient(); $c->queue = array($final);
         if ($case === 'immediate') { array_unshift($c->queue, array('traceId' => $final['traceId'])); $result = adapter($c)->refund($leg, 505, '5.00'); }
         elseif (in_array($case, array('scheduled', 'id_only', 'row_only'), true)) { Refund_Reask::reconcile(505, 'r', 1, adapter($c)); }
-        else { $result = adapter($c)->read_refund($final['traceId'], $case === 'missing' ? 999 : 505, 'r'); }
+        else { $result = adapter($c)->read_refund($final['traceId'], $case === 'missing' ? 998 : 505, 'r'); }
         if (in_array($case, array('immediate', 'scheduled', 'id_only', 'row_only'), true)) {
             check($refund->get_meta('_patwc_refund_outcome:r') === 'success' && count($GLOBALS['orders'][99]->notes) === 1, 'metadata_free_final_correlates_' . $case);
             check($case === 'immediate' ? $result['status'] === 'succeeded' : $GLOBALS['events'] === array(), 'correlated_final_stops_' . $case);
@@ -449,6 +476,10 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
             check(adapter($c)->read_refund($final['traceId'], 505, 'r')['status'] === 'completed' && count($GLOBALS['orders'][99]->notes) === 1, 'already_recorded_read_is_final_without_duplicate_note');
         } else {
             check($result['status'] === 'pending' && $refund->get_meta('_patwc_refund_outcome:r') === '', 'unrecorded_final_stays_pending_' . $case);
+            if (in_array($case, array('refused', 'row_conflict'), true)) {
+                check($other->get_meta('_patwc_refund_outcome:r') === '' && $refund->get_meta('_patwc_refund_outcome:other') === '' && $GLOBALS['orders'][99]->notes === array(), 'conflicting_identity_writes_nothing_' . $case);
+                check(count($GLOBALS['warnings']) === 1 && $GLOBALS['warnings'][0]['refund_id'] === 505 && $GLOBALS['warnings'][0]['metadata_refund_id'] === $final['metadata']['wcpos_refund_id'] && $GLOBALS['warnings'][0]['row_id'] === 'r' && $GLOBALS['warnings'][0]['metadata_row_id'] === $final['metadata']['wcpos_refund_row'], 'conflicting_identity_warns_with_both_identities_' . $case);
+            }
             if ($case === 'mismatch') { check(count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'still unknown') !== false, 'uncorrelated_final_warns_staff'); }
         }
     }

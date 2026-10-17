@@ -7,6 +7,7 @@ use RuntimeException;
 use Throwable;
 use WCPOS\WooCommercePOS\PayArcTerminal\Logger;
 use WCPOS\WooCommercePOS\PayArcTerminal\PaymentAttempt;
+use WCPOS\WooCommercePOS\PayArcTerminal\PaymentLock;
 use WCPOS\WooCommercePOS\PayArcTerminal\PaymentReconciler;
 use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcClient;
 use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcNotSentException;
@@ -333,6 +334,7 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
                 $observation = $this->read_refund($trace_id, $refund_id, $row_id);
             } catch (Throwable $e) {
                 $observation = array('status' => 'pending');
+                Refund_Reask::schedule_outcome($refund, $row_id);
             }
             if ($observation['status'] === 'completed') {
                 return array('status' => 'succeeded', 'provider_ref' => $trace_id);
@@ -341,7 +343,6 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
                 return array('status' => 'failed', 'provider_ref' => $trace_id);
             }
 
-            Refund_Reask::schedule_outcome($refund, $row_id);
             return array('status' => 'pending', 'provider_ref' => $trace_id);
         } catch (PayArcNotSentException $e) {
             return self::provider_error($e, 'payarc_configuration', 400); // Nothing left the server, key or no key.
@@ -367,6 +368,13 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         // The caller knows the saved trace's refund even when PayArc omits the request metadata.
         if ($refund instanceof \WC_Order_Refund
             && (string) $refund->get_meta(Refund_Reask::key(Refund_Reask::META_TRACE, $row_id), true) === $trace_id) {
+            $metadata_id = self::scalar($transaction['metadata'] ?? array(), 'wcpos_refund_id');
+            $metadata_row = self::scalar($transaction['metadata'] ?? array(), 'wcpos_refund_row');
+            if (($metadata_id !== '' && $metadata_id !== (string) $refund_id) || ($metadata_row !== '' && $metadata_row !== $row_id)) {
+                Logger::log('PayArc refund read conflicts with the saved refund identity', array('refund_id' => $refund_id, 'row_id' => $row_id, 'metadata_refund_id' => $metadata_id, 'metadata_row_id' => $metadata_row), null, 'warning');
+                Refund_Reask::schedule_outcome($refund, $row_id);
+                return self::normalize(array('traceId' => $trace_id));
+            }
             if (empty($transaction['metadata']['wcpos_refund_id'])) {
                 $transaction['metadata']['wcpos_refund_id'] = (string) $refund_id;
             }
@@ -378,7 +386,7 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         $observation = self::normalize($transaction);
         if (in_array($observation['status'], array('completed', 'failed', 'cancelled', 'expired'), true) && $recorded->get_error_code() !== 'payarc_webhook_refund') {
             $observation['status'] = 'pending';
-            if ($refund instanceof \WC_Order_Refund) {
+            if ($refund instanceof \WC_Order_Refund && $recorded->get_error_code() !== 'payarc_webhook_refund_busy') {
                 Refund_Reask::note_unknown($refund, $row_id, __('The final read could not be correlated with a refund record.', 'payarc-terminal-for-woocommerce'));
             }
         }
@@ -578,6 +586,22 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
             Refund_Reask::schedule_outcome($refund, $row_id);
             return new \WP_Error('payarc_webhook_ignored', __('Refund still on the terminal.', 'payarc-terminal-for-woocommerce'), array('status' => 200)); // Not decided yet: nothing to tell staff.
         }
+        // Share the payment path's atomic options-row claim, scoped to this refund part.
+        $operation = 'refund_outcome_' . $row_id;
+        if (!PaymentLock::acquire($refund_id, $operation)) {
+            return new \WP_Error('payarc_webhook_refund_busy', __('Refund outcome recording is in progress.', 'payarc-terminal-for-woocommerce'), array('status' => 202));
+        }
+        try {
+            return $this->record_refund_outcome(PaymentReconciler::reload_order($refund), $order, $row_id, $trace_id, $status);
+        } finally {
+            PaymentLock::release($refund_id, $operation);
+        }
+    }
+
+    /** Record a final outcome only while holding this refund part's atomic claim. */
+    private function record_refund_outcome($refund, $order, string $row_id, string $trace_id, string $status): \WP_Error
+    {
+        $refund_id = (int) $refund->get_id();
         $outcome_key = Refund_Reask::key('_patwc_refund_outcome', $row_id);
         if ((string) $refund->get_meta($outcome_key, true) === $status) {
             return new \WP_Error('payarc_webhook_refund', __('Refund outcome already recorded.', 'payarc-terminal-for-woocommerce'), array('status' => 200));
