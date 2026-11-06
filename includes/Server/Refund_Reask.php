@@ -181,18 +181,24 @@ final class Refund_Reask
      */
     public static function unanswered($order, int $refund_id, string $row_id): void
     {
+        $scheduled = self::schedule($refund_id, 1, (int) $order->get_id(), $row_id);
         $order->add_order_note(sprintf(
-            /* translators: %d: refund id. */
-            __('PayArc did not confirm refund #%d. The refund is being checked again; do not refund it a second time.', 'payarc-terminal-for-woocommerce'),
+            $scheduled
+                /* translators: %d: refund id. */
+                ? __('PayArc did not confirm refund #%d. The refund is being checked again; do not refund it a second time.', 'payarc-terminal-for-woocommerce')
+                /* translators: %d: refund id. */
+                : __('PayArc did not confirm refund #%d and the automatic re-check could not be scheduled. Check the PayArc dashboard before refunding again.', 'payarc-terminal-for-woocommerce'),
             $refund_id
         ));
         $order->save();
-        self::schedule($refund_id, 1, (int) $order->get_id(), $row_id);
     }
 
-    private static function schedule(int $refund_id, int $try, int $order_id, string $row_id): void
+    /** Whether the ask is queued: scheduled now, or an identical event already was. */
+    private static function schedule(int $refund_id, int $try, int $order_id, string $row_id): bool
     {
-        wp_schedule_single_event(time() + self::DELAY, self::HOOK, array($refund_id, $try, $order_id, $row_id));
+        $args = array($refund_id, $try, $order_id, $row_id);
+
+        return wp_schedule_single_event(time() + self::DELAY, self::HOOK, $args) || wp_next_scheduled(self::HOOK, $args);
     }
 
     /**
@@ -264,10 +270,10 @@ final class Refund_Reask
      */
     private static function again($order, int $refund_id, int $try, string $row_id): void
     {
-        if ($try < self::LIMIT) {
-            self::schedule($refund_id, $try + 1, (int) $order->get_id(), $row_id);
+        if ($try < self::LIMIT && self::schedule($refund_id, $try + 1, (int) $order->get_id(), $row_id)) {
             return;
         }
+        // Out of tries, or the next ask could not be scheduled: staff are told now.
         Logger::log('PayArc never answered a refund; staff asked to check the dashboard', array('refund_id' => $refund_id), null, 'warning');
         $refund = wc_get_order($refund_id);
         $order->add_order_note(sprintf(

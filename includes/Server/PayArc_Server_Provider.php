@@ -101,6 +101,11 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
             // Free's replay of a lost answer must send the byte-identical command under the same key:
             // the sale as first sent, whatever the settings say now, and built from nothing current.
             $payload = $held !== null && isset($held['payload']) && is_array($held['payload']) ? $held['payload'] : $this->sale_payload($row, $reader_id, $order);
+            if ($held === null) {
+                // Before the send: the settings guard must see a sale that may reach the terminal. A crash
+                // before the send leaves a marker that goes stale at Sale_Guard::STALE_AFTER_SECONDS.
+                Sale_Guard::hold((string) $row['id'], (int) $order->get_id(), $payload);
+            }
             // The row id is the idempotency key: a replay after a lost answer is the same command.
             try {
                 $response = $this->client->sale($payload, (string) $row['id']);
@@ -109,6 +114,7 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
                     // A replay the client could not send: the first command may be on the terminal.
                     return $this->indeterminate('payarc_unanswered', $e->getMessage());
                 }
+                Sale_Guard::release((string) $row['id']);
 
                 return self::provider_error($e, 'payarc_configuration', 400); // Nothing left the server.
             } catch (PayArcRequestException $e) {
@@ -116,6 +122,9 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
                 if (self::unanswered($e) || self::idempotency_conflict($e)) {
                     Sale_Guard::hold((string) $row['id'], (int) $order->get_id(), $payload);
                     return $this->indeterminate('payarc_unanswered', $e->getMessage());
+                }
+                if ($held === null) {
+                    Sale_Guard::release((string) $row['id']); // Refused: this sale never reached the terminal.
                 }
 
                 return self::provider_error($e);
@@ -378,7 +387,8 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         $observation = self::normalize($transaction);
         if (in_array($observation['status'], array('completed', 'failed', 'cancelled', 'expired'), true) && $recorded->get_error_code() !== 'payarc_webhook_refund') {
             $observation['status'] = 'pending';
-            if ($refund instanceof \WC_Order_Refund && $recorded->get_error_code() !== 'payarc_webhook_refund_busy') {
+            // An unverified outcome is recorded and noted already; it is not uncorrelated.
+            if ($refund instanceof \WC_Order_Refund && !in_array($recorded->get_error_code(), array('payarc_webhook_refund_busy', 'payarc_webhook_refund_unverified'), true)) {
                 Refund_Reask::note_unknown($refund, $row_id, __('The final read could not be correlated with a refund record.', 'payarc-terminal-for-woocommerce'));
             }
         }
@@ -606,6 +616,9 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
             Refund_Reask::schedule_outcome($refund, $row_id);
             return new \WP_Error('payarc_webhook_ignored', __('Refund still on the terminal.', 'payarc-terminal-for-woocommerce'), array('status' => 200)); // Not decided yet: nothing to tell staff.
         }
+        if ($status === 'success' && !self::refund_money_matches($transaction, $refund, $row_id)) {
+            $status = 'unverified';
+        }
         // Share the payment path's atomic options-row claim, scoped to this refund part.
         $operation = 'refund_outcome_' . $row_id;
         if (!PaymentLock::acquire($refund_id, $operation)) {
@@ -623,11 +636,18 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
     {
         $refund_id = (int) $refund->get_id();
         $outcome_key = Refund_Reask::key('_patwc_refund_outcome', $row_id);
+        // Approved, but not for the money asked: recorded (which stops further reads) and told once; a later
+        // matching read overwrites it with success.
+        $unverified = new \WP_Error('payarc_webhook_refund_unverified', __('Refund approved for an amount or currency other than requested.', 'payarc-terminal-for-woocommerce'), array('status' => 200));
         if ((string) $refund->get_meta($outcome_key, true) === $status) {
-            return new \WP_Error('payarc_webhook_refund', __('Refund outcome already recorded.', 'payarc-terminal-for-woocommerce'), array('status' => 200));
+            return $status === 'unverified' ? $unverified : new \WP_Error('payarc_webhook_refund', __('Refund outcome already recorded.', 'payarc-terminal-for-woocommerce'), array('status' => 200));
         }
         $refund->update_meta_data($outcome_key, $status);
         $refund->save();
+        if ($status === 'unverified') {
+            Refund_Reask::note_unknown($refund, $row_id, __('PayArc approved it, but the amount or currency does not match the request.', 'payarc-terminal-for-woocommerce'));
+            return $unverified;
+        }
         $order->add_order_note($status === 'success'
             /* translators: 1: refund id, 2: PayArc traceId. */
             ? sprintf(__('PayArc confirmed refund #%1$d on the terminal (trace %2$s).', 'payarc-terminal-for-woocommerce'), $refund_id, $trace_id)
@@ -639,6 +659,25 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         $order->save();
 
         return new \WP_Error('payarc_webhook_refund', __('Refund outcome recorded.', 'payarc-terminal-for-woocommerce'), array('status' => 200));
+    }
+
+    /**
+     * Whether PayArc approved exactly the amount and currency this refund part asked for. Only `approved` is
+     * money PayArc confirms; a missing request, amount or currency is not a match.
+     *
+     * @param array<string, mixed> $transaction
+     * @param object $refund
+     */
+    private static function refund_money_matches(array $transaction, $refund, string $row_id): bool
+    {
+        $request = (array) $refund->get_meta(Refund_Reask::key(Refund_Reask::META_REQUEST, $row_id), true);
+        $amount = isset($transaction['amount']) && is_array($transaction['amount']) ? $transaction['amount'] : array();
+        $currency = strtoupper(self::scalar($amount, 'currency'));
+        if (!isset($request['amount']['total'], $request['amount']['currency']) || !isset($amount['approved']) || !is_numeric($amount['approved']) || $currency === '') {
+            return false;
+        }
+
+        return (int) $amount['approved'] === (int) $request['amount']['total'] && $currency === strtoupper((string) $request['amount']['currency']);
     }
 
     /**
