@@ -101,7 +101,7 @@ Facts the adapter rests on, and what they mean for the store:
 
 ### Conformance suite
 
-Pro's provider conformance suite (`tests/conformance/`) runs the real adapter over a scripted PayArc (behind `pre_http_request`) under wp-env with the sibling Pro checkout and compares the recorded transcripts in `tests/conformance/transcripts/`. It needs Docker and a sibling checkout at `../woocommerce-pos-pro` on `next` with its Composer dependencies installed:
+Pro's provider conformance suite (`tests/conformance/`) runs the real adapter over a scripted PayArc (behind `pre_http_request`) under wp-env with the sibling Pro checkout and compares the recorded transcripts in `tests/conformance/transcripts/`. It needs Docker and a sibling checkout at `../woocommerce-pos-pro` on `main` with its Composer dependencies installed:
 
 ```bash
 composer install
