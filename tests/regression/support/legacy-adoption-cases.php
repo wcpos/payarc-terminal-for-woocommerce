@@ -142,6 +142,21 @@ $GLOBALS['pro_adopt_answer'] = null;
 patwc_reset_world(); $order = order_with_attempt(20, $live, false); Legacy_Adoption::$reader = reader_returning(array('traceId' => 'trace-1', 'transactionId' => 'P1ABCDEF12345678', 'status' => 'APPROVED', 'chargeId' => 'ch_x', 'amount' => array('total' => 100, 'approved' => 100, 'currency' => 'USD')));
 $r = Legacy_Adoption::adopt_order(20);
 check($r instanceof WP_Error && $r->get_error_code() === 'patwc_adoption_conflict' && !Legacy_Adoption::is_deferral($r) && !$order->paid && $GLOBALS['adoptions'] === array() && strpos(implode(' ', $order->notes), 'verification failed') !== false, 'an approved sale for another amount is a conflict: held, not paid, not adopted, noted');
+// The conflict survives the reload: the attempt is final now, but the recorded verification failure still holds the panel back, without a second read.
+check(PaymentAttempt::current($order)['status'] === 'failure' && !Legacy_Adoption::has_live_pointer($order), 'the conflicting sale left a final attempt behind');
+$r = Legacy_Adoption::adopt_order(20);
+check($r instanceof WP_Error && $r->get_error_code() === 'patwc_adoption_conflict' && strpos($r->get_error_message(), 'amount') !== false && $GLOBALS['reads'] === array('trace-1') && $GLOBALS['adoptions'] === array(), 'a second render is still a conflict, with no second read from PayArc');
+$order->paid = true;
+check(Legacy_Adoption::adopt_order(20) === null, 'once the order is settled by hand the conflict lets go');
+// The common page load is unchanged: a final attempt with no recorded failure is nothing.
+patwc_reset_world(); order_with_attempt(23, array('status' => 'decline') + $live);
+check(Legacy_Adoption::adopt_order(23) === null, 'a final attempt with no verification failure is nothing to adopt');
+// A conflict is not a deferral: the upgrade pass drops the order from the queue and still stamps its version.
+patwc_reset_world(); $order = order_with_attempt(24, array('status' => 'failure') + $live); $order->meta[WCPOS\WooCommercePOS\PayArcTerminal\PaymentReconciler::META_VERIFICATION_FAILURE] = 'PayArc approved amount mismatch.';
+$GLOBALS['order_ids'] = array(24);
+check(Legacy_Adoption::adopt_order(24, false) instanceof WP_Error, 'the pass sees the recorded conflict as a refusal');
+Legacy_Adoption::upgrade();
+check(!isset($GLOBALS['options']['patwc_adoption_queue']) && $GLOBALS['options']['patwc_adoption_version'] === Legacy_Adoption::VERSION, 'a recorded conflict leaves the queue and does not hold the version stamp');
 
 // The upgrade pass: a snapshot of unpaid orders carrying an attempt, pages of 25, deferrals stay queued, done once.
 patwc_reset_world(); $GLOBALS['filters']['patwc_uses_pro_panel'] = false; $GLOBALS['order_ids'] = array(1);
