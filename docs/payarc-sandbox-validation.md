@@ -39,7 +39,7 @@ Required settings:
 6. If the plugin warns that the credentials look like the opposite environment, switch the mode or replace the credentials before continuing.
 7. Confirm the response reports connected status. Terminal Registry records may be shown, but they are reporting metadata only and do not activate terminal processing.
 8. Enter the intended PAX terminal's serial number (found on the back of the device, labeled S/N) after PayArc validates it for the merchant.
-9. Save settings and enable the gateway. Transaction requests are blocked if the saved Test/Live mode or PayArc credentials do not match the context used by the stored Connect AccessToken.
+9. Save settings and switch the gateway on under POS → Settings → Checkout. Transaction requests are blocked if the saved Test/Live mode or PayArc credentials do not match the context used by the stored Connect AccessToken.
 10. Confirm PayArc has the plugin callback URL configured if merchant-specific callback registration is required.
 11. For Test, start a low-value test order payment from WooCommerce POS/order-pay. For Live, start with the smallest practical live transaction and confirm with PayArc/support before broader rollout.
 12. Complete the terminal interaction and confirm the order is paid only after PayArc callback/get-transaction confirmation.

@@ -25,6 +25,7 @@ foreach (array(
     $root . '/includes/Services/PayArcRequestException.php',
     $root . '/includes/Services/PayArcClient.php',
     $root . '/includes/Services/TerminalService.php',
+    $root . '/includes/Legacy_Adoption.php',
     $root . '/includes/Services/PayArcPaymentService.php',
 ) as $file) {
     require_once $file;

@@ -1,0 +1,640 @@
+<?php
+
+declare(strict_types=1);
+
+namespace WCPOS\WooCommercePOSPro\Payments\Server {
+    abstract class Abstract_Provider_Adapter
+    {
+        public function diagnostics(\WC_Payment_Gateway $gateway): array { return array(); }
+        public function describe(\WC_Payment_Gateway $gateway): array { return array(); }
+        public function answer(string $ref, string $prompt_id, string $button_id) { return null; }
+        public function capture(string $ref) { return null; }
+        public function refund(array $row, int $refund_id, string $amount) { return null; }
+        public function verify_webhook(\WP_REST_Request $request) { return null; }
+        protected function indeterminate(string $code, string $message): \WP_Error
+        {
+            return new \WP_Error($code, $message, array('indeterminate' => true, 'status' => 502));
+        }
+    }
+    final class Money_Units
+    {
+        public static function minor(string $amount, string $currency): int { return (int) round(((float) $amount) * 100); }
+        public static function major(int $minor, string $currency): string { return number_format($minor / 100, 2, '.', ''); }
+    }
+}
+
+namespace {
+    class WC_Payment_Gateway {}
+    class WP_Error
+    {
+        public $code; public $message; public $data;
+        public function __construct($code = '', $message = '', $data = null) { $this->code = $code; $this->message = $message; $this->data = $data; }
+        public function get_error_code() { return $this->code; }
+        public function get_error_message() { return $this->message; }
+        public function get_error_data() { return $this->data; }
+    }
+    class WP_REST_Request
+    {
+        private $body = ''; private $headers = array(); private $params = array();
+        public function set_body($b) { $this->body = (string) $b; }
+        public function get_body() { return $this->body; }
+        public function set_header($k, $v) { $this->headers[strtolower($k)] = $v; }
+        public function get_header($k) { return $this->headers[strtolower($k)] ?? null; }
+        public function set_query_params(array $p) { $this->params = $p; }
+        public function get_param($k) { return $this->params[$k] ?? null; }
+    }
+    class PatwcOrder
+    {
+        public $id; public $meta = array(); public $notes = array(); public $paid = false; public $saves = 0;
+        public function __construct(int $id) { $this->id = $id; }
+        public function get_id() { return $this->id; }
+        public function is_paid() { return $this->paid; }
+        public function get_meta($k, $single = true) { $value = $this->meta[$k] ?? ($single ? '' : array()); if (isset($GLOBALS['after_meta_read'])) { ($GLOBALS['after_meta_read'])($k); } return $value; }
+        public function get_meta_data() { $out = array(); foreach ($this->meta as $k => $v) { $out[] = (object) array('key' => $k, 'value' => $v); } return $out; }
+        public function update_meta_data($k, $v) { if (strpos($k, '_patwc_refund_outcome:') === 0 && !empty($GLOBALS['before_outcome_write'])) { $cb = $GLOBALS['before_outcome_write']; unset($GLOBALS['before_outcome_write']); $cb(); } $this->meta[$k] = $v; }
+        public function add_order_note($n) { $this->notes[] = $n; }
+        public function save() { $this->saves++; }
+    }
+    class WC_Order_Refund extends PatwcOrder
+    {
+        public $parent = 0; public $reason = 'why';
+        public function get_parent_id() { return $this->parent; }
+        public $amount = '92.95';
+        public function get_amount() { return $this->amount; }
+        public function get_reason() { return $this->reason; }
+    }
+    function is_wp_error($t) { return $t instanceof WP_Error; }
+    function __($t, $d = '') { return $t; }
+    function wc_get_order($id) { return $GLOBALS['stale_orders'][$id] ?? $GLOBALS['orders'][$id] ?? false; }
+    function clean_post_cache($id) { unset($GLOBALS['stale_orders'][$id]); }
+    function add_action($h, $c, $p = 10, $a = 1) { $GLOBALS['actions'][$h][] = $c; }
+    function wp_schedule_single_event($t, $h, $args = array()) { if (!empty($GLOBALS['interrupt_schedule'])) { throw new \RuntimeException('interrupted'); } if (!empty($GLOBALS['schedule_false'])) { return false; } $GLOBALS['event_times'][] = $t; $GLOBALS['events'][] = array($h, $args); return true; }
+    function wp_next_scheduled($h, $args = array()) { return in_array(array($h, $args), $GLOBALS['events'], true) ? time() + 60 : false; }
+    function wp_clear_scheduled_hook($h, $args) { $GLOBALS['events'] = array_values(array_filter($GLOBALS['events'], static function ($event) use ($h, $args) { return $event !== array($h, $args); })); }
+    function wp_generate_uuid4() { return sprintf('%08x-0000-4000-8000-%012x', ++$GLOBALS['uuid'], $GLOBALS['uuid']); }
+    function rest_url($p = '') { return 'https://store.test/wp-json/' . $p; }
+    function add_query_arg($args, $url = '') { return $url . '?' . http_build_query($args); }
+    function wcpos_pro_payment_id_for_action($provider, $ref) { $GLOBALS['lookups'][] = $ref; return $GLOBALS['adopted'][$ref] ?? null; }
+    function wp_json_encode($d) { return json_encode($d); }
+    function apply_filters($h, $v) { return $v; }
+    function wc_get_logger() { return new class {
+        public function warning($message, $context) { $GLOBALS['warnings'][] = $context; }
+        public function info($message, $context) {}
+    }; }
+    function get_option($k, $d = false) { if (!empty($GLOBALS['notoptions'][$k])) { return $d; } return $GLOBALS['options'][$k] ?? $d; }
+    function is_serialized($d) { return is_string($d) && (strpos($d, 'a:') === 0 || strpos($d, 's:') === 0 || strpos($d, 'i:') === 0 || $d === 'b:0;' || strpos($d, 'b:') === 0 || strpos($d, 'd:') === 0 || $d === 'N;'); }
+    function update_option($k, $v, $autoload = null) { $GLOBALS['options'][$k] = $v; return true; }
+    function delete_option($k) { unset($GLOBALS['options'][$k]); return true; }
+    /**
+     * The options table as Sale_Guard reads it: the rows under its prefix, and a compare-and-delete.
+     * $GLOBALS['options'] is the table; $GLOBALS['notoptions'] names rows the object cache wrongly
+     * lists as missing, which get_option() honours and the table does not.
+     */
+    class PatwcGuardWpdb
+    {
+        public $options = 'wp_options';
+        public $last_error = '';
+        public $locks = array();
+        public function esc_like($s) { return addcslashes($s, '_%\\'); }
+        public function prepare($q, ...$a) { return json_encode(array($q, $a)); }
+        public function get_var($prepared)
+        {
+            list($sql, $args) = json_decode($prepared, true);
+            if ($sql !== "SELECT option_value FROM {$this->options} WHERE option_name = %s") { throw new \RuntimeException('guard wpdb: unsupported query: ' . $sql); }
+            if (isset($this->locks[$args[0]])) { return $this->locks[$args[0]]; }
+            return isset($GLOBALS['options'][$args[0]]) ? serialize($GLOBALS['options'][$args[0]]) : null;
+        }
+        public function get_results($prepared, $output = null)
+        {
+            if ($this->last_error !== '') { return array(); } // What wpdb does on a failed query.
+            list($sql, $args) = json_decode($prepared, true);
+            if ($sql !== "SELECT option_name, option_value FROM {$this->options} WHERE option_name LIKE %s") { throw new \RuntimeException('guard wpdb: unsupported query: ' . $sql); }
+            $prefix = stripcslashes(substr($args[0], 0, -1));
+            $rows = array();
+            foreach ($GLOBALS['options'] as $k => $v) { if (strpos((string) $k, $prefix) === 0) { $rows[] = array('option_name' => (string) $k, 'option_value' => serialize($v)); } }
+            return $rows;
+        }
+        public $before_delete;
+        public function query($prepared)
+        {
+            list($sql, $args) = json_decode($prepared, true);
+            if (strpos($sql, 'INSERT IGNORE INTO') === 0) { if (isset($this->locks[$args[0]])) { return 0; } $this->locks[$args[0]] = $args[1]; return 1; }
+            if ($this->before_delete) { $cb = $this->before_delete; $this->before_delete = null; $cb(); }
+            if ($sql !== "DELETE FROM {$this->options} WHERE option_name = %s AND option_value = %s") { throw new \RuntimeException('guard wpdb: unsupported query: ' . $sql); }
+            if (($this->locks[$args[0]] ?? null) === $args[1]) { unset($this->locks[$args[0]]); return 1; }
+            if (isset($GLOBALS['options'][$args[0]]) && serialize($GLOBALS['options'][$args[0]]) === $args[1]) { unset($GLOBALS['options'][$args[0]]); return 1; }
+            return 0;
+        }
+    }
+    $GLOBALS['wpdb'] = new PatwcGuardWpdb();
+
+    $root = dirname(__DIR__, 3);
+    foreach (array('Settings', 'Logger', 'PaymentLock', 'PaymentAttempt', 'PaymentReconciler', 'Utils/Money', 'Utils/PayArcIds', 'Services/PayArcRequestException', 'Services/PayArcNotSentException', 'Services/PayArcClient', 'Services/TerminalService', 'Server/Sale_Guard', 'Server/Refund_Reask', 'Server/PayArc_Server_Provider') as $file) {
+        require_once $root . '/includes/' . $file . '.php';
+    }
+}
+
+namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
+    use WCPOS\WooCommercePOS\PayArcTerminal\PaymentAttempt;
+    use WCPOS\WooCommercePOS\PayArcTerminal\Server\PayArc_Server_Provider;
+    use WCPOS\WooCommercePOS\PayArcTerminal\Server\Refund_Reask;
+    use WCPOS\WooCommercePOS\PayArcTerminal\Server\Sale_Guard;
+    use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcClient;
+    use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcNotSentException;
+    use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcRequestException;
+    use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
+
+    /** Queued answers; each call pops one. A Throwable is thrown. */
+    final class QueueClient extends PayArcClient
+    {
+        public $queue = array();
+        public $calls = array();
+        /** The sale marker as the send found it. */
+        public $held_at_sale = array();
+        public function __construct() {}
+        private function next(string $op, array $args)
+        {
+            $this->calls[] = array($op, $args);
+            if (!$this->queue) { throw new \LogicException('Unexpected PayArc call: ' . $op); }
+            $a = array_shift($this->queue);
+            if ($a instanceof \Throwable) { throw $a; }
+            return $a;
+        }
+        public function sale(array $payload, string $key): array { $this->held_at_sale[] = Sale_Guard::held($key); return $this->next('sale', array($payload, $key)); }
+        public function refund(array $payload, string $key): array { return $this->next('refund', array($payload, $key)); }
+        public function get_transaction(string $trace): array { return $this->next('get', array($trace)); }
+        public function cancel(string $trace, array $payload, string $key): array { return $this->next('cancel', array($trace, $payload, $key)); }
+    }
+
+    function check(bool $ok, string $what): void { if (!$ok) { throw new \RuntimeException('FAILED: ' . $what); } }
+    function settings(): Settings
+    {
+        return new Settings(array('mode' => 'test', 'connect_mid' => '123456789012', 'connect_secret_key' => 's', 'default_terminal_id' => '1234567890', 'terminal_registry' => array(array('terminal_id' => '1234567890', 'label' => 'Front')), 'callback_url_token' => 'urltok', 'callback_bearer_token' => 'bearertok', 'tender_type' => 'CREDIT', 'print_receipt' => '0'));
+    }
+    function adapter(QueueClient $client): PayArc_Server_Provider { return new PayArc_Server_Provider(settings(), $client); }
+    function approved(string $trace, array $extra = array()): array
+    {
+        return array('transactionId' => 'P1ABCDEF12345678', 'transType' => 'SALE', 'status' => 'APPROVED', 'chargeId' => 'ch_1', 'authCode' => 'A1', 'amount' => array('total' => 9295, 'subtotal' => 9295, 'approved' => 9295, 'currency' => 'USD'), 'card' => array('brand' => 'VISA', 'entryMode' => 'CHIP', 'last4' => '4242'), 'processor' => array('responseCode' => '00', 'responseText' => 'Approved'), 'traceId' => $trace, 'metadata' => array('wcpos_payment_id' => 'aaaaaaaa-1111-4222-8333-444455556666', 'terminal_id' => '1234567890')) + $extra;
+    }
+    function reset(): void { $GLOBALS['warnings'] = array(); $GLOBALS['stale_orders'] = array(); $GLOBALS['schedule_false'] = false; $GLOBALS['orders'] = array(99 => new \PatwcOrder(99)); $GLOBALS['events'] = array(); $GLOBALS['adopted'] = array(); $GLOBALS['lookups'] = array(); $GLOBALS['uuid'] = 0; $GLOBALS['options'] = array(); $GLOBALS['notoptions'] = array(); }
+    $row = array('id' => 'aaaaaaaa-1111-4222-8333-444455556666', 'order_id' => 99, 'amount' => '92.95', 'currency' => 'USD', 'provider_refs' => array());
+
+    // Create: the row id is the key; a lost answer, a 5xx and a key conflict are indeterminate; a refusal is final.
+    reset(); $c = new QueueClient(); $c->queue = array(array('traceId' => 't1', 'response' => array('status' => 'SUCCESS')));
+    $r = adapter($c)->create_reader_action($row, '1234567890');
+    check($r['ref'] === 't1' && $r['expires_at'] === null, 'create returns the traceId with no provider deadline');
+    check($c->calls[0][1][1] === $row['id'], 'the sale is keyed on the row id');
+    check($c->calls[0][1][0]['metadata']['wcpos_payment_id'] === $row['id'] && strlen($c->calls[0][1][0]['transactionId']) === 16, 'the sale names the row and a 16-character transaction id');
+    check(Sale_Guard::any_live() && PaymentAttempt::has_in_flight_attempts(), 'a sale on the terminal holds the settings guard');
+    $sent = $c->calls[0][1][0];
+    // A replay (lost answer or a later sweep) sends the byte-identical command, whatever the settings say now.
+    $c = new QueueClient(); $c->queue = array(array('traceId' => 't1', 'response' => array('status' => 'SUCCESS')));
+    (new PayArc_Server_Provider(new Settings(array('mode' => 'test', 'connect_mid' => '123456789012', 'connect_secret_key' => 's', 'default_terminal_id' => '1234567890', 'terminal_registry' => array(array('terminal_id' => '1234567890', 'label' => 'Front')), 'tender_type' => 'DEBIT', 'print_receipt' => '3')), $c))->create_reader_action($row, '1234567890');
+    check($c->calls[0][1][0] === $sent, 'the replay sends the first command byte for byte');
+    // Even with nothing current to build from: the held command is the whole of it.
+    $c = new QueueClient(); $c->queue = array(array('traceId' => 't1', 'response' => array('status' => 'SUCCESS')));
+    (new PayArc_Server_Provider(new Settings(array('mode' => 'test', 'default_terminal_id' => '')), $c))->create_reader_action($row, '1234567890');
+    check($c->calls[0][1][0] === $sent, 'a replay on a site whose terminal and MID are gone still sends the first command');
+    // Every held sale is found on its own, whatever else was held or released around it, and a stale one is swept.
+    Sale_Guard::hold('second-till', 7, array('y' => 2));
+    Sale_Guard::release('second-till');
+    check(Sale_Guard::any_live(), 'releasing another till\'s sale leaves this one holding the guard');
+    // A marker only the table knows of (another process wrote it, and this one's object cache lists it as missing) holds the guard and survives.
+    $GLOBALS['options']['patwc_pro_sale_' . md5('other-process')] = array('order_id' => 5, 'trace_id' => '', 'payload' => array('z' => 1), 'updated_at' => time());
+    $GLOBALS['notoptions']['patwc_pro_sale_' . md5('other-process')] = true;
+    Sale_Guard::release($row['id']);
+    check(Sale_Guard::any_live() && isset($GLOBALS['options']['patwc_pro_sale_' . md5('other-process')]), 'a marker the object cache lists as missing still holds the guard, and is not deleted');
+    check(Sale_Guard::held('other-process') !== null, 'a replay finds its own marker in the table when the object cache lists it as missing');
+    // The table cannot be read: wpdb answers an empty array and sets last_error; the guard fails closed.
+    $GLOBALS['wpdb']->last_error = 'MySQL server has gone away';
+    check(Sale_Guard::any_live(), 'an unreadable options table counts as a sale on a terminal');
+    $GLOBALS['wpdb']->last_error = '';
+    // A stale marker re-held between the read and the delete is kept: the delete compares the value it read.
+    $GLOBALS['notoptions'] = array(); unset($GLOBALS['options']['patwc_pro_sale_' . md5('other-process')]); Sale_Guard::release($row['id']);
+    $GLOBALS['options']['patwc_pro_sale_' . md5('late')] = array('order_id' => 1, 'trace_id' => '', 'payload' => array(), 'updated_at' => time() - 1801);
+    $GLOBALS['wpdb']->before_delete = static function () { Sale_Guard::hold('late', 1, array('again' => true)); };
+    check(!Sale_Guard::any_live() && Sale_Guard::held('late') !== null, 'a marker held again between the read and the delete survives the sweep');
+    Sale_Guard::release('late');
+    $GLOBALS['notoptions'] = array(); unset($GLOBALS['options']['patwc_pro_sale_' . md5('other-process')]);
+    Sale_Guard::hold($row['id'], 99, $sent, 't1');
+    $GLOBALS['options']['patwc_pro_sale_' . md5('old')] = array('order_id' => 1, 'trace_id' => '', 'payload' => array(), 'updated_at' => time() - 1801);
+    check(!Sale_Guard::held('old') && Sale_Guard::any_live() && !isset($GLOBALS['options']['patwc_pro_sale_' . md5('old')]), 'a stale marker neither holds the guard nor survives the pass');
+    // A replay the client cannot send is indeterminate: the first command may be on the terminal.
+    $c = new QueueClient(); $c->queue = array(new PayArcNotSentException('PayArc Connect base URL is not configured.'));
+    $r = adapter($c)->create_reader_action($row, '1234567890');
+    check($r instanceof \WP_Error && !empty($r->get_error_data()['indeterminate']), 'a replay the client refused to send is indeterminate');
+    Sale_Guard::release($row['id']);
+    foreach (array(new \RuntimeException('PayArc request failed before receiving a response.'), new PayArcRequestException('x', 'SERVER_ERROR', 503), new PayArcRequestException('Idempotency key already used', 'IDEMPOTENCY_KEY_CONFLICT', 400)) as $e) {
+        $c = new QueueClient(); $c->queue = array($e);
+        $r = adapter($c)->create_reader_action($row, '1234567890');
+        check($r instanceof \WP_Error && !empty($r->get_error_data()['indeterminate']), 'unanswered create is indeterminate: ' . get_class($e));
+    }
+    $c = new QueueClient(); $c->queue = array(new PayArcRequestException('offline', 'TERMINAL_OFFLINE', 409));
+    $r = adapter($c)->create_reader_action($row, '1234567890');
+    check($r instanceof \WP_Error && empty($r->get_error_data()['indeterminate']) && $r->get_error_data()['detail']['code'] === 'TERMINAL_OFFLINE', 'a 409 TERMINAL_OFFLINE is a final refusal with its code');
+    // The marker is written before the send, so the settings guard sees a sale that may reach the terminal;
+    // a send that provably reached nothing releases it, one that may have reached the terminal keeps it.
+    foreach (array('accepted' => array('traceId' => 't1'), 'no_trace' => array('response' => array()), 'lost' => new \RuntimeException('lost'), 'not_sent' => new PayArcNotSentException('not configured'), 'refused' => new PayArcRequestException('offline', 'TERMINAL_OFFLINE', 409)) as $case => $answer) {
+        reset(); $c = new QueueClient(); $c->queue = array($answer);
+        adapter($c)->create_reader_action($row, '1234567890');
+        check(($c->held_at_sale[0]['order_id'] ?? null) === 99 && ($c->held_at_sale[0]['payload'] ?? null) === $c->calls[0][1][0], 'held_before_send_' . $case);
+        check((Sale_Guard::held($row['id']) !== null) === in_array($case, array('accepted', 'no_trace', 'lost'), true), 'marker_after_send_' . $case);
+    }
+    // A replay keeps today's behaviour: a refusal of the replay leaves the first command's marker.
+    reset(); Sale_Guard::hold($row['id'], 99, $sent);
+    $c = new QueueClient(); $c->queue = array(new PayArcRequestException('offline', 'TERMINAL_OFFLINE', 409));
+    $r = adapter($c)->create_reader_action($row, '1234567890');
+    check($r instanceof \WP_Error && empty($r->get_error_data()['indeterminate']) && $c->calls[0][1][0] === $sent && Sale_Guard::held($row['id']) !== null, 'replay_refusal_keeps_marker');
+
+    // Fetch: not visible yet is pending; statuses map; the traceId is the transaction reference.
+    $c = new QueueClient(); $c->queue = array(new PayArcRequestException('nf', 'TRANSACTION_NOT_FOUND', 400), array('status' => 'processing', 'traceId' => 't1'), approved('t1'), array('status' => 'TIMEOUT', 'traceId' => 't1'), array('status' => 'DECLINE', 'traceId' => 't1', 'processor' => array('responseText' => 'Do not honor')), array('status' => 'aborted', 'traceId' => 't1'));
+    $a = adapter($c);
+    check($a->fetch('t1')['status'] === 'pending', 'TRANSACTION_NOT_FOUND after a sale is pending, not failure');
+    check($a->fetch('t1')['status'] === 'in_progress', 'processing is in_progress');
+    Sale_Guard::hold('aaaaaaaa-1111-4222-8333-444455556666', 99, array('x' => 1), 't1'); Sale_Guard::hold('other-row', 99, array('x' => 2), 't9');
+    $done = $a->fetch('t1');
+    check(Sale_Guard::held('aaaaaaaa-1111-4222-8333-444455556666') === null && Sale_Guard::held('other-row') !== null, 'a sale that ended releases its own guard, not another sale\'s on the same order');
+    check($done['status'] === 'completed' && $done['amount'] === '92.95' && $done['provider_refs']['transaction_id'] === 't1' && $done['provider_refs']['charge_id'] === 'ch_1' && $done['provider_refs']['payarc_transaction_id'] === 'P1ABCDEF12345678', 'APPROVED is completed with the traceId as the transaction reference');
+    check($a->fetch('t1')['status'] === 'expired', 'TIMEOUT is expired');
+    $d = $a->fetch('t1'); check($d['status'] === 'failed' && $d['failure_reason'] === 'Do not honor', 'DECLINE is failed with the processor text');
+    check($a->fetch('t1')['status'] === 'cancelled', 'aborted is cancelled');
+    // A sale the old panel started carries no row id in its metadata; Pro's adoption record names the row to release.
+    Sale_Guard::hold('adopted-row', 99, array(), 'trace-adopted'); $GLOBALS['adopted']['trace-adopted'] = 'adopted-row';
+    $c2 = new QueueClient(); $c2->queue = array(array('traceId' => 'trace-adopted', 'status' => 'processing'), array('traceId' => 'trace-adopted', 'status' => 'TIMEOUT'));
+    $a2 = adapter($c2);
+    $a2->fetch('trace-adopted');
+    check(Sale_Guard::held('adopted-row') !== null, 'a sale still on the terminal keeps the marker its adoption holds');
+    $a2->fetch('trace-adopted');
+    check(Sale_Guard::held('adopted-row') === null, 'an adopted old-panel sale that ended releases the marker its adoption holds');
+
+    // Cancel: 200 is confirmed by the read; a refusal leaves the read to decide.
+    $c = new QueueClient(); $c->queue = array(array('metadata' => array('terminal_id' => '1234567890')), array('traceId' => 't1'), array('status' => 'aborted', 'traceId' => 't1'));
+    check(adapter($c)->cancel('t1') === 'final', 'an accepted cancel whose read shows aborted is final');
+    $c = new QueueClient(); $c->queue = array(array('metadata' => array()), new PayArcRequestException('card processing', 'TRANSACTION_CANNOT_BE_CANCELLED', 400), approved('t1'));
+    check(adapter($c)->cancel('t1') === 'requested', 'a refused cancel whose read shows approved is requested');
+    $c = new QueueClient(); $c->queue = array(array('metadata' => array()), array('traceId' => 't1'), array('status' => 'processing', 'traceId' => 't1'));
+    check(adapter($c)->cancel('t1') === 'requested', 'an accepted cancel whose read is still live is requested');
+
+    // Refund: a Pro leg links by its own transaction id; a historical row by the old panel's attempt, else by reading the traceId.
+    reset(); $refund = new \WC_Order_Refund(501); $refund->parent = 99; $GLOBALS['orders'][501] = $refund;
+    $leg = array('id' => 'r', 'order_id' => 99, 'currency' => 'USD', 'provider_refs' => array('action' => 't1', 'transaction_id' => 't1', 'payarc_transaction_id' => 'P1ABCDEF12345678', 'reader' => '1234567890', 'payarc_tender_type' => 'DEBIT'));
+    $c = new QueueClient(); $c->queue = array(array('traceId' => 'rf1'), array('amount' => array('total' => 500, 'approved' => 500, 'currency' => 'USD')) + approved('rf1', array('transType' => 'REFUND')));
+    $r = adapter($c)->refund($leg, 501, '5.00');
+    check($r['status'] === 'succeeded' && $r['provider_ref'] === 'rf1', 'a refund the terminal already approved is succeeded');
+    check($c->calls[0][1][0]['originalTransactionId'] === 'P1ABCDEF12345678' && $c->calls[0][1][0]['amount']['total'] === 500 && strlen($c->calls[0][1][0]['transactionId']) === 16, 'the refund links the sale by its transaction id, in cents');
+    $key = $refund->meta[Refund_Reask::key(Refund_Reask::META_ATTEMPT, 'r')];
+    check($key !== '' && $c->calls[0][1][1] === $key && $refund->saves >= 1, 'the attempt key is saved on the record, for this row, before the POST and sent');
+    check($c->calls[0][1][0]['tenderType'] === 'DEBIT', 'the refund names the tender the sale was taken with');
+    // The same refund record on a second payment row is a second command with its own key and id.
+    $leg2 = $leg; $leg2['id'] = 'r2'; $leg2['provider_refs']['payarc_transaction_id'] = 'P2ABCDEF12345678'; $leg2['provider_refs']['action'] = 't2'; $leg2['provider_refs']['transaction_id'] = 't2';
+    $c2 = new QueueClient(); $c2->queue = array(array('traceId' => 'rfB'), approved('rfB', array('transType' => 'REFUND')));
+    adapter($c2)->refund($leg2, 501, '3.00');
+    check($c2->calls[0][1][1] !== $key && $c2->calls[0][1][0]['transactionId'] !== $c->calls[0][1][0]['transactionId'] && $c2->calls[0][1][0]['originalTransactionId'] === 'P2ABCDEF12345678', 'a refund split across two payments is two commands with two keys and two ids');
+    check(!isset($c->calls[0][1][0]['metadata']['wcpos_payment_id']) && $c->calls[0][1][0]['metadata']['wcpos_refund_row'] === 'r', 'a refund never carries the sale row\'s key in its metadata');
+    // Historical: the old panel's attempt on the order names the sale by its charge id.
+    reset(); $refund = new \WC_Order_Refund(502); $refund->parent = 99; $GLOBALS['orders'][502] = $refund;
+    $GLOBALS['orders'][99]->meta[PaymentAttempt::META_ATTEMPT_HISTORY] = array(array('transaction_id' => 'POLD000000000001', 'charge_id' => 'ch_old', 'trace_id' => 'told', 'terminal_id' => '1234567890', 'status' => 'success'));
+    $c = new QueueClient(); $c->queue = array(array('traceId' => 'rf2'), array('status' => 'processing', 'traceId' => 'rf2'));
+    $r = adapter($c)->refund(array('id' => 'h', 'currency' => 'USD', 'provider_refs' => array('transaction_id' => 'ch_old')), 502, '5.00');
+    check($r['status'] === 'pending' && $r['provider_ref'] === 'rf2' && $c->calls[0][1][0]['originalTransactionId'] === 'POLD000000000001', 'a historical row refunds through the old attempt that carries its charge id, pending until the terminal answers');
+    check(end($GLOBALS['events']) === array('patwc_reconcile_refund', array(502, 'h', 1, 99)), 'immediate_pending_schedules_reconciliation');
+    check(abs(end($GLOBALS['event_times']) - time() - 60) <= 1, 'first_read_waits_one_minute');
+    // Unanswered POST: pending, note, re-ask under the same key; a read before the POST is an error with nothing scheduled.
+    reset(); $refund = new \WC_Order_Refund(503); $refund->parent = 99; $GLOBALS['orders'][503] = $refund;
+    $c = new QueueClient(); $c->queue = array(new \RuntimeException('PayArc request failed before receiving a response.'));
+    $r = adapter($c)->refund($leg, 503, '5.00');
+    check($r === array('status' => 'pending', 'provider_ref' => null) && count($GLOBALS['events']) === 1 && $GLOBALS['events'][0][1] === array(503, 1, 99, 'r'), 'an unanswered refund POST keeps the record pending and schedules the re-ask for this row');
+    check(strpos($GLOBALS['orders'][99]->notes[0], 'did not confirm refund #503') !== false, 'the order says so');
+    $key = $refund->meta[Refund_Reask::key(Refund_Reask::META_ATTEMPT, 'r')];
+    // A conflict on the key, or nothing sent, keeps the question open; a refusal of the identical replay closes it.
+    $c = new QueueClient(); $c->queue = array(new PayArcRequestException('dup', 'DUPLICATE_REQUEST', 400));
+    Refund_Reask::run(503, 1, 99, 'r', adapter($c));
+    check(end($GLOBALS['events'])[1] === array(503, 2, 99, 'r') && count($GLOBALS['orders'][99]->notes) === 1, 'a key conflict on the re-ask proves nothing: asked again, no note');
+    $c = new QueueClient(); $c->queue = array(new PayArcNotSentException('not configured'));
+    Refund_Reask::run(503, 2, 99, 'r', adapter($c));
+    check(end($GLOBALS['events'])[1] === array(503, 3, 99, 'r'), 'a request that never left the server is asked again later');
+    $c = new QueueClient(); $c->queue = array(array('traceId' => 'rf3'));
+    Refund_Reask::run(503, 3, 99, 'r', adapter($c));
+    check($c->calls[0][1][1] === $key && $c->calls[0][1][0]['originalTransactionId'] === 'P1ABCDEF12345678' && $refund->meta[Refund_Reask::key(Refund_Reask::META_TRACE, 'r')] === 'rf3', 'the re-ask replays the identical request under the saved key and records the traceId');
+    check(end($GLOBALS['events']) === array('patwc_reconcile_refund', array(503, 'r', 1, 99)), 'saved_trace_schedules_reconciliation');
+    Refund_Reask::run(503, 4, 99, 'r', adapter($c));
+    check(count($c->calls) === 1, 'an answered record is not asked again');
+    check(strpos($GLOBALS['orders'][99]->notes[0], 'being checked again') !== false, 'a scheduled re-ask tells staff it is being checked again');
+    // A re-ask that cannot be scheduled tells staff to check the dashboard, never that it is being checked.
+    reset(); $refund = new \WC_Order_Refund(507); $refund->parent = 99; $GLOBALS['orders'][507] = $refund;
+    $GLOBALS['schedule_false'] = true;
+    $c = new QueueClient(); $c->queue = array(new \RuntimeException('PayArc request failed before receiving a response.'));
+    check(adapter($c)->refund($leg, 507, '5.00') === array('status' => 'pending', 'provider_ref' => null), 'an unanswered refund POST stays pending when the re-ask cannot be scheduled');
+    $notes = $GLOBALS['orders'][99]->notes;
+    check(count($notes) === 1 && strpos($notes[0], 'refund #507 and the automatic re-check could not be scheduled. Check the PayArc dashboard') !== false && strpos($notes[0], 'being checked again') === false && $GLOBALS['events'] === array(), 'unscheduled_reask_tells_staff_to_check_dashboard');
+    $c = new QueueClient(); $c->queue = array(new PayArcNotSentException('not configured'));
+    Refund_Reask::run(507, 1, 99, 'r', adapter($c));
+    check(count($GLOBALS['orders'][99]->notes) === 2 && strpos($GLOBALS['orders'][99]->notes[1], 'has not confirmed refund #507') !== false && strpos($GLOBALS['orders'][99]->notes[1], 'Check the PayArc dashboard') !== false && $GLOBALS['events'] === array(), 'unscheduled_ask_before_limit_tells_staff_now');
+    $GLOBALS['schedule_false'] = false;
+    // WordPress refuses an identical event inside ten minutes; that event already queued is the ask, scheduled.
+    reset(); $refund = new \WC_Order_Refund(508); $refund->parent = 99; $GLOBALS['orders'][508] = $refund;
+    $GLOBALS['events'] = array(array(Refund_Reask::HOOK, array(508, 1, 99, 'r'))); $GLOBALS['schedule_false'] = true;
+    $c = new QueueClient(); $c->queue = array(new \RuntimeException('PayArc request failed before receiving a response.'));
+    check(adapter($c)->refund($leg, 508, '5.00') === array('status' => 'pending', 'provider_ref' => null), 'an unanswered refund POST whose identical ask is queued stays pending');
+    $notes = $GLOBALS['orders'][99]->notes;
+    check(count($notes) === 1 && strpos($notes[0], 'being checked again') !== false && strpos($notes[0], 'could not be scheduled') === false, 'identical_event_counts_as_scheduled');
+    $GLOBALS['events'] = array(array(Refund_Reask::HOOK, array(508, 2, 99, 'r')));
+    $c = new QueueClient(); $c->queue = array(new PayArcNotSentException('not configured'));
+    Refund_Reask::run(508, 1, 99, 'r', adapter($c));
+    check(array_filter($GLOBALS['orders'][99]->notes, static function ($n) { return strpos($n, 'Check the PayArc dashboard') !== false; }) === array(), 'identical_next_ask_needs_no_dashboard_note');
+    $GLOBALS['schedule_false'] = false;
+    reset(); $refund = new \WC_Order_Refund(504); $refund->parent = 99; $GLOBALS['orders'][504] = $refund;
+    $c = new QueueClient(); $c->queue = array(new \RuntimeException('lost'));
+    $r = adapter($c)->refund(array('id' => 'h', 'currency' => 'USD', 'provider_refs' => array('transaction_id' => '00000000-0000-4000-8000-000000000001')), 504, '5.00');
+    check($r instanceof \WP_Error && !empty($r->get_error_data()['indeterminate']) && $GLOBALS['events'] === array() && !isset($refund->meta[Refund_Reask::key(Refund_Reask::META_ATTEMPT, 'h')]), 'a lost read before the POST is an error with nothing made or scheduled');
+    // Nothing left the server (credentials or Connect state): a plain refusal, no record kept pending.
+    reset(); $refund = new \WC_Order_Refund(506); $refund->parent = 99; $GLOBALS['orders'][506] = $refund;
+    $c = new QueueClient(); $c->queue = array(new PayArcNotSentException('PayArc Live mode requires a Live Connect AccessToken.'));
+    $r = adapter($c)->refund($leg, 506, '5.00');
+    check($r instanceof \WP_Error && empty($r->get_error_data()['indeterminate']) && $GLOBALS['events'] === array(), 'a refund the client refused to send is a plain error');
+    $c = new QueueClient(); $c->queue = array(new PayArcNotSentException('PayArc Connect base URL is not configured.'));
+    $r = adapter($c)->create_reader_action($row, '1234567890');
+    check($r instanceof \WP_Error && empty($r->get_error_data()['indeterminate']), 'a sale the client refused to send is a plain error, not a pending leg');
+
+    // Callback: the URL token or PayArc's bearer authenticates; neither is 401 before any call; adoption outranks the metadata.
+    reset();
+    $body = json_encode(array('traceId' => '00000000-0000-4000-8000-000000000001', 'transType' => 'SALE', 'status' => 'APPROVED'));
+    $make = static function (array $query, string $bearer) use ($body): \WP_REST_Request { $q = new \WP_REST_Request(); $q->set_body($body); $q->set_query_params($query); if ($bearer !== '') { $q->set_header('Authorization', 'Bearer ' . $bearer); } return $q; };
+    $c = new QueueClient();
+    $r = adapter($c)->verify_webhook($make(array('patwc_cb' => 'wrong'), 'wrong'));
+    check($r instanceof \WP_Error && $r->get_error_data()['status'] === 401 && $c->calls === array() && $GLOBALS['lookups'] === array(), 'an unauthenticated callback is refused before any lookup or call');
+    foreach (array(array(array('patwc_cb' => 'urltok'), ''), array(array(), 'bearertok')) as $auth) {
+        $c = new QueueClient(); $c->queue = array(approved('00000000-0000-4000-8000-000000000001'));
+        $r = adapter($c)->verify_webhook($make($auth[0], $auth[1]));
+        check(is_array($r) && $r['payment_id'] === 'aaaaaaaa-1111-4222-8333-444455556666' && $r['patch']['status'] === 'captured' && $r['patch']['provider_refs']['action'] === '00000000-0000-4000-8000-000000000001' && $r['patch']['provider_refs']['transaction_id'] === '00000000-0000-4000-8000-000000000001', 'an authenticated callback settles from the read with complete refs');
+    }
+    $GLOBALS['adopted']['00000000-0000-4000-8000-000000000001'] = 'bbbbbbbb-1111-4222-8333-444455556666';
+    $GLOBALS['lookups'] = array();
+    $c = new QueueClient(); $c->queue = array(approved('00000000-0000-4000-8000-000000000001'));
+    $r = adapter($c)->verify_webhook($make(array('patwc_cb' => 'urltok'), ''));
+    check($r['payment_id'] === 'bbbbbbbb-1111-4222-8333-444455556666' && $GLOBALS['lookups'] === array('00000000-0000-4000-8000-000000000001'), 'Pro\'s adoption record outranks the metadata and is read before the call');
+    $c = new QueueClient(); $c->queue = array(new PayArcRequestException('nf', 'TRANSACTION_NOT_FOUND', 400));
+    $r = adapter($c)->verify_webhook($make(array('patwc_cb' => 'urltok'), ''));
+    check($r instanceof \WP_Error && $r->get_error_data()['status'] === 404, 'a transaction PayArc cannot see is unknown');
+    // A refund callback is noted on the order, once.
+    reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+    $rb = json_encode(array('traceId' => '00000000-0000-4000-8000-000000000002', 'transType' => 'SALE', 'status' => 'DECLINE')); // The body lies about the type; the read decides.
+    $q = new \WP_REST_Request(); $q->set_body($rb); $q->set_query_params(array('patwc_cb' => 'urltok'));
+    $view = static function (string $status): array { return array('traceId' => '00000000-0000-4000-8000-000000000002', 'transType' => '', 'status' => $status, 'amount' => array('total' => 500, 'approved' => 500, 'currency' => 'USD'), 'metadata' => array('wcpos_refund_id' => '505', 'wcpos_refund_row' => 'r')); }; // No transType on the read: the refund it names still routes it.
+    $asked = array('amount' => array('total' => 500, 'currency' => 'USD')); // The 5.00 USD command a confirmed read is checked against.
+    $refund->meta[Refund_Reask::key(Refund_Reask::META_REQUEST, 'r')] = array('amount' => array('total' => 9295, 'currency' => 'USD')); // The command attempt_key() saved before the POST.
+    $c = new QueueClient(); $c->queue = array($view('processing'), $view('DECLINE'), $view('DECLINE'));
+    $r = adapter($c)->verify_webhook($q);
+    check($r instanceof \WP_Error && $r->get_error_data()['status'] === 200 && $GLOBALS['orders'][99]->notes === array() && $refund->meta[Refund_Reask::key(Refund_Reask::META_TRACE, 'r')] === '00000000-0000-4000-8000-000000000002', 'a refund still on the terminal is acknowledged without a note, and its trace recorded so no re-ask repeats it');
+    $r = adapter($c)->verify_webhook($q);
+    check($r instanceof \WP_Error && $r->get_error_data()['status'] === 200 && count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'refund #505 (92.95 USD, trace 00000000-0000-4000-8000-000000000002) was not returned: PayArc reports it as DECLINE') !== false && strpos($GLOBALS['orders'][99]->notes[0], 'Delete the record') !== false, 'a refund outcome is noted on the order, naming the part and the trace');
+    // A refund of a split payment is one record: when this part is less than the record (the rest went to
+    // another PayArc row, or to cash, which PayArc's meta cannot see), a failed part never says to delete it.
+    $refund->amount = '112.95';
+    unset($refund->meta[Refund_Reask::key('_patwc_refund_outcome', 'r')]);
+    $c->queue = array($view('DECLINE'));
+    adapter($c)->verify_webhook($q);
+    check(count($GLOBALS['orders'][99]->notes) === 2 && strpos($GLOBALS['orders'][99]->notes[1], 'refund #505 (92.95 USD, trace 00000000-0000-4000-8000-000000000002) was not returned') !== false && strpos($GLOBALS['orders'][99]->notes[1], 'Other parts of this refund') !== false && strpos($GLOBALS['orders'][99]->notes[1], 'Delete the record') === false, 'a failed part of a split refund names its amount and keeps the record');
+    $refund->amount = '92.95'; unset($refund->meta[Refund_Reask::key(Refund_Reask::META_REQUEST, 'r')]);
+    check($GLOBALS['orders'][99]->paid === false, 'a refund is never settled against a sale row');
+    adapter($c)->verify_webhook($q);
+    check(count($GLOBALS['orders'][99]->notes) === 2, 'the same outcome is noted once');
+
+    // Bounded reads use the callback's real outcome path, never a refund POST.
+    Refund_Reask::register();
+    check(isset($GLOBALS['actions']['patwc_reconcile_refund']), 'reconciliation_hook_registered');
+    $callback_notes = $GLOBALS['orders'][99]->notes;
+    $calls = count($c->calls); $event_count = count($GLOBALS['events']);
+    Refund_Reask::reconcile(505, 'r', 1, 99, adapter($c));
+    check(count($c->calls) === $calls && count($GLOBALS['events']) === $event_count && $GLOBALS['orders'][99]->notes === $callback_notes, 'callback_first_skips_read_and_note');
+    foreach (array(true, false) as $fails) {
+        reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+        $GLOBALS['schedule_false'] = $fails;
+        $c = new QueueClient(); $c->queue = array(array('traceId' => $view('processing')['traceId']), $view('processing'));
+        check(adapter($c)->refund($leg, 505, '5.00')['status'] === 'pending', 'nonfinal_immediate_stays_pending');
+        check(count($GLOBALS['orders'][99]->notes) === ($fails ? 1 : 0) && count($GLOBALS['events']) === ($fails ? 0 : 1), 'nonfinal_immediate_schedules_once_' . (int) $fails);
+    }
+
+    foreach (array('APPROVED' => 'success', 'DECLINE' => 'decline') as $status => $outcome) {
+        reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+        $c = new QueueClient(); $c->queue = array(array('traceId' => $view($status)['traceId']), new \RuntimeException('lost read'));
+        check(adapter($c)->refund($leg, 505, '5.00')['status'] === 'pending', 'failed_immediate_read_stays_pending');
+        check(end($GLOBALS['events']) === array('patwc_reconcile_refund', array(505, 'r', 1, 99)), 'failed_immediate_read_schedules_reconciliation');
+        $GLOBALS['events'] = array(); $c = new QueueClient(); $c->queue = array($view($status));
+        Refund_Reask::reconcile(505, 'r', 1, 99, adapter($c));
+        check($refund->get_meta('_patwc_refund_outcome:r') === $outcome && count($GLOBALS['orders'][99]->notes) === 1 && $GLOBALS['events'] === array(), 'scheduled_final_records_outcome_and_stops_' . $status);
+        $notes = $GLOBALS['orders'][99]->notes;
+        unset($refund->meta['_patwc_refund_outcome:r']); $GLOBALS['orders'][99]->notes = array();
+        $c->queue = array($view($status)); adapter($c)->verify_webhook($q);
+        check($GLOBALS['orders'][99]->notes === $notes, 'scheduled_final_matches_callback_' . $status);
+        Refund_Reask::reconcile(505, 'r', 1, 99, adapter($c));
+        check($c->calls === array(array('get', array($view($status)['traceId'])), array('get', array($view($status)['traceId']))), 'final_replay_never_reads_or_resends_refund');
+        reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+        $GLOBALS['schedule_false'] = true;
+        $c = new QueueClient(); $c->queue = array(array('traceId' => $view($status)['traceId']), $view($status));
+        adapter($c)->refund($leg, 505, '5.00');
+        check(count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'still unknown') === false && $GLOBALS['events'] === array(), 'immediate_final_never_warns_unknown_' . $status);
+        Refund_Reask::reconcile(505, 'r', 1, 99, adapter($c));
+        check(count($c->calls) === 2 && $refund->get_meta('_patwc_refund_outcome:r') === $outcome, 'immediate_final_prevents_scheduled_read_' . $status);
+    }
+    reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+    $c = new QueueClient(); $c->queue = array(array('traceId' => $view('processing')['traceId']), $view('processing'));
+    adapter($c)->refund($leg, 505, '5.00');
+    $c = new QueueClient(); $c->queue = array($view('processing'), new \RuntimeException('lost'), $view('processing'), $view('processing'));
+    for ($try = 1; $try <= 4; $try++) {
+        $GLOBALS['events'] = array();
+        Refund_Reask::reconcile(505, 'r', $try, 99, adapter($c));
+        check($GLOBALS['events'] === ($try < 4 ? array(array('patwc_reconcile_refund', array(505, 'r', $try + 1, 99))) : array()), 'pending_or_failed_read_has_bounded_backoff_' . $try);
+        if ($try < 4) { check(abs(end($GLOBALS['event_times']) - time() - array(300, 900, 3600)[$try - 1]) <= 1, 'backoff_delay_' . $try); }
+    }
+    check($refund->get_meta('_patwc_refund_reconcile:r') === 'exhausted' && $refund->get_meta('_patwc_refund_outcome:r') === '', 'exhaustion_records_reason_without_inventing_outcome');
+    Refund_Reask::reconcile(505, 'r', 4, 99, adapter($c));
+    Refund_Reask::run(505, 1, 99, 'r', adapter($c));
+    check(array_column($c->calls, 0) === array('get', 'get', 'get', 'get') && $GLOBALS['events'] === array(), 'exhausted_trace_never_restarts_or_resends');
+    check(count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'refund #505') !== false && strpos($GLOBALS['orders'][99]->notes[0], 'still unknown; verify it manually') !== false, 'exhaustion_warns_staff_once_with_refund_identity');
+
+    // A final callback lands after the last scheduler's entry check, before exhaustion is saved.
+    reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+    $refund->meta = array('_patwc_refund_request:r' => $asked, '_patwc_refund_trace_id:r' => $view('APPROVED')['traceId'], '_patwc_refund_reconcile:r' => '4');
+    $c = new QueueClient(); $c->queue = array($view('processing'), $view('APPROVED')); $reads = 0;
+    $GLOBALS['after_meta_read'] = static function ($key) use (&$reads, $c, $q): void {
+        if ($key === '_patwc_refund_outcome:r' && ++$reads === 3) {
+            unset($GLOBALS['after_meta_read']); adapter($c)->verify_webhook($q);
+        }
+    };
+    Refund_Reask::reconcile(505, 'r', 4, 99, adapter($c));
+    check($refund->get_meta('_patwc_refund_outcome:r') === 'success' && $refund->get_meta('_patwc_refund_reconcile:r') === '4', 'final_callback_before_exhaustion_prevents_exhausted_marker');
+    check(count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'confirmed refund') !== false && $GLOBALS['events'] === array() && $GLOBALS['wpdb']->locks === array(), 'final_callback_before_exhaustion_leaves_only_definitive_note');
+
+    // A final webhook blocked by exhaustion must request redelivery, not acknowledge lost evidence.
+    reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+    $refund->meta = array('_patwc_refund_request:r' => $asked, '_patwc_refund_trace_id:r' => $view('APPROVED')['traceId'], '_patwc_refund_reconcile:r' => '4');
+    $c = new QueueClient(); $c->queue = array($view('APPROVED'), $view('APPROVED')); $blocked = null;
+    $GLOBALS['after_meta_read'] = static function ($key) use ($c, $q, &$blocked): void {
+        if ($key === '_patwc_refund_outcome:r' && $GLOBALS['wpdb']->locks !== array()) {
+            unset($GLOBALS['after_meta_read']); $blocked = adapter($c)->verify_webhook($q);
+        }
+    };
+    Refund_Reask::schedule_outcome($refund, 'r', 5);
+    check($blocked instanceof \WP_Error && $blocked->get_error_data()['status'] === 503, 'exhaustion_blocked_webhook_requests_redelivery');
+    adapter($c)->verify_webhook($q); adapter($c)->verify_webhook($q);
+    check($refund->get_meta('_patwc_refund_outcome:r') === 'success' && count($GLOBALS['orders'][99]->notes) === 2, 'redelivered_final_records_once_after_exhaustion');
+
+    // A deleted refund must still leave the parent order with actionable terminal advice.
+    reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+    Refund_Reask::schedule_outcome($refund, 'r');
+    $event = end($GLOBALS['events']);
+    unset($GLOBALS['orders'][505]); $GLOBALS['events'] = array();
+    call_user_func_array($GLOBALS['actions'][$event[0]][0], $event[1]);
+    check(count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'refund #505') !== false && strpos($GLOBALS['orders'][99]->notes[0], 'missing') !== false && strpos($GLOBALS['orders'][99]->notes[0], 'verify the terminal') !== false, 'missing_refund_event_warns_parent_order');
+
+    // Cron can queue an event before the request dies without saving its attempt marker.
+    foreach (array('older' => array('1', 2), 'missing' => array('', 1), 'newer' => array('2', 1)) as $case => $attempts) {
+        list($marker, $try) = $attempts;
+        reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+        $refund->meta = array('_patwc_refund_request:r' => $asked, '_patwc_refund_trace_id:r' => $view('APPROVED')['traceId']);
+        if ($marker !== '') { $refund->meta['_patwc_refund_reconcile:r'] = $marker; }
+        $c = new QueueClient(); $c->queue = array($view('APPROVED'));
+        Refund_Reask::reconcile(505, 'r', $try, 99, adapter($c)); // Cron removes the queued event before dispatch.
+        if ($case === 'newer') {
+            check($c->calls === array() && $refund->get_meta('_patwc_refund_reconcile:r') === '2' && $refund->get_meta('_patwc_refund_outcome:r') === '' && $GLOBALS['orders'][99]->notes === array(), 'stale_event_preserves_newer_attempt');
+        } else {
+            check($c->calls === array(array('get', array($view('APPROVED')['traceId']))) && $refund->get_meta('_patwc_refund_reconcile:r') === (string) $try && $refund->get_meta('_patwc_refund_outcome:r') === 'success' && count($GLOBALS['orders'][99]->notes) === 1, 'queued_event_adopts_' . $case . '_marker_and_records_outcome');
+        }
+        check($GLOBALS['events'] === array(), 'recovered_final_or_stale_event_does_not_reschedule_' . $case);
+    }
+
+    // A stalled callback must not swallow the exhaustion check or trigger another provider read.
+    reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+    $refund->meta = array('_patwc_refund_trace_id:r' => $view('processing')['traceId'], '_patwc_refund_reconcile:r' => '4');
+    \WCPOS\WooCommercePOS\PayArcTerminal\PaymentLock::acquire(505, 'refund_outcome_r');
+    Refund_Reask::schedule_outcome($refund, 'r', 5);
+    check($GLOBALS['events'] === array(array('patwc_reconcile_refund', array(505, 'r', 5, 99))), 'locked_exhaustion_queues_one_check');
+    Refund_Reask::schedule_outcome($refund, 'r', 5);
+    check(count($GLOBALS['events']) === 1 && abs(end($GLOBALS['event_times']) - time() - 60) <= 1, 'locked_exhaustion_retry_is_bounded_and_delayed');
+    \WCPOS\WooCommercePOS\PayArcTerminal\PaymentLock::release(505, 'refund_outcome_r');
+    $GLOBALS['events'] = array(); $c = new QueueClient();
+    Refund_Reask::reconcile(505, 'r', 5, 99, adapter($c)); Refund_Reask::reconcile(505, 'r', 5, 99, adapter($c));
+    check($c->calls === array() && $GLOBALS['events'] === array() && $refund->get_meta('_patwc_refund_reconcile:r') === 'exhausted' && count($GLOBALS['orders'][99]->notes) === 1, 'unlocked_exhaustion_notes_once_without_read');
+
+    reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+    $GLOBALS['interrupt_schedule'] = true;
+    try { Refund_Reask::schedule_outcome($refund, 'r'); } catch (\RuntimeException $e) { check($e->getMessage() === 'interrupted', 'schedule_interruption'); }
+    unset($GLOBALS['interrupt_schedule']);
+    check($refund->get_meta('_patwc_refund_reconcile:r') === '', 'interrupted_schedule_does_not_persist_attempt');
+    $refund->meta['_patwc_refund_reconcile:r'] = '3';
+    Refund_Reask::schedule_outcome($refund, 'r');
+    check($GLOBALS['events'] === array(array('patwc_reconcile_refund', array(505, 'r', 3, 99))) && $refund->get_meta('_patwc_refund_reconcile:r') === '3', 'orphan_attempt_reschedules_without_restarting_budget');
+
+    // Repeated pending callbacks warn only on entering the persisted scheduling-failure state.
+    reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+    $GLOBALS['schedule_false'] = true;
+    $c = new QueueClient(); $c->queue = array($view('processing'), $view('processing'));
+    adapter($c)->verify_webhook($q); adapter($c)->verify_webhook($q);
+    check(count($GLOBALS['orders'][99]->notes) === 1 && $refund->get_meta('_patwc_refund_reconcile_schedule_failed:r') === true, 'repeated_schedule_failure_warns_once');
+    $GLOBALS['schedule_false'] = false; Refund_Reask::schedule_outcome($refund, 'r');
+    check($refund->get_meta('_patwc_refund_reconcile_schedule_failed:r') === false, 'successful_schedule_clears_failure');
+    $GLOBALS['events'] = array(); $GLOBALS['schedule_false'] = true; Refund_Reask::schedule_outcome($refund, 'r');
+    check(count($GLOBALS['orders'][99]->notes) === 2, 'new_schedule_failure_after_recovery_warns_again');
+
+    // False can mean an identical event already exists, or a genuine scheduling failure.
+    foreach (array(false, true) as $duplicate) {
+        reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+        $refund->meta['_patwc_refund_trace_id:r'] = $view('processing')['traceId'];
+        $GLOBALS['schedule_false'] = true;
+        $GLOBALS['events'] = array(array('patwc_reconcile_refund', array(505, 'r', $duplicate ? 3 : 2, 99)));
+        Refund_Reask::schedule_outcome($refund, 'r', 3);
+        check($refund->get_meta('_patwc_refund_reconcile:r') === '3', 'schedule_false_preserves_only_identical_event_' . (int) $duplicate);
+        check(count($GLOBALS['orders'][99]->notes) === ($duplicate ? 0 : 1), 'only_genuine_schedule_failure_warns_staff');
+        $GLOBALS['schedule_false'] = false;
+        if (!$duplicate) {
+            $GLOBALS['events'] = array(); Refund_Reask::run(505, 1, 99, 'r');
+            check($refund->get_meta('_patwc_refund_reconcile:r') === '3' && $GLOBALS['events'] === array(array('patwc_reconcile_refund', array(505, 'r', 3, 99))), 'trace_resumes_failed_schedule_at_same_attempt');
+            $GLOBALS['events'] = array(); $GLOBALS['schedule_false'] = true;
+            Refund_Reask::schedule_outcome($refund, 'r', 4); $GLOBALS['schedule_false'] = false;
+            $c = new QueueClient(); $c->queue = array($view('processing')); adapter($c)->verify_webhook($q);
+            check($refund->get_meta('_patwc_refund_reconcile:r') === '4' && $GLOBALS['events'] === array(array('patwc_reconcile_refund', array(505, 'r', 4, 99))), 'callback_resumes_failed_schedule_at_same_attempt');
+            $GLOBALS['events'] = array(); $c->queue = array($view('processing'));
+            Refund_Reask::reconcile(505, 'r', 4, 99, adapter($c));
+            check($refund->get_meta('_patwc_refund_reconcile:r') === 'exhausted' && $GLOBALS['events'] === array(), 'resumed_schedule_exhausts_original_budget');
+        }
+    }
+
+    foreach (array('schedule', 'reconcile', 'callback') as $entry) {
+        reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+        $refund->meta = array('_patwc_refund_request:r' => $asked, '_patwc_refund_trace_id:r' => $view('APPROVED')['traceId'], '_patwc_refund_reconcile:r' => '1');
+        $GLOBALS['stale_orders'][505] = clone $refund; $refund->meta['_patwc_refund_outcome:r'] = 'success';
+        $c = new QueueClient(); $c->queue = array($view('APPROVED'));
+        if ($entry === 'schedule') { Refund_Reask::schedule_outcome($GLOBALS['stale_orders'][505], 'r', 2); }
+        elseif ($entry === 'reconcile') { Refund_Reask::reconcile(505, 'r', 1, 99, adapter($c)); }
+        else { adapter($c)->verify_webhook($q); }
+        check(count($c->calls) === ($entry === 'callback' ? 1 : 0) && $GLOBALS['events'] === array() && $GLOBALS['orders'][99]->notes === array(), 'fresh_final_prevents_repeat_' . $entry);
+    }
+
+    // Pause a scheduled final writer after its outcome check; an authenticated callback interleaves.
+    reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+    $refund->meta = array('_patwc_refund_request:r' => $asked, '_patwc_refund_trace_id:r' => $view('APPROVED')['traceId'], '_patwc_refund_reconcile:r' => '1');
+    $c = new QueueClient(); $c->queue = array($view('APPROVED'), $view('APPROVED'));
+    $GLOBALS['before_outcome_write'] = static function () use ($c, $q): void { adapter($c)->verify_webhook($q); };
+    Refund_Reask::reconcile(505, 'r', 1, 99, adapter($c));
+    check(count($GLOBALS['orders'][99]->notes) === 1 && $refund->get_meta('_patwc_refund_outcome:r') === 'success', 'interleaved_final_writers_record_once');
+    check($GLOBALS['wpdb']->locks === array(), 'final_writer_releases_claim');
+
+    // A read can omit metadata: only a matching saved trace supplies the refund identity.
+    foreach (array('immediate', 'scheduled', 'id_only', 'webhook_id_only', 'row_only', 'mismatch', 'missing', 'refused', 'row_conflict') as $case) {
+        reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+        $final = $view('APPROVED'); unset($final['metadata']);
+        if (in_array($case, array('id_only', 'webhook_id_only'), true)) { $final['metadata'] = array('wcpos_refund_id' => '505'); }
+        if ($case === 'row_only') { $final['metadata'] = array('wcpos_refund_row' => 'r'); }
+        $other = new \WC_Order_Refund(999); $other->parent = 99; $GLOBALS['orders'][999] = $other;
+        if ($case === 'row_conflict') { $final['metadata'] = array('wcpos_refund_id' => '505', 'wcpos_refund_row' => 'other'); }
+        if ($case === 'refused') { $final['metadata'] = array('wcpos_refund_id' => '999', 'wcpos_refund_row' => 'r'); }
+        $refund->meta = array('_patwc_refund_request:r' => $asked, '_patwc_refund_trace_id:r' => $case === 'mismatch' ? 'other-trace' : $final['traceId'], '_patwc_refund_reconcile:r' => '1');
+        $c = new QueueClient(); $c->queue = array($final);
+        if ($case === 'immediate') { array_unshift($c->queue, array('traceId' => $final['traceId'])); $result = adapter($c)->refund($leg, 505, '5.00'); }
+        elseif ($case === 'webhook_id_only') { adapter($c)->verify_webhook($q); Refund_Reask::reconcile(505, 'r', 1, 99, adapter($c)); }
+        elseif (in_array($case, array('scheduled', 'id_only', 'row_only'), true)) { Refund_Reask::reconcile(505, 'r', 1, 99, adapter($c)); }
+        else { $result = adapter($c)->read_refund($final['traceId'], $case === 'missing' ? 998 : 505, 'r'); }
+        if (in_array($case, array('immediate', 'scheduled', 'id_only', 'webhook_id_only', 'row_only'), true)) {
+            check($refund->get_meta('_patwc_refund_outcome:r') === 'success' && count($GLOBALS['orders'][99]->notes) === 1, 'metadata_free_final_correlates_' . $case);
+            if ($case === 'webhook_id_only') { check($refund->get_meta('_patwc_refund_outcome:') === '' && count($c->calls) === 1, 'webhook_restores_row_before_write_and_scheduled_read_is_noop'); }
+            check($case === 'immediate' ? $result['status'] === 'succeeded' : $GLOBALS['events'] === array(), 'correlated_final_stops_' . $case);
+            $c->queue = array($final);
+            check(adapter($c)->read_refund($final['traceId'], 505, 'r')['status'] === 'completed' && count($GLOBALS['orders'][99]->notes) === 1, 'already_recorded_read_is_final_without_duplicate_note');
+        } else {
+            check($result['status'] === 'pending' && $refund->get_meta('_patwc_refund_outcome:r') === '', 'unrecorded_final_stays_pending_' . $case);
+            if (in_array($case, array('refused', 'row_conflict'), true)) {
+                check($other->get_meta('_patwc_refund_outcome:r') === '' && $refund->get_meta('_patwc_refund_outcome:other') === '' && $GLOBALS['orders'][99]->notes === array(), 'conflicting_identity_writes_nothing_' . $case);
+                check(count($GLOBALS['warnings']) === 1 && $GLOBALS['warnings'][0]['refund_id'] === 505 && $GLOBALS['warnings'][0]['metadata_refund_id'] === $final['metadata']['wcpos_refund_id'] && $GLOBALS['warnings'][0]['row_id'] === 'r' && $GLOBALS['warnings'][0]['metadata_row_id'] === $final['metadata']['wcpos_refund_row'], 'conflicting_identity_warns_with_both_identities_' . $case);
+            }
+            if ($case === 'mismatch') { check(count($GLOBALS['orders'][99]->notes) === 1 && strpos($GLOBALS['orders'][99]->notes[0], 'still unknown') !== false, 'uncorrelated_final_warns_staff'); }
+        }
+    }
+
+    reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+    $refund->meta['_patwc_refund_trace_id:r'] = $view('APPROVED')['traceId'];
+    $final = $view('APPROVED'); $final['metadata']['wcpos_refund_row'] = 'other';
+    $c = new QueueClient(); $c->queue = array($final); adapter($c)->verify_webhook($q);
+    check($refund->get_meta('_patwc_refund_outcome:other') === '' && $GLOBALS['orders'][99]->notes === array(), 'webhook_conflicting_row_writes_nothing');
+    check(count($GLOBALS['warnings']) === 1 && $GLOBALS['warnings'][0]['row_id'] === 'r' && $GLOBALS['warnings'][0]['metadata_row_id'] === 'other' && $GLOBALS['warnings'][0]['refund_id'] === 505 && $GLOBALS['warnings'][0]['metadata_refund_id'] === '505', 'webhook_conflicting_row_warns_with_both_identities');
+
+    // An approved refund counts only for the amount and currency its part asked for; `approved` is the one field read.
+    foreach (array('short' => array('total' => 500, 'approved' => 400, 'currency' => 'USD'), 'currency' => array('total' => 500, 'approved' => 500, 'currency' => 'EUR'), 'no_approved' => array('total' => 500, 'currency' => 'USD'), 'no_request' => array('total' => 500, 'approved' => 500, 'currency' => 'USD')) as $case => $amount) {
+        reset(); $refund = new \WC_Order_Refund(505); $refund->parent = 99; $GLOBALS['orders'][505] = $refund;
+        if ($case === 'no_request') { $refund->meta['_patwc_refund_attempt:r'] = 'saved-key'; } // A record whose command was never saved.
+        $read = array('amount' => $amount) + $view('APPROVED');
+        $c = new QueueClient(); $c->queue = array(array('traceId' => $read['traceId']), $read, $read);
+        check(adapter($c)->refund($leg, 505, '5.00')['status'] === 'pending', 'unverified_refund_answers_pending_' . $case);
+        $notes = $GLOBALS['orders'][99]->notes;
+        check($refund->get_meta('_patwc_refund_outcome:r') === 'unverified' && count($notes) === 1 && strpos($notes[0], 'still unknown') !== false && strpos($notes[0], 'does not match the request') !== false && strpos($notes[0], 'confirmed refund') === false && $GLOBALS['events'] === array(), 'unverified_refund_noted_once_' . $case);
+        $r = adapter($c)->verify_webhook($q);
+        check($r->get_error_code() === 'payarc_webhook_refund_unverified' && $r->get_error_data()['status'] === 200 && $GLOBALS['orders'][99]->notes === $notes && $GLOBALS['events'] === array(), 'repeat_unverified_webhook_answers_200_without_note_' . $case);
+        Refund_Reask::reconcile(505, 'r', 1, 99, adapter($c)); Refund_Reask::schedule_outcome($refund, 'r');
+        check(count($c->calls) === 3 && $GLOBALS['events'] === array(), 'unverified_outcome_stops_reads_' . $case);
+        $refund->meta['_patwc_refund_request:r'] = $asked; $c->queue = array($view('APPROVED'));
+        adapter($c)->verify_webhook($q);
+        check($refund->get_meta('_patwc_refund_outcome:r') === 'success' && count($GLOBALS['orders'][99]->notes) === 2 && strpos($GLOBALS['orders'][99]->notes[1], 'PayArc confirmed refund #505') !== false, 'matching_read_confirms_unverified_' . $case);
+    }
+
+    echo "server-adapter cases passed\n";
+}

@@ -22,6 +22,16 @@ if (!function_exists('update_option')) {
     }
 }
 
+// The POS switch (POS → Settings → Checkout) is the gateway's only switch; these cases run with it on.
+if (!function_exists('wcpos_get_settings')) {
+    function wcpos_get_settings($group = '')
+    {
+        return $GLOBALS['patwc_pos_settings'][$group] ?? array();
+    }
+}
+$GLOBALS['patwc_pos_settings'] = array('payment_gateways' => array('gateways' => array(Settings::GATEWAY_ID => array('enabled' => true))));
+Settings::reset_enabled_for_pos_cache();
+
 if (!function_exists('admin_url')) {
     function admin_url($path = '')
     {
@@ -300,8 +310,8 @@ $validationErrors = Gateway::validate_settings(array(
 ));
 
 patwc_assert_same(array(
-    'PayArc MID (or tenant id) is required when the gateway is enabled.',
-    'Enter the PayArc terminal serial number before enabling the gateway.',
+    'PayArc MID (or tenant id) is required when the POS has the gateway switched on.',
+    'Enter the PayArc terminal serial number before switching the gateway on in the POS.',
     'Tender type must be CREDIT or DEBIT.',
     'Print receipt must be one of 0, 1, 2, or 3.',
 ), $validationErrors, 'Gateway validation errors mismatch.');
