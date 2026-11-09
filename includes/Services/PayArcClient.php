@@ -7,6 +7,9 @@ use WCPOS\WooCommercePOS\PayArcTerminal\Logger;
 use WCPOS\WooCommercePOS\PayArcTerminal\Settings;
 use WCPOS\WooCommercePOS\PayArcTerminal\Utils\PayArcIds;
 
+// The regression scripts load class files by hand; the exception the client throws before sending travels with it.
+require_once __DIR__ . '/PayArcNotSentException.php';
+
 class PayArcClient
 {
     /** @var Settings */
@@ -34,10 +37,26 @@ class PayArcClient
     public function sale(array $payload, string $idempotency_key): array
     {
         if (trim($idempotency_key) === '') {
-            throw new RuntimeException('PayArc idempotency key is required.');
+            throw new PayArcNotSentException('PayArc idempotency key is required.');
         }
 
         return $this->request('POST', '/v3/transactions/sale', $payload, $idempotency_key);
+    }
+
+    /**
+     * A terminal refund command, linked to a sale by its transactionId; PayArc answers with a traceId
+     * and the terminal decides the outcome.
+     *
+     * @param array<string, mixed> $payload
+     * @return array<string, mixed>
+     */
+    public function refund(array $payload, string $idempotency_key): array
+    {
+        if (trim($idempotency_key) === '') {
+            throw new PayArcNotSentException('PayArc idempotency key is required.');
+        }
+
+        return $this->request('POST', '/v3/transactions/refund', $payload, $idempotency_key);
     }
 
     /**
@@ -67,7 +86,7 @@ class PayArcClient
         }
 
         if (trim($idempotency_key) === '') {
-            throw new RuntimeException('PayArc idempotency key is required.');
+            throw new PayArcNotSentException('PayArc idempotency key is required.');
         }
 
         return $this->request('POST', '/v3/transactions/' . rawurlencode($trace_id) . '/cancel', $payload, $idempotency_key);
@@ -87,11 +106,11 @@ class PayArcClient
         $token = $credential === 'secret_key' ? $this->settings->connect_secret_key() : $this->connect_access_token();
 
         if ($baseUrl === '') {
-            throw new RuntimeException('PayArc Connect base URL is not configured.');
+            throw new PayArcNotSentException('PayArc Connect base URL is not configured.');
         }
 
         if ($token === '') {
-            throw new RuntimeException($credential === 'secret_key'
+            throw new PayArcNotSentException($credential === 'secret_key'
                 ? 'PayArc SecretKey/API bearer token is not configured. Enter it in the gateway settings.'
                 : 'PayArc Connect access token is not configured. Press Connect PayArc in the gateway settings.');
         }
@@ -119,7 +138,7 @@ class PayArcClient
             $body = json_encode($payload);
 
             if (!is_string($body)) {
-                throw new RuntimeException('Unable to encode PayArc request body.');
+                throw new PayArcNotSentException('Unable to encode PayArc request body.');
             }
 
             $args['body'] = $body;
@@ -206,15 +225,15 @@ class PayArcClient
         $connectedFingerprint = $this->settings->connected_fingerprint();
         $currentFingerprint = $this->settings->connection_fingerprint();
         if ($connectedMode !== '' && $connectedMode !== $this->settings->mode()) {
-            throw new RuntimeException('PayArc Connect AccessToken does not match the selected PayArc mode. Press Connect PayArc after changing mode before taking payments.');
+            throw new PayArcNotSentException('PayArc Connect AccessToken does not match the selected PayArc mode. Press Connect PayArc after changing mode before taking payments.');
         }
 
         if ($connectedFingerprint !== '' && !hash_equals($connectedFingerprint, $currentFingerprint)) {
-            throw new RuntimeException('PayArc Connect AccessToken does not match the saved PayArc credentials. Press Connect PayArc after changing credentials before taking payments.');
+            throw new PayArcNotSentException('PayArc Connect AccessToken does not match the saved PayArc credentials. Press Connect PayArc after changing credentials before taking payments.');
         }
 
         if ($this->settings->mode() === 'production' && ($connectedMode !== 'production' || $connectedFingerprint === '')) {
-            throw new RuntimeException('PayArc Live mode requires a Live Connect AccessToken. Press Connect PayArc in Live mode before taking payments.');
+            throw new PayArcNotSentException('PayArc Live mode requires a Live Connect AccessToken. Press Connect PayArc in Live mode before taking payments.');
         }
     }
 

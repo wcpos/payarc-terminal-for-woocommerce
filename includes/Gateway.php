@@ -10,7 +10,8 @@ trait GatewayImplementation
         $this->method_title = 'PayArc Terminal';
         $this->method_description = 'PayArc PAX terminal payments for WooCommerce POS.';
         $this->has_fields = true;
-        $this->supports = array('products');
+        // Refunds of a payment WCPOS Pro's ledger holds go through Pro to PayArc's terminal refund.
+        $this->supports = array('products', 'refunds');
 
         if (function_exists('add_action')) {
             add_action('woocommerce_update_options_payment_gateways_' . $this->id, array($this, 'process_admin_options'));
@@ -24,20 +25,44 @@ trait GatewayImplementation
 
         $this->title = $this->gateway_option('title', 'PayArc Terminal');
         $this->description = $this->gateway_option('description', 'Pay in person at a PayArc PAX terminal.');
-        $this->enabled = $this->gateway_option('enabled', 'no');
+    }
+
+    /**
+     * The gateway is POS-only: a PayArc terminal is driven by staff, never by a shopper.
+     *
+     * Available on a POS request, and on the order-pay page to a user who may run the POS when the
+     * POS has the gateway switched on; never on the shop's checkout. The WooCommerce → Payments
+     * checkbox that governed the shop's checkout is gone, and a value a site saved for it counts
+     * for nothing.
+     *
+     * @return bool
+     */
+    public function is_available()
+    {
+        $settings = new Settings();
+        if ($settings->tenant_id() === '' || $settings->default_terminal_id() === '') {
+            return false;
+        }
+        if (function_exists('woocommerce_pos_request') && woocommerce_pos_request()) {
+            return true;
+        }
+
+        return function_exists('is_checkout_pay_page') && is_checkout_pay_page()
+            && function_exists('current_user_can') && current_user_can('access_woocommerce_pos')
+            && Settings::enabled_for_pos();
     }
 
     public function init_form_fields(): void
     {
         $settings = new Settings();
 
+        // No "enabled" checkbox: the gateway is POS-only (see is_available()), and the switch for that
+        // is in POS → Settings → Checkout. The web checkout the checkbox governed is gone.
         $this->form_fields = array(
-            'enabled' => array(
-                'title' => 'Enable/Disable',
-                'type' => 'checkbox',
-                'label' => 'Enable PayArc Terminal on the online checkout',
-                'description' => 'Most stores leave this unchecked. WooCommerce POS manages its own payment gateways for in-store terminal payments, so this setting only controls whether online shoppers see PayArc Terminal at the website checkout.',
-                'default' => 'no',
+            'section_pos' => array(
+                'title' => 'Where to switch it on',
+                'type' => 'title',
+                'description' => 'For staff on the POS only; never offered on the shop\'s checkout. Switch it on in POS → Settings → Checkout. The Enabled toggle on the Payments list has no effect.',
             ),
             'title' => array(
                 'title' => 'Title',
@@ -147,12 +172,16 @@ trait GatewayImplementation
 
     /**
      * @param array<string, mixed> $settings
+     * The connection checks apply when the POS has the gateway switched on (the only switch there is);
+     * a saved value of the old web-checkout checkbox counts for nothing.
+     *
+     * @param bool|null $enabled The POS switch; null reads it.
      * @return string[]
      */
-    public static function validate_settings(array $settings): array
+    public static function validate_settings(array $settings, ?bool $enabled = null): array
     {
         $errors = array();
-        $enabled = self::setting_string($settings, 'enabled') === 'yes';
+        $enabled = $enabled === null ? Settings::enabled_for_pos() : $enabled;
         $mode = self::setting_string($settings, 'mode', 'test');
         $tenantId = self::tenant_id_from_settings($settings);
         $terminalId = self::setting_string($settings, 'default_terminal_id');
@@ -186,11 +215,11 @@ trait GatewayImplementation
         }
 
         if ($enabled && $tenantId === '') {
-            $errors[] = 'PayArc MID (or tenant id) is required when the gateway is enabled.';
+            $errors[] = 'PayArc MID (or tenant id) is required when the POS has the gateway switched on.';
         }
 
         if ($enabled && $terminalId === '') {
-            $errors[] = 'Enter the PayArc terminal serial number before enabling the gateway.';
+            $errors[] = 'Enter the PayArc terminal serial number before switching the gateway on in the POS.';
         }
 
         if (!in_array($tenderType, array('CREDIT', 'DEBIT'), true)) {
@@ -342,6 +371,11 @@ trait GatewayImplementation
             return array('result' => 'failure');
         }
 
+        if (Settings::uses_pro_panel()) {
+            // Pro's panel drives the leg and reads the ledger; it answers the form submit.
+            return wcpos_pro_order_pay_process($order);
+        }
+
         if (method_exists($order, 'is_paid') && $order->is_paid()) {
             return array(
                 'result' => 'success',
@@ -367,6 +401,43 @@ trait GatewayImplementation
     {
         $order = $this->current_payment_order();
         $orderId = $order !== null ? $this->order_id($order) : 0;
+
+        if (Settings::uses_pro_panel()) {
+            if ($order === null) {
+                echo '<p class="patwc-payment__help">' . $this->escape_html('Open this page from the order to take a PayArc Terminal payment.') . '</p>';
+
+                return;
+            }
+            // A sale the old panel left on this order (the upgrade pass has not reached it) is Pro's
+            // before the panel can offer a second charge. Any refusal leaves that sale open and
+            // unowned, so no panel: while a till holds the order, a completion is in flight or PayArc
+            // has yet to answer, the page asks for a moment; a sale PayArc cannot see under the current
+            // credentials, or one Pro refused, is for staff to check.
+            $adopted = Legacy_Adoption::adopt_order($orderId);
+            if (is_wp_error($adopted)) {
+                if ($adopted->get_error_code() === 'patwc_adoption_awaiting_trace') {
+                    $message = 'PayArc accepted an earlier payment on this order without a reference, so it cannot be followed from here. Check the terminal first: it may have taken the payment. Reload the page in a moment; after half an hour the attempt is closed and noted on the order.';
+                } elseif ($adopted->get_error_code() === 'patwc_adoption_unanswered') {
+                    $message = 'PayArc did not answer when an earlier payment on this order was checked. Reload the page in a moment.';
+                } elseif (Legacy_Adoption::is_deferral($adopted)) {
+                    $message = 'Another request is handling this order. Reload the page in a moment.';
+                } elseif ($adopted->get_error_code() === 'patwc_adoption_conflict') {
+                    $message = 'An earlier PayArc Terminal sale on this order does not match the order (see the order notes). Check it in the PayArc dashboard and settle the order by hand before taking payment again.';
+                } elseif ($adopted->get_error_code() === 'patwc_adoption_stale_attempt' || $adopted->get_error_code() === 'patwc_adoption_unreadable') {
+                    $message = 'An earlier PayArc Terminal payment on this order cannot be read under the current PayArc credentials. Check it in the PayArc dashboard under the mode that took it. To take payment here, switch PayArc back to that mode, press Connect PayArc, and reload; or take the payment another way.';
+                } else {
+                    $message = 'A PayArc Terminal payment is still open on this order and could not be handed to WooCommerce POS. Check it in the PayArc dashboard before taking payment again.';
+                }
+                echo '<p class="patwc-payment__help">' . $this->escape_html($message) . '</p>';
+
+                return;
+            }
+            // Adoption worked on a reloaded copy; the panel reads the ledger and the payment state fresh.
+            wcpos_pro_order_pay_panel($this, PaymentReconciler::reload_order($order));
+
+            return;
+        }
+
         $authorized = $order !== null && $this->viewer_can_access_order($order);
 
         if ($order !== null) {
@@ -401,6 +472,53 @@ trait GatewayImplementation
     }
 
     /**
+     * Refund through WCPOS Pro when its ledger holds the payment.
+     *
+     * A leg Pro drove (server or device, authorized or captured) refunds through Pro to PayArc's
+     * terminal refund command. A payment the old panel completed is not in Pro's ledger as a
+     * refundable row, and this plugin never refunded from WooCommerce: as before, it is refunded
+     * from the PayArc dashboard or the terminal.
+     *
+     * @param int        $order_id
+     * @param float|null $amount
+     * @param string     $reason
+     * @return bool|\WP_Error
+     */
+    public function process_refund($order_id, $amount = null, $reason = '')
+    {
+        $order = function_exists('wc_get_order') ? wc_get_order($order_id) : null;
+        if (!is_object($order)) {
+            return new \WP_Error('patwc_invalid_order', 'Invalid order.');
+        }
+        if (self::has_counting_row($order) && function_exists('wcpos_pro_order_pay_refund')) {
+            return wcpos_pro_order_pay_refund($order, $amount, (string) $reason);
+        }
+
+        return new \WP_Error('patwc_refund_in_payarc', 'This PayArc payment was taken by the plugin\'s own order-pay panel; refund it from the PayArc dashboard or the terminal.');
+    }
+
+    /**
+     * Whether Pro's ledger holds a counting (authorized or captured) server or device row for this
+     * gateway: a leg Pro drove and can refund.
+     *
+     * @param object $order
+     */
+    private static function has_counting_row($order): bool
+    {
+        $ledger = '\\WCPOS\\WooCommercePOS\\Payments\\Contract\\Ledger';
+        if (!class_exists($ledger)) {
+            return false;
+        }
+        foreach ($ledger::instance()->read($order) as $row) {
+            if (($row['method_id'] ?? null) === Settings::GATEWAY_ID && in_array($row['status'] ?? '', $ledger::COUNTING_STATUSES, true) && in_array($row['capture_mode'] ?? '', array('server', 'device'), true)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * @return array<string, string>
      */
     private function posted_settings(): array
@@ -412,10 +530,6 @@ trait GatewayImplementation
         foreach ($this->form_fields as $key => $field) {
             $postedKey = $prefix . $key;
             $value = array_key_exists($postedKey, $data) ? $data[$postedKey] : (array_key_exists($key, $data) ? $data[$key] : null);
-
-            if ($key === 'enabled' && $value === null) {
-                $value = 'no';
-            }
 
             if (is_scalar($value)) {
                 $settings[$key] = trim((string) $value);

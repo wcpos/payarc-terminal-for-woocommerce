@@ -157,6 +157,11 @@ class PaymentAttempt
             return false;
         }
 
+        // A sale WCPOS Pro's base has on a terminal holds the same guard as the old panel's attempts.
+        if (class_exists('\\WCPOS\\WooCommercePOS\\PayArcTerminal\\Server\\Sale_Guard') && \WCPOS\WooCommercePOS\PayArcTerminal\Server\Sale_Guard::any_live()) {
+            return true;
+        }
+
         $index = get_option(self::OPTION_IN_FLIGHT_ATTEMPTS, array());
         if (!is_array($index)) {
             return false;
@@ -168,6 +173,22 @@ class PaymentAttempt
         }
 
         return count($active) > 0;
+    }
+
+    /**
+     * Whether the in-flight guard still counts this order's attempt: live, and younger than the
+     * window within which the mode and credentials cannot change.
+     *
+     * @param object $order WooCommerce order-like object.
+     */
+    public static function is_in_flight($order): bool
+    {
+        if (!function_exists('get_option')) {
+            return false;
+        }
+        $index = get_option(self::OPTION_IN_FLIGHT_ATTEMPTS, array());
+
+        return is_array($index) && isset(self::active_in_flight_index($index)[(string) self::order_id($order)]);
     }
 
     /**

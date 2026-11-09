@@ -4,6 +4,7 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Services;
 
 use RuntimeException;
 use Throwable;
+use WCPOS\WooCommercePOS\PayArcTerminal\Legacy_Adoption;
 use WCPOS\WooCommercePOS\PayArcTerminal\Logger;
 use WCPOS\WooCommercePOS\PayArcTerminal\PaymentAttempt;
 use WCPOS\WooCommercePOS\PayArcTerminal\PaymentLock;
@@ -57,6 +58,13 @@ class PayArcPaymentService
         }
 
         return PaymentLock::with_lock($this->order_id($order), 'terminal', function () use ($order, $terminal_id): array {
+            // Under Pro's panel no old-panel start is accepted at all (a stale tab must not put a second
+            // sale on a terminal beside Pro's leg), nor beside a live Pro row however the page renders.
+            // Judged under the lock, on a fresh read: a tab that passed before adoption may have waited.
+            $order = PaymentReconciler::reload_order($order);
+            if (Settings::uses_pro_panel() || Legacy_Adoption::pro_has_live_row($order)) {
+                return self::handled_by_pos();
+            }
             $current = PaymentAttempt::current($order);
             $currentStatus = isset($current['status']) ? (string) $current['status'] : '';
 
@@ -162,6 +170,9 @@ class PayArcPaymentService
         return PaymentLock::with_lock($this->order_id($order), self::RECONCILIATION_LOCK, function () use ($order): array {
             // Another request may have completed the order since this one loaded it (#23).
             $order = PaymentReconciler::reload_order($order);
+            if (Legacy_Adoption::owns_order($order)) {
+                return self::handled_by_pos(); // Pro polls and settles its own leg.
+            }
             $attempt = PaymentAttempt::current($order);
             $status = isset($attempt['status']) ? (string) $attempt['status'] : 'created';
             $traceId = isset($attempt['trace_id']) && is_scalar($attempt['trace_id']) ? trim((string) $attempt['trace_id']) : '';
@@ -220,6 +231,9 @@ class PayArcPaymentService
         return PaymentLock::with_lock($this->order_id($order), 'terminal', function () use ($order): array {
             // Another request may have completed the order since this one loaded it (#23).
             $order = PaymentReconciler::reload_order($order);
+            if (Legacy_Adoption::owns_order($order)) {
+                return self::handled_by_pos(); // Pro cancels its own leg; the old panel may not.
+            }
             $attempt = PaymentAttempt::current($order);
             $status = isset($attempt['status']) ? (string) $attempt['status'] : 'created';
             $traceId = isset($attempt['trace_id']) && is_scalar($attempt['trace_id']) ? trim((string) $attempt['trace_id']) : '';
@@ -273,6 +287,22 @@ class PayArcPaymentService
 
             return $updated;
         });
+    }
+
+    /**
+     * The answer to an old-panel request for a payment WCPOS Pro drives: the script stops and tells
+     * the cashier to reload, where Pro's panel takes over.
+     *
+     * @return array<string, mixed>
+     */
+    public static function handled_by_pos(): array
+    {
+        return array(
+            'status' => 'handled_by_pos',
+            'message' => 'This payment is handled by WooCommerce POS. Reload the page.',
+            'handled_by_pos' => true,
+            'continue_polling' => false,
+        );
     }
 
     /**

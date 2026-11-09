@@ -245,7 +245,10 @@ class AjaxHandler
             return $this->maybe_emit($this->error_response(500, 'Unable to process payment request.'), $emit);
         }
 
-        return $this->maybe_emit(array('status_code' => 200, 'body' => $this->normalize_body($body, $action)), $emit);
+        // A payment WCPOS Pro drives: 409, and the script stops.
+        $statusCode = !empty($body['handled_by_pos']) ? 409 : 200;
+
+        return $this->maybe_emit(array('status_code' => $statusCode, 'body' => $this->normalize_body($body, $action)), $emit);
     }
 
 
@@ -665,7 +668,7 @@ class AjaxHandler
             }
         }
 
-        foreach (array('continue_polling', 'submit_form', 'retry_allowed') as $key) {
+        foreach (array('continue_polling', 'submit_form', 'retry_allowed', 'handled_by_pos') as $key) {
             if (array_key_exists($key, $body)) {
                 $public[$key] = (bool) $body[$key];
             }

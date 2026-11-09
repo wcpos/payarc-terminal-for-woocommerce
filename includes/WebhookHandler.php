@@ -122,6 +122,16 @@ class WebhookHandler
         }
 
         $lockedResponse = PaymentLock::with_lock($this->order_id($order), self::RECONCILIATION_LOCK, function () use ($order, $traceId): array {
+            // A sale WCPOS Pro adopted from the old panel, while Pro's leg is live, is settled by Pro
+            // alone (its own route polls the sale): this route must not complete it a second time.
+            // Once Pro's leg has ended without money, this route acts again, as before.
+            $order = PaymentReconciler::reload_order($order);
+            if (Legacy_Adoption::owns_order($order)) {
+                Legacy_Adoption::close_if_captured($order); // Pro captured it: the old attempt is finished too.
+
+                return $this->response(202, array('status' => 'handled_by_pos'));
+            }
+
             return $this->fetch_and_reconcile($order, $traceId);
         });
 
