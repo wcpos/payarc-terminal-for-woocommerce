@@ -61,6 +61,7 @@ final class Sale_Guard
      * the value read from the table proved stale, and only if it is still that value. When the
      * table cannot be read (wpdb answers with an empty array and last_error), a sale is assumed
      * live: the guard fails closed.
+     * A stale row the delete did not remove is read again, and counts as live when it was renewed in the meantime or cannot be read.
      */
     public static function any_live(): bool
     {
@@ -83,14 +84,32 @@ final class Sale_Guard
                 continue;
             }
             // Stale: housekeeping on the way past, and only if the row is still what was read.
-            $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s", (string) $row['option_name'], $raw));
+            $deleted = $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s", (string) $row['option_name'], $raw));
             if (function_exists('wp_cache_delete')) {
                 wp_cache_delete((string) $row['option_name'], 'options');
                 wp_cache_delete('notoptions', 'options');
             }
+            if ($deleted === false) {
+                $live = true;
+                continue;
+            }
+            if ($deleted !== 1 && self::renewed((string) $row['option_name'])) {
+                $live = true;
+            }
         }
 
         return $live;
+    }
+
+    private static function renewed(string $option_name): bool
+    {
+        global $wpdb;
+        $raw = $wpdb->get_var($wpdb->prepare("SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $option_name));
+        if ((string) ($wpdb->last_error ?? '') !== '') {
+            return true;
+        }
+
+        return $raw !== null && self::fresh(is_serialized((string) $raw) ? @unserialize((string) $raw) : $raw) !== null;
     }
 
     private static function option($row_id): string
