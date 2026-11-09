@@ -24,7 +24,8 @@ use WCPOS\WooCommercePOS\PayArcTerminal\Services\PayArcRequestException;
  * makes no HTTP call): a final answer settles it through the old reconciler, a sale still on the
  * terminal is adopted, and a sale PayArc cannot see under the current credentials, or refuses to
  * show, holds the panel back. It is never adopted: Pro's adopted row carries a five-minute deadline,
- * and the adapter's cancel of a sale PayArc cannot find answers "requested" for ever.
+ * and the adapter's cancel of a sale PayArc cannot find answers "requested" for ever. A sale the old
+ * reconciler found not to match the order holds the panel back on every render until the order is paid.
  */
 final class Legacy_Adoption
 {
@@ -304,6 +305,11 @@ final class Legacy_Adoption
         }
         if (self::close_if_captured($order)) {
             return null;
+        }
+        // A sale the old reconciler found not to match stays a conflict on every render until the order is paid.
+        $mismatch = $order->needs_payment() && !$order->is_paid() ? $order->get_meta(PaymentReconciler::META_VERIFICATION_FAILURE, true) : '';
+        if (is_string($mismatch) && $mismatch !== '') {
+            return new \WP_Error('patwc_adoption_conflict', $mismatch);
         }
         if (!self::has_live_pointer($order) || self::is_adopted(self::action_ref($order)) || $order->is_paid() || !$order->needs_payment()) {
             return null;

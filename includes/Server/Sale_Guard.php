@@ -10,6 +10,7 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Server;
  * each other's, and any_live() finds every marker by its option-name prefix in the table itself. A marker goes stale
  * after thirty minutes, well past Free's deadline, so none holds for ever; stale ones are deleted
  * as any_live() passes them.
+ * A refund part whose POST went unanswered holds a marker too, under Refund_Reask::guard_id(), until a replay is answered, refused or given up.
  */
 final class Sale_Guard
 {

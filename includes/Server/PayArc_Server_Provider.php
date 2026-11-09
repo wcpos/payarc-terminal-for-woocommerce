@@ -54,6 +54,12 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
         $this->terminals = $terminals === null ? new TerminalService($this->settings) : $terminals;
     }
 
+    /** The connection a refund replay must match. */
+    public function connection_fingerprint(): string
+    {
+        return $this->settings->connection_fingerprint();
+    }
+
     public function provider(): string
     {
         return self::PROVIDER;
@@ -334,10 +340,13 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
                 'metadata' => array('wcpos_refund_id' => (string) $refund->get_id(), 'wcpos_refund_row' => $row_id, 'order_id' => (string) $order->get_id()),
             );
             // Saved before the POST: a replay of the record, for this row, asks under the same key.
-            $key = Refund_Reask::attempt_key($refund, $row_id, $request);
+            $key = Refund_Reask::attempt_key($refund, $row_id, $request, $this->settings->connection_fingerprint());
+            // An unanswered refund POST holds the settings guard until a replay is answered.
+            Sale_Guard::hold(Refund_Reask::guard_id($refund_id, $row_id), (int) $order->get_id(), $request);
             $trace_id = $this->refund_once($request, $key);
             $refund->update_meta_data(Refund_Reask::key(Refund_Reask::META_TRACE, $row_id), $trace_id);
             $refund->save();
+            Sale_Guard::release(Refund_Reask::guard_id($refund_id, $row_id));
             // The terminal decides; a quick read may already know.
             try {
                 $observation = $this->read_refund($trace_id, $refund_id, $row_id);
@@ -354,11 +363,17 @@ class PayArc_Server_Provider extends Abstract_Provider_Adapter
 
             return array('status' => 'pending', 'provider_ref' => $trace_id);
         } catch (PayArcNotSentException $e) {
+            if ($key !== null) {
+                Sale_Guard::release(Refund_Reask::guard_id($refund_id, $row_id));
+            }
             return self::provider_error($e, 'payarc_configuration', 400); // Nothing left the server, key or no key.
         } catch (PayArcRequestException $e) {
             if ($key !== null && (self::unanswered($e) || self::idempotency_conflict($e))) {
                 // Unanswered, or a command under this key exists already: its traceId is asked for.
                 return $this->refund_unanswered($order, $refund_id, $row_id, $e);
+            }
+            if ($key !== null) {
+                Sale_Guard::release(Refund_Reask::guard_id($refund_id, $row_id));
             }
 
             return self::unanswered($e) ? $this->indeterminate('payarc_unanswered', $e->getMessage()) : self::provider_error($e);
