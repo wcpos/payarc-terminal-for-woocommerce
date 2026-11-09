@@ -636,5 +636,60 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
         check($refund->get_meta('_patwc_refund_outcome:r') === 'success' && count($GLOBALS['orders'][99]->notes) === 2 && strpos($GLOBALS['orders'][99]->notes[1], 'PayArc confirmed refund #505') !== false, 'matching_read_confirms_unverified_' . $case);
     }
 
+    // An unanswered refund holds the connection guard; a replay must use its saved connection.
+    reset(); $refund = new \WC_Order_Refund(601); $refund->parent = 99; $GLOBALS['orders'][601] = $refund;
+    $c = new QueueClient(); $c->queue = array(new \RuntimeException('PayArc request failed before receiving a response.'));
+    $r = adapter($c)->refund($leg, 601, '5.00');
+    check($r['status'] === 'pending' && PaymentAttempt::has_in_flight_attempts() && Sale_Guard::held(Refund_Reask::guard_id(601, 'r'))['payload'] === $c->calls[0][1][0], 'lost_refund_holds_connection_guard');
+    $c = new QueueClient(); $c->queue = array(array('traceId' => 'x'));
+    $other = new PayArc_Server_Provider(new Settings(array('mode' => 'test', 'connect_mid' => '123456789012', 'connect_secret_key' => 'other', 'default_terminal_id' => '1234567890', 'terminal_registry' => array(array('terminal_id' => '1234567890', 'label' => 'Front')), 'callback_url_token' => 'urltok', 'callback_bearer_token' => 'bearertok', 'tender_type' => 'CREDIT', 'print_receipt' => '0')), $c);
+    Refund_Reask::run(601, 1, 99, 'r', $other);
+    $note = end($GLOBALS['orders'][99]->notes);
+    check($c->calls === array() && !PaymentAttempt::has_in_flight_attempts() && strpos($note, 'connection settings changed') !== false && strpos($note, 'Check the PayArc dashboard') !== false && !in_array(array('patwc_reask_refund', array(601, 2, 99, 'r')), $GLOBALS['events'], true), 'changed_connection_never_replays_refund');
+
+    reset(); $refund = new \WC_Order_Refund(602); $refund->parent = 99; $GLOBALS['orders'][602] = $refund;
+    $c = new QueueClient(); $c->queue = array(new \RuntimeException('PayArc request failed before receiving a response.'));
+    adapter($c)->refund($leg, 602, '5.00');
+    $c = new QueueClient(); $c->queue = array(array('traceId' => 'rfG'));
+    Refund_Reask::run(602, 1, 99, 'r', adapter($c));
+    check(count($c->calls) === 1 && !PaymentAttempt::has_in_flight_attempts(), 'answered_refund_replay_releases_guard');
+
+    reset(); $refund = new \WC_Order_Refund(603); $refund->parent = 99; $GLOBALS['orders'][603] = $refund;
+    $c = new QueueClient(); $c->queue = array(new \RuntimeException('PayArc request failed before receiving a response.'));
+    adapter($c)->refund($leg, 603, '5.00');
+    $c = new QueueClient(); $c->queue = array(new PayArcRequestException('no', 'INVALID_REQUEST', 400));
+    Refund_Reask::run(603, 1, 99, 'r', adapter($c));
+    check(!PaymentAttempt::has_in_flight_attempts(), 'refused_refund_replay_releases_guard');
+
+    reset(); $refund = new \WC_Order_Refund(604); $refund->parent = 99; $GLOBALS['orders'][604] = $refund;
+    $c = new QueueClient(); $c->queue = array(new \RuntimeException('PayArc request failed before receiving a response.'));
+    adapter($c)->refund($leg, 604, '5.00');
+    $c = new QueueClient(); $c->queue = array(new \RuntimeException('lost'));
+    Refund_Reask::run(604, 1, 99, 'r', adapter($c));
+    check(PaymentAttempt::has_in_flight_attempts() && Sale_Guard::held(Refund_Reask::guard_id(604, 'r')) !== null, 'unanswered_refund_replay_keeps_guard');
+    $c = new QueueClient(); $c->queue = array(new \RuntimeException('lost'));
+    Refund_Reask::run(604, Refund_Reask::LIMIT, 99, 'r', adapter($c));
+    check(!PaymentAttempt::has_in_flight_attempts() && strpos(end($GLOBALS['orders'][99]->notes), 'has not confirmed') !== false, 'exhausted_refund_reask_releases_guard');
+
+    reset(); $refund = new \WC_Order_Refund(605); $refund->parent = 99; $GLOBALS['orders'][605] = $refund;
+    $GLOBALS['schedule_false'] = true;
+    $c = new QueueClient(); $c->queue = array(new \RuntimeException('PayArc request failed before receiving a response.'));
+    $r = adapter($c)->refund($leg, 605, '5.00');
+    check($r['status'] === 'pending' && !PaymentAttempt::has_in_flight_attempts(), 'unscheduled_refund_reask_releases_guard');
+    $GLOBALS['schedule_false'] = false;
+
+    reset(); $refund = new \WC_Order_Refund(606); $refund->parent = 99; $GLOBALS['orders'][606] = $refund;
+    $c = new QueueClient(); $c->queue = array(array('traceId' => 'rfA'), array('status' => 'processing', 'traceId' => 'rfA'));
+    adapter($c)->refund($leg, 606, '5.00');
+    check(!PaymentAttempt::has_in_flight_attempts(), 'accepted_refund_holds_no_guard');
+
+    reset(); $refund = new \WC_Order_Refund(607); $refund->parent = 99; $GLOBALS['orders'][607] = $refund;
+    $refund->meta['_patwc_refund_attempt:r'] = 'legacy-key';
+    $refund->meta['_patwc_refund_request:r'] = array('originalTransactionId' => 'P1ABCDEF12345678');
+    $c = new QueueClient(); $c->queue = array(array('traceId' => 'rfL'));
+    $other = new PayArc_Server_Provider(new Settings(array('mode' => 'test', 'connect_mid' => '123456789012', 'connect_secret_key' => 'other', 'default_terminal_id' => '1234567890', 'terminal_registry' => array(array('terminal_id' => '1234567890', 'label' => 'Front')), 'callback_url_token' => 'urltok', 'callback_bearer_token' => 'bearertok', 'tender_type' => 'CREDIT', 'print_receipt' => '0')), $c);
+    Refund_Reask::run(607, 1, 99, 'r', $other);
+    check(count($c->calls) === 1 && $c->calls[0][1][1] === 'legacy-key' && $refund->get_meta('_patwc_refund_trace_id:r') === 'rfL', 'legacy_refund_record_replays');
+
     echo "server-adapter cases passed\n";
 }

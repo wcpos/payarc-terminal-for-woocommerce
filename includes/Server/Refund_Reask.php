@@ -39,6 +39,8 @@ final class Refund_Reask
     public const META_ATTEMPT = '_patwc_refund_attempt';
     /** The request replayed on each ask. */
     public const META_REQUEST = '_patwc_refund_request';
+    /** The connection fingerprint at the first POST; a replay under another connection is not sent. */
+    public const META_CONNECTION = '_patwc_refund_connection';
     /** The PayArc traceId once PayArc accepted the refund command. */
     public const META_TRACE = '_patwc_refund_trace_id';
 
@@ -46,6 +48,12 @@ final class Refund_Reask
     public static function key(string $base, string $row_id): string
     {
         return $base . ':' . $row_id;
+    }
+
+    /** The Sale_Guard id for one refund part. */
+    public static function guard_id(int $refund_id, string $row_id): string
+    {
+        return 'refund:' . $refund_id . ':' . $row_id;
     }
 
     public static function register(): void
@@ -161,13 +169,14 @@ final class Refund_Reask
      * @param object $refund
      * @param array<string, mixed> $request
      */
-    public static function attempt_key($refund, string $row_id, array $request): string
+    public static function attempt_key($refund, string $row_id, array $request, string $connection = ''): string
     {
         $key = (string) $refund->get_meta(self::key(self::META_ATTEMPT, $row_id), true);
         if ($key === '') {
             $key = wp_generate_uuid4();
             $refund->update_meta_data(self::key(self::META_ATTEMPT, $row_id), $key);
             $refund->update_meta_data(self::key(self::META_REQUEST, $row_id), $request);
+            $refund->update_meta_data(self::key(self::META_CONNECTION, $row_id), $connection);
             $refund->save();
         }
 
@@ -182,6 +191,9 @@ final class Refund_Reask
     public static function unanswered($order, int $refund_id, string $row_id): void
     {
         $scheduled = self::schedule($refund_id, 1, (int) $order->get_id(), $row_id);
+        if (!$scheduled) {
+            Sale_Guard::release(self::guard_id($refund_id, $row_id));
+        }
         $order->add_order_note(sprintf(
             $scheduled
                 /* translators: %d: refund id. */
@@ -210,6 +222,7 @@ final class Refund_Reask
     {
         $refund = wc_get_order($refund_id);
         if (!$refund instanceof \WC_Order_Refund) {
+            Sale_Guard::release(self::guard_id($refund_id, $row_id));
             $order = $order_id ? wc_get_order($order_id) : null;
             if ($order) {
                 /* translators: %d: refund id. */
@@ -220,19 +233,36 @@ final class Refund_Reask
         }
         $order = wc_get_order((int) $refund->get_parent_id());
         if (!$order) {
+            Sale_Guard::release(self::guard_id($refund_id, $row_id));
             return;
         }
         if ((string) $refund->get_meta(self::key(self::META_TRACE, $row_id), true) !== '') {
+            Sale_Guard::release(self::guard_id($refund_id, $row_id));
             self::schedule_outcome($refund, $row_id);
             return;
         }
         $key = (string) $refund->get_meta(self::key(self::META_ATTEMPT, $row_id), true);
         $request = (array) $refund->get_meta(self::key(self::META_REQUEST, $row_id), true);
         if ($key === '' || empty($request['originalTransactionId'])) {
+            Sale_Guard::release(self::guard_id($refund_id, $row_id));
             return;
         }
         $adapter = $adapter === null ? new PayArc_Server_Provider() : $adapter;
+        $saved = (string) $refund->get_meta(self::key(self::META_CONNECTION, $row_id), true);
+        if ($saved !== '' && !hash_equals($saved, $adapter->connection_fingerprint())) {
+            Sale_Guard::release(self::guard_id($refund_id, $row_id));
+            Logger::log('PayArc connection changed before a refund was confirmed; not replayed', array('refund_id' => $refund_id), null, 'warning');
+            $order->add_order_note(sprintf(
+                /* translators: 1: the refund part, e.g. "refund #12 (92.95 USD)"; 2: the advice when the refund is not on the dashboard. */
+                __('The PayArc connection settings changed before PayArc confirmed %1$s, so it was not sent again. Check the PayArc dashboard. If that refund is there, nothing more is needed. Only if it is not there was that part never returned; the record still counts it as refunded here.%2$s', 'payarc-terminal-for-woocommerce'),
+                self::part_label($refund_id, $row_id, $refund),
+                self::other_parts_hint($row_id, $refund)
+            ));
+            $order->save();
+            return;
+        }
         try {
+            Sale_Guard::hold(self::guard_id($refund_id, $row_id), (int) $order->get_id(), $request);
             $trace_id = $adapter->refund_once($request, $key);
         } catch (PayArcNotSentException $e) {
             // Nothing left the server (credentials, mode or Connect state): ask again later, when it may.
@@ -246,6 +276,7 @@ final class Refund_Reask
             }
             // Refused: had the first request been accepted, the identical replay would have been answered
             // with its traceId instead. No refund command reached the terminal.
+            Sale_Guard::release(self::guard_id($refund_id, $row_id));
             $order->add_order_note(self::part_not_returned_note($refund_id, $row_id, $refund, sprintf(
                 /* translators: %s: PayArc error code. */
                 __('PayArc refused it (%s), so no command reached the terminal', 'payarc-terminal-for-woocommerce'),
@@ -259,6 +290,7 @@ final class Refund_Reask
         }
         $refund->update_meta_data(self::key(self::META_TRACE, $row_id), $trace_id);
         $refund->save();
+        Sale_Guard::release(self::guard_id($refund_id, $row_id));
         self::schedule_outcome($refund, $row_id);
         /* translators: 1: refund id, 2: PayArc traceId. */
         $order->add_order_note(sprintf(__('PayArc accepted refund #%1$d (trace %2$s); the terminal reports its outcome.', 'payarc-terminal-for-woocommerce'), $refund_id, $trace_id));
@@ -274,6 +306,7 @@ final class Refund_Reask
             return;
         }
         // Out of tries, or the next ask could not be scheduled: staff are told now.
+        Sale_Guard::release(self::guard_id($refund_id, $row_id));
         Logger::log('PayArc never answered a refund; staff asked to check the dashboard', array('refund_id' => $refund_id), null, 'warning');
         $refund = wc_get_order($refund_id);
         $order->add_order_note(sprintf(
