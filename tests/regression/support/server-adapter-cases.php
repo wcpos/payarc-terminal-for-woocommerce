@@ -213,8 +213,19 @@ namespace WCPOS\WooCommercePOS\PayArcTerminal\Tests\Regression {
     $GLOBALS['notoptions'] = array(); unset($GLOBALS['options']['patwc_pro_sale_' . md5('other-process')]); Sale_Guard::release($row['id']);
     $GLOBALS['options']['patwc_pro_sale_' . md5('late')] = array('order_id' => 1, 'trace_id' => '', 'payload' => array(), 'updated_at' => time() - 1801);
     $GLOBALS['wpdb']->before_delete = static function () { Sale_Guard::hold('late', 1, array('again' => true)); };
-    check(!Sale_Guard::any_live() && Sale_Guard::held('late') !== null, 'a marker held again between the read and the delete survives the sweep');
+    check(Sale_Guard::any_live() && Sale_Guard::held('late') !== null, 'renewed_mid_sweep_marker_holds_guard: a marker held again between the read and the delete survives the sweep and holds the guard');
     Sale_Guard::release('late');
+    $GLOBALS['options']['patwc_pro_sale_' . md5('late2')] = array('order_id' => 1, 'trace_id' => '', 'payload' => array(), 'updated_at' => time() - 1801);
+    $GLOBALS['wpdb']->before_delete = static function () { Sale_Guard::release('late2'); };
+    check(!Sale_Guard::any_live(), 'released_mid_sweep_marker_holds_no_guard');
+    $GLOBALS['options']['patwc_pro_sale_' . md5('late3')] = array('order_id' => 1, 'trace_id' => '', 'payload' => array(), 'updated_at' => time() - 1801);
+    $GLOBALS['wpdb']->before_delete = static function () {
+        $GLOBALS['options']['patwc_pro_sale_' . md5('late3')] = array('order_id' => 1, 'trace_id' => '', 'payload' => array(), 'updated_at' => time() - 1900);
+        $GLOBALS['wpdb']->last_error = 'MySQL server has gone away';
+    };
+    check(Sale_Guard::any_live(), 'failed_mid_sweep_reread_holds_guard');
+    $GLOBALS['wpdb']->last_error = '';
+    unset($GLOBALS['options']['patwc_pro_sale_' . md5('late3')]);
     $GLOBALS['notoptions'] = array(); unset($GLOBALS['options']['patwc_pro_sale_' . md5('other-process')]);
     Sale_Guard::hold($row['id'], 99, $sent, 't1');
     $GLOBALS['options']['patwc_pro_sale_' . md5('old')] = array('order_id' => 1, 'trace_id' => '', 'payload' => array(), 'updated_at' => time() - 1801);
