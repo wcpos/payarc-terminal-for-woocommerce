@@ -353,13 +353,9 @@ class PaymentReconciler
     private function payload_amount_minor_units(array $payload): ?int
     {
         if (isset($payload['amount']) && is_array($payload['amount'])) {
-            foreach (array('approved', 'total') as $key) {
-                if (array_key_exists($key, $payload['amount'])) {
-                    return $this->parse_minor_unit_value($payload['amount'][$key]);
-                }
-            }
-
-            return null;
+            return array_key_exists('approved', $payload['amount'])
+                ? $this->parse_minor_unit_value($payload['amount']['approved'])
+                : null;
         }
 
         if (array_key_exists('amount', $payload)) {
