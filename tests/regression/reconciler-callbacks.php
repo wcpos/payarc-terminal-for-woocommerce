@@ -514,3 +514,28 @@ $redactedSummary = PaymentReconciler::failure_summary(array(
 ));
 patwc_reconciler_assert_true(strpos($redactedSummary, 'trace-12345') === false, 'Failure summary must redact secret-like provider values.');
 patwc_reconciler_assert_true(strpos($redactedSummary, '[REDACTED]') !== false, 'Failure summary must retain a redaction marker.');
+
+$missingApprovedOrder = new PatwcReconcilerCallbacksOrder(1102);
+PaymentAttempt::record_new($missingApprovedOrder, array('status' => 'processing', 'trace_id' => 'trace-1102', 'transaction_id' => 'txn-1102'));
+$missingApprovedPayload = patwc_reconciler_payload(array(
+    'traceId' => 'trace-1102',
+    'transactionId' => 'txn-1102',
+    'metadata' => array('order_id' => '1102'),
+));
+unset($missingApprovedPayload['amount']['approved']);
+$missingApproved = $reconciler->reconcile($missingApprovedOrder, $missingApprovedPayload, 'webhook');
+patwc_reconciler_assert_same('verification_failed', $missingApproved['status'], 'Missing approved amount should fail verification.');
+patwc_reconciler_assert_false($missingApprovedOrder->is_paid(), 'Missing approved amount should leave the order unpaid.');
+patwc_reconciler_assert_contains('approved amount is missing', $missingApprovedOrder->meta['_patwc_verification_failure'], 'Missing approved amount should store the verification failure.');
+
+$approvedOnlyOrder = new PatwcReconcilerCallbacksOrder(1103);
+PaymentAttempt::record_new($approvedOnlyOrder, array('status' => 'processing', 'trace_id' => 'trace-1103', 'transaction_id' => 'txn-1103'));
+$approvedOnlyPayload = patwc_reconciler_payload(array(
+    'traceId' => 'trace-1103',
+    'transactionId' => 'txn-1103',
+    'metadata' => array('order_id' => '1103'),
+));
+unset($approvedOnlyPayload['amount']['total']);
+$approvedOnly = $reconciler->reconcile($approvedOnlyOrder, $approvedOnlyPayload, 'webhook');
+patwc_reconciler_assert_same('success', $approvedOnly['status'], 'Approved amount without total should reconcile as success.');
+patwc_reconciler_assert_true($approvedOnlyOrder->is_paid(), 'Approved amount without total should mark the order paid.');
